@@ -18,6 +18,7 @@ in the OnlyOne app, and receive live events.
 | `create_task` | Hands work to an agent (default `lead`), optionally continuing a task (`follows`) |
 | `amend_task` | Adds your follow-up to an open task (a waiting task is woken) |
 | `cancel_task` (destructive) / `set_priority` / `reassign_task` | Stop a task; change its priority; give a not-yet-started task to another agent |
+| `upsert_member` / `upsert_routine` | Add or update a member (including a default Codex-generated or owner-attached avatar); add, reschedule or disable recurring work, without a code task or project |
 | `remember` | Writes a rule or preference into memory for the whole fleet or one agent |
 | `edit_memory` (destructive) | Corrects or deletes one memory entry |
 | `answer_decision` | Answers a card, like tapping an option |
@@ -64,7 +65,7 @@ isn't set up). The page names the app and the site it returns to; close it if yo
 The access token is an owner session, so revoking all sessions (`POST /api/host/revoke-sessions` with the machine
 key) cuts the connectors off too. Refresh tokens rotate on every use.
 
-Local clients can skip OAuth and send `Authorization: Bearer <session or HUB_TOKEN>`.
+Local clients can skip OAuth and send `Authorization: Bearer <session or ONLYONE_TOKEN>`.
 
 ## Claude
 
@@ -84,6 +85,6 @@ deep research (`search` / `fetch`).
 ```sh
 npx @modelcontextprotocol/inspector            # UI: Streamable HTTP, URL https://<your-onlyone>/mcp, OAuth flow
 # local end to end against wrangler dev:
-cd cloud && bunx wrangler dev --port 8799 --var HUB_TOKEN:machinetok
+cd cloud && bunx wrangler dev --port 8799 --var ONLYONE_TOKEN:machinetok
 BASE=http://localhost:8799 TOKEN=machinetok bun test/cloud-auth/mcp-e2e.ts
 ```

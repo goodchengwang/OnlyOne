@@ -186,7 +186,17 @@ You act through tools. Each turn, answer with exactly ONE JSON object and nothin
 How to decide:
 - Chit-chat, thanks, a quick question you can answer from the context below: just reply (no calls).
 - A status question (${L(`"how is X going", "what is running"`, `"X 怎么样了", "现在在跑什么"`)}): answer from the context if it is there; otherwise call read tools with
-  reply "" — you get their results next turn and answer then.
+  reply "" — you get their results next turn and answer then. Status questions are read-only: never amend or create a task just to request a progress report.
+- Adding/changing a team member, their name, responsibilities or avatar: upsert_member, never create_task, amend_task or remember.
+  This is team management, even inside a project channel or after a code task: no project/repo is needed. Use list_agents to find an existing member's id;
+  reuse it when changing them. For a new member choose an ASCII lowercase id such as "content-editor", even for a Chinese display name.
+  New members get a Codex-generated avatar by default. If an attached image is supplied as the avatar,
+  pass its absolute path from the owner's message as avatar_path. If the owner describes an avatar, pass avatar_prompt.
+- Adding/changing/disabling a recurring task: upsert_routine, never a code task. Translate the requested schedule to the tool's accepted format
+  in the coordinator host's local timezone (shown below); do not invent a time when none is provided, ask for it.
+  When one request adds both a member and a routine, call upsert_member first, then upsert_routine using that id.
+  These two tools run BEFORE your reply and return their actual results. Reply "" with these calls, then confirm only what succeeded.
+  On an error, explain it; do not claim success or silently replace the operation with a code task.
 - Real work (code, PR review, release prep, investigation, anything that takes more than a minute): create_task with a
   clear title and the owner's request in details (quote it; add the context that the agent needs, e.g. which PR/repo,
   and "follows" when it continues or corrects a task from the channel). Agents do the work; you never claim to do it.
@@ -214,7 +224,7 @@ The reply:
 - Never invent facts: if you did not see it in the context or a tool result, look it up or say you don't know.
 
 Tools (args as JSON; [w] = write):
-${BRAIN_TOOLS.map((t) => `- ${t.name}${t.write ? " [w]" : ""}: ${t.description} Args: ${JSON.stringify(Object.fromEntries(Object.entries(t.inputSchema.properties ?? {}).map(([k, v]: [string, any]) => [k, `${(t.inputSchema.required ?? []).includes(k) ? "" : "optional "}${v.enum ? v.enum.join("|") : v.type}`])))}`).join("\n")}
+${BRAIN_TOOLS.map((t) => `- ${t.name}${t.write ? " [w]" : ""}: ${t.description} Args: ${JSON.stringify(Object.fromEntries(Object.entries(t.inputSchema.properties ?? {}).map(([k, v]: [string, any]) => [k, `${(t.inputSchema.required ?? []).includes(k) ? "" : "optional "}${v.enum ? v.enum.join("|") : v.type}${(t.name === "upsert_member" || t.name === "upsert_routine") && v.description ? `: ${v.description}` : ""}`])))}`).join("\n")}
 After write calls only, you are done (they run after your reply is posted). After any read call or an error you get the
 results and answer again.`;
 
@@ -245,7 +255,8 @@ export function context(st: ToolStore, m: BrainIn): string {
   const mem = words.length ? st.list("memory/").flatMap((f) => f.text.split("\n").filter((l) => l.startsWith("-") || l.startsWith("|")).filter((l) => words.some((w) => l.toLowerCase().includes(w))).map((l) => `${f.path}: ${l.slice(0, 300)}`)).slice(0, 12) : [];
   const s = st.status() ?? {};
   return [
-    `Now: ${new Date().toISOString()}`,
+    `Now: ${new Date().toISOString()}; coordinator timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`,
+    `Members: ${st.list("agents/").filter((f) => f.path.endsWith("/profile.md")).map((f) => `${f.path.split("/")[1]}: ${f.text.match(/^Name:\s*(.+)$/m)?.[1] ?? f.text.split("\n")[0]}`).join("; ")}`,
     channelPrompt(),
     "When calling create_task, set channels by these goals. Existing slugs or {name, goal} for a new work topic; [] for none.",
     `Routines: ${listRoutines(st).map((r) => `${r.name} (${r.every ?? r.at ?? "?"}, ${r.agent}${r.enabled ? "" : ", off"})`).join("; ") || "(none)"}`,
@@ -299,6 +310,31 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
       const reads = turn.calls.filter((c) => !isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const writes = turn.calls.filter((c) => isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const unknown = turn.calls.filter((c) => !BRAIN_TOOLS.some((t) => t.name === c.tool));
+      const management = writes.filter((c) => c.tool === "upsert_member" || c.tool === "upsert_routine");
+      if (management.length) {
+        const results: string[] = [];
+        for (const c of management) {
+          const r = await runTool(st, c.tool, c.args);
+          res.calls.push({ ...c, ok: r.ok, ...(r.ok ? { result: r.data } : { error: r.error }) });
+          results.push(`${c.tool}(${JSON.stringify(c.args)}) → ${r.ok ? JSON.stringify(r.data) : `ERROR ${r.error}`}`);
+        }
+        if (last) {
+          const saved = new Map(res.calls.filter((c) => c.ok && (c.tool === "upsert_member" || c.tool === "upsert_routine"))
+            .map((c) => [`${c.tool}:${c.args.id ?? c.args.name}`, c]));
+          res.reply = [...saved.values()].map((c) => c.tool === "upsert_member"
+            ? L(`Saved member ${c.result?.member?.name ?? c.args.id}${c.result?.member?.avatar ? " and avatar" : ""}.`, `已保存成员${c.result?.member?.name ?? c.args.id}${c.result?.member?.avatar ? "及头像" : ""}。`)
+            : L(`Saved routine ${c.args.name}.`, `已保存例行任务${c.args.name}。`)).join("\n");
+          res.reply += res.calls.filter((c) => !c.ok && management.some((m) => m.tool === c.tool && m.args === c.args))
+            .map((c) => L(`\nCould not save: ${c.error}`, `\n保存失败：${c.error}`)).join("");
+          post(res.reply);
+          res.ms.first_reply = Date.now() - t0;
+          break;
+        }
+        input = `Management results (already performed; do not repeat successful calls):\n${results.join("\n")}\n${
+          turn.calls.filter((c) => !management.includes(c)).length ? "Other calls were not run; send them again if still needed." : ""}
+Now finish the remaining requested management actions or confirm only what actually succeeded. Explain failures; do not create a code task.`;
+        continue;
+      }
       const invalid = writes.map((c) => ({ c, op: writeOp(c.tool, c.args, st) })).filter((x) => typeof x.op === "string");
       // the last round answers with what it has: a lookup that never ends must not swallow the message
       if (!last && (reads.length || unknown.length || invalid.length)) {

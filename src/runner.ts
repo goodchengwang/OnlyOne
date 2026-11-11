@@ -50,8 +50,8 @@ export function buildPrompt(meta: Record<string, string>, body: string, cfg: Cfg
   const agent = meta.agent || "lead";
   const host = meta.claimed_by || "?";
   return `You are **${agentName(agent)}**, a permanent member of ${cfg.owner?.name ?? "the owner"}'s AI agent fleet, running headless on host \`${host}\`.
-The fleet coordinates through the shared hub folder at ${ROOT} (tasks/, journal/, decisions/, agents/). Read it when you need context; you do not message other agents — you leave traces (commits in project repos, journal lines, follow-up tasks) that they pick up.
-The hub folder is not a git repository: files you write there (reports/, memory) are synced to the cloud by the daemon after your run. Never git add/commit them, and never report a task as failed because the hub has no git metadata.
+The fleet coordinates through the shared onlyone folder at ${ROOT} (tasks/, journal/, decisions/, agents/). Read it when you need context; you do not message other agents — you leave traces (commits in project repos, journal lines, follow-up tasks) that they pick up.
+The onlyone folder is not a git repository: files you write there (reports/, memory) are synced to the cloud by the daemon after your run. Never git add/commit them, and never report a task as failed because the onlyone has no git metadata.
 
 # Your profile
 ${readIf(P("agents", agent, "profile.md"))}
@@ -75,10 +75,10 @@ ${recentJournal() || "(empty)"}
 ${rosterLine()}
 
 # External signature (MANDATORY)
-Anything you post outside the hub — GitHub PR/issue/review comments, PR descriptions, Slack, Discord, email, OKR entries — must end with this exact line, after a blank line:
+Anything you post outside the onlyone — GitHub PR/issue/review comments, PR descriptions, Slack, Discord, email, OKR entries — must end with this exact line, after a blank line:
 ${signature(agent, host, cfg)}
 Git commits you create must carry the trailer:  Agent: ${agent}
-Outside the hub you are OnlyOne: never use your agent name (${agentName(agent)}) or any other agent's name in GitHub text, commits or messages.
+Outside the onlyone you are OnlyOne: never use your agent name (${agentName(agent)}) or any other agent's name in GitHub text, commits or messages.
 
 # Resource budget
 ${resourceNote}
@@ -86,7 +86,7 @@ ${resourceNote}
 ${channelPrompt()}
 
 # Task ${meta.id}: ${meta.title}
-Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.onlyone/work — never inside the hub folder ${ROOT}, which syncs to the cloud   Host capabilities: ${meta.host_caps ?? ""}
+Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.onlyone/work — never inside the onlyone folder ${ROOT}, which syncs to the cloud   Host capabilities: ${meta.host_caps ?? ""}
 Priority: ${meta.priority}   Source: ${meta.source}
 
 ${body}
@@ -103,7 +103,7 @@ function rosterLine(): string {
     }).join("\n");
 }
 
-/** workspace-write only covers the cwd and /tmp; agents also need project checkouts, scratch, the hub and cargo's caches. */
+/** workspace-write only covers the cwd and /tmp; agents also need project checkouts, scratch, the onlyone and cargo's caches. */
 export function codexWritableDirs(home = homedir()): string[] {
   const dirs = [join(home, "work"), join(home, ".onlyone", "work"), ROOT, join(home, ".cargo")];
   const real = dirs.filter((d) => existsSync(d)).map((d) => realpathSync(d));
@@ -185,7 +185,7 @@ export async function runAgent(cli: string, prompt: string, cwd: string, cfg: Cf
   const proc = Bun.spawn(cmd, {
     cwd: existsSync(dir) ? dir : ROOT, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe",
     // Claude -p stops background subagents 10 min after the last turn; our own run limit bounds the run instead
-    env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ...extraEnv, HUB_DATA: ROOT },
+    env: { ...process.env, CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS: "0", ...extraEnv, ONLYONE_DATA_DIR: ROOT },
   });
   const tid = logFile.split("/").pop()!.match(/^([A-Z]-[\w]*?\d{4})-\d{10,}/)?.[1];
   if (tid) agentProcs.set(tid, proc);

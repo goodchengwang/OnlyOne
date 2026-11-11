@@ -21,6 +21,18 @@ const OTHER_REQUESTS = CHANNEL_REQUESTS + (HOSTS.length * TASKS_PER_HOST * 2 + 9
  *  each guest's last_seen (no index on it) at most once a minute, so at most one row per ask. */
 const GUESTS = 3, GUEST_ASKS = GUESTS * Math.ceil(DAY_MIN * 60_000 / GUEST_IDLE_MS);
 // The receipt index only includes owner sends with client_id; fleet events add no index rows.
+// Three fresh computer enrollments in a day: start + verify + join + logout + status + initial file pull.
+// Allow 100 written rows each (auth rows, indexed security/join events, first coordinator CAS and usage saves).
+// These are user actions, never a timer: an unattended installation adds zero enrollment requests or writes.
+const ENROLL_REQUESTS = HOSTS.length * 6, ENROLL_ROWS = HOSTS.length * 100;
+// Active source development: ten valid reloads/hour for eight hours on all three Macs.
+// Development lifecycle messages stay local and reloads do not force lazy heartbeat/journal uploads.
+// Validation/debouncing is local; reserve eight requests and 16 indexed rows for reconnect/state/usage per reload.
+// With no saves there are no reload requests, rows or cloud timers.
+const DEV_RELOADS = HOSTS.length * 8 * 10, DEV_REQUESTS = DEV_RELOADS * 8, DEV_ROWS = DEV_RELOADS * 16;
+// Three owner-created members/routines per day: each of three clients fetches the avatar and (if open) settings
+// once, plus one state push per change (2 rows). File traffic is measured below; no unattended requests/writes.
+const TEAM_REQUESTS = 3 * (3 + 3 + 1), TEAM_ROWS = 3 * 2;
 const RECEIPT_ROWS = 50;
 const OTHER_ROWS = RECEIPT_ROWS + (HOSTS.length * TASKS_PER_HOST * 2 + 96) * 2 + 50 * 6 + 2_000; // + events the fleet reports
 
@@ -67,8 +79,36 @@ test("a fleet day stays under the free-plan target", async () => {
     clock += 60_000;
   }
 
-  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS;
-  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS;
+  // One owner-requested npm update on each machine: existing progress, drain and ready reports.
+  // Downloads go to npm, not the Worker. No new idle timer or forced background heartbeat is added.
+  for (const h of HOSTS) {
+    const d = as(h);
+    for (const state of ["updating", "waiting", "restarting", "done"]) {
+      clock += PULL_MIN_MS;
+      await sync.pull();
+      writeFileSync(join(d, "fleet", "hosts", `${h}.json`), JSON.stringify({ host: h, seen: new Date(clock).toISOString(), busy: 0, update: { state } }));
+      await sync.commitPush(`owner update ${state}`, { force: true });
+    }
+  }
+
+  for (let i = 0; i < 3; i++) {
+    const d = as(HOSTS[0]);
+    clock += PULL_MIN_MS;
+    await sync.pull();
+    const id = `content-${i}`;
+    mkdirSync(join(d, "agents", id), { recursive: true });
+    writeFileSync(join(d, "agents", id, "profile.md"), `# ${id}\nName: ${id}\nContent research\n`);
+    writeFileSync(join(d, "agents", id, "member.json"), JSON.stringify({ id, name: id, avatar: "hash" }));
+    writeFileSync(join(d, "agents", id, "avatar.image"), new Uint8Array(32_000));
+    appendFileSync(join(d, "journal", "2026-11-07.md"), `- member ${id} saved\n`);
+    expect(await sync.commitPush(`owner member ${id}`)).toBe(true);
+    writeFileSync(join(d, "settings.json"), JSON.stringify({ routines: { [`daily-${i}`]: { agent: id, every: "weekdays 09:00", prompt: "Report topics" } } }));
+    appendFileSync(join(d, "journal", "2026-11-07.md"), `- routine daily-${i} saved\n`);
+    expect(await sync.commitPush(`owner routine daily-${i}`)).toBe(true);
+    for (const h of HOSTS.slice(1)) { as(h); await sync.pull(); }
+  }
+  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS + ENROLL_REQUESTS + DEV_REQUESTS + TEAM_REQUESTS;
+  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS + ENROLL_ROWS + DEV_ROWS + TEAM_ROWS;
   console.log(`fleet day: ${requests} requests (target ${TARGET.requests}), ~${rowsWritten} rows written (target ${TARGET.rowsWritten})`);
   expect(requests).toBeLessThanOrEqual(TARGET.requests);
   expect(rowsWritten).toBeLessThanOrEqual(TARGET.rowsWritten);

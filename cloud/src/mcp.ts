@@ -9,10 +9,10 @@
 // Sessions: 400 without Mcp-Session-Id, 404 when unknown or idle > 24h (client re-initializes); MCP-Protocol-Version validated.
 // Every SSE message has an id (<stream>.<seq>) and is kept for replay (15 min / 500 per stream); `retry:` hint, keep-alive comments.
 // notifications/cancelled aborts the matching in-flight request (no response is sent); resources/list_changed when open tasks/decisions change.
-// Notifications: every hub event as notifications/message (logger "onlyone", honours logging/setLevel), and
+// Notifications: every onlyone event as notifications/message (logger "onlyone", honours logging/setLevel), and
 //   notifications/resources/updated for subscribed resources (onlyone://status, onlyone://feed, onlyone://tasks/<id>).
 //   Clients that ignore notifications can poll with the `wait_for_events` tool.
-// Auth (Bearer): HUB_TOKEN, an owner session, or an OAuth 2.1 access token (which *is* an owner session, minted by
+// Auth (Bearer): ONLYONE_TOKEN, an owner session, or an OAuth 2.1 access token (which *is* an owner session, minted by
 //   /oauth/token after the owner signs in with the email code). Unauthenticated → 401 + WWW-Authenticate pointing at
 //   /.well-known/oauth-protected-resource, which leads to /.well-known/oauth-authorization-server:
 //   POST /oauth/register (dynamic client registration, public clients + PKCE S256 only)
@@ -25,7 +25,7 @@ export { parseDoc, listTasks, getTask, listDecisions } from "./tools";
 
 export interface McpSql { exec(query: string, ...bindings: any[]): { toArray(): any[] } }
 
-/** What the MCP layer needs from the Hub Durable Object. */
+/** What the MCP layer needs from the OnlyOne Durable Object. */
 export interface McpHost {
   sql: McpSql;
   status(): any;
@@ -40,8 +40,7 @@ export interface McpHost {
   /** Email-code sign-in, reused from /api/auth/*. */
   startCode(email: string): Promise<{ status: number; body: any }>;
   /** Checks the code; on success returns the email (no browser session is created). */
-  /** Email code + the authenticator's TOTP (mandatory second factor). */
-  checkCode(email: string, code: string, totp: string, ctx?: { req: Request; via: string }): Promise<{ email?: string; error?: string }>;
+  checkCode(email: string, code: string, ctx?: { req: Request; via: string }): Promise<{ email?: string; error?: string }>;
   /** Creates an owner session for this email; returns the raw bearer token. */
   newSession(email: string, ua: string): Promise<string>;
   dropSession(raw: string): Promise<void>;
@@ -77,7 +76,7 @@ export function initMcpSchema(sql: McpSql) {
   }
 }
 
-// ---------------------------------------------------------------- hub data (files table mirrors ~/.onlyone/data)
+// ---------------------------------------------------------------- onlyone data (files table mirrors ~/.onlyone/data)
 
 const textOf = (c: unknown) => typeof c === "string" ? c : new TextDecoder().decode(c instanceof ArrayBuffer ? new Uint8Array(c) : c as Uint8Array);
 export function readFile(sql: McpSql, path: string): FileRow | null {
@@ -93,7 +92,7 @@ function listDir(sql: McpSql, dir: string): FileRow[] {
   const hit = cache.get(dir);
   if (hit) {
     // patch only what changed under dir (a few rows) instead of re-reading the whole listing (up to 2000 rows) on every
-    // task update: re-reading tasks/ after each change was most of the Hub's billed rows_read
+    // task update: re-reading tasks/ after each change was most of the OnlyOne's billed rows_read
     const changed = sql.exec("SELECT path, rev FROM files WHERE rev > ? ORDER BY rev", hit.rev).toArray();
     if (changed.length) hit.rev = Number(changed[changed.length - 1].rev);
     const mine = [...new Set(changed.map((r) => String(r.path)).filter((p) => p.startsWith(dir)))];
@@ -144,7 +143,7 @@ export class Mcp {
   constructor(private h: McpHost) { initMcpSchema(h.sql); }
 
   // -------- live events
-  /** Called by the Hub for every appended event. */
+  /** Called by the OnlyOne for every appended event. */
   onEvent(ev: Ev) {
     for (const w of [...this.waiters]) w();
     const uris = ["onlyone://feed"];
@@ -425,7 +424,7 @@ export class Mcp {
   feed(cursor: number | undefined, limit: number) { return feedView(this.store(), cursor, limit); }
   lastSeq() { return Number(this.h.sql.exec("SELECT COALESCE(MAX(seq), 0) AS n FROM events").toArray()[0]?.n ?? 0); }
 
-  /** The tool layer's view of this Hub: the files mirror for reads, the daemon (via the inbox) for writes. */
+  /** The tool layer's view of this OnlyOne: the files mirror for reads, the daemon (via the inbox) for writes. */
   store(): ToolStore {
     const h = this.h;
     return {
@@ -517,11 +516,8 @@ export class Mcp {
       <div class="row"><button>${L("Send code", "发送验证码")}</button><button name="step" value="deny" class="ghost" formnovalidate>${L("Deny", "拒绝")}</button></div></form>`);
     const codeForm = (msg = "") => page(L("Authorize OnlyOne", "授权 OnlyOne"), `${who}${msg}<form method="post">${keep}<input type="hidden" name="step" value="verify">
       <input type="hidden" name="email" value="${esc(f.email)}">
-      <label>${L(`Code (sent to ${esc(f.email)}${f.delivery === "cli" ? "; email is not configured, run <code>onlyone login</code> on your computer to see it" : ""})`, `验证码（已发到 ${esc(f.email)}${f.delivery === "cli" ? "；邮件未配置，请在你的电脑上运行 <code>onlyone login</code> 查看" : ""}）`)}
+      <label>${L(`Code (sent to ${esc(f.email)})`, `验证码（已发到 ${esc(f.email)}）`)}
       <input name="code" autocapitalize="characters" autocorrect="off" spellcheck="false" maxlength="12" required autofocus autocomplete="one-time-code" style="text-transform:uppercase;letter-spacing:.15em"></label>
-      <label>${L("2FA code (6 digits from your authenticator app)", "两步验证码（验证器 App 上的 6 位数字）")}
-      <input name="totp" inputmode="numeric" pattern="\\d{6}" maxlength="6" required autocomplete="off"></label>
-      <input type="hidden" name="delivery" value="${esc(f.delivery)}">
       <div class="row"><button>${L("Authorize", "授权")}</button><button name="step" value="deny" class="ghost" formnovalidate>${L("Deny", "拒绝")}</button></div></form>`);
     const note = (s: string) => `<p class="err">${esc(s)}</p>`;
 
@@ -529,11 +525,10 @@ export class Mcp {
     if (f.step === "send") {
       const r = await this.h.startCode(String(f.email ?? ""));
       if (r.status !== 200) return emailForm(note(r.body?.message ?? r.body?.error ?? L("Sending failed", "发送失败")));
-      f.delivery = r.body?.delivery ?? "";
       return codeForm();
     }
     if (f.step === "verify") {
-      const r = await this.h.checkCode(String(f.email ?? ""), String(f.code ?? ""), String(f.totp ?? ""),
+      const r = await this.h.checkCode(String(f.email ?? ""), String(f.code ?? ""),
         { req, via: L(`MCP connector authorization: ${String(client.client_name).slice(0, 60)} (callback ${new URL(f.redirect_uri).host})`, `MCP 连接器授权：${String(client.client_name).slice(0, 60)}（回调 ${new URL(f.redirect_uri).host}）`) });
       if (!r.email) return codeForm(note(r.error ?? L("Wrong code", "验证码不对")));
       const code = rand(32);

@@ -1,5 +1,5 @@
 import { expect, test } from "nsh/test";
-import { groupByDay } from "./hub";
+import { groupByDay } from "./onlyone";
 
 const at = (d: string) => ({ d: `${d}T12:00:00` });
 const shape = (items: { d: string }[]) => groupByDay(items, (t) => t.d).map((g) => [g.newest, g.oldest, g.items.length]);

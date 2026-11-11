@@ -1,4 +1,4 @@
-// Shared fleet files (replaces the private git data repo). Lives in the Hub Durable Object's SQLite.
+// Shared fleet files (replaces the private git data repo). Lives in the OnlyOne Durable Object's SQLite.
 // Each host keeps ~/.onlyone/data as a local working mirror and syncs it through this API (src/sync.ts).
 //
 //   GET  /api/files/changes?since=<rev>[&limit=]  → {rev, more, files:[{path, version, hash, deleted, content(base64)|null, rev}]}
@@ -29,6 +29,7 @@ export { latestOnly };
 const LATEST_ONLY_SQL = `(path LIKE 'journal/%' OR path LIKE 'logs/%' OR path LIKE 'fleet/%' OR path IN ('memory/lessons.md', 'memory/judge-feedback.md'))`;
 
 import { TARGET, latestOnly } from "./budget";
+import { MEMBER_ID, avatarResponse } from "./team";
 
 const json = (d: unknown, status = 200) => Response.json(d, { status });
 
@@ -123,6 +124,12 @@ const LIST_ROWS = 2000;
 /** Read-only routes for the owner: a primary-key range on `files` (never the history table). */
 export function handleReadFiles(sql: FilesSql, url: URL): Response | null {
   const p = url.pathname;
+  if (p === "/api/files/avatar") {
+    const id = url.searchParams.get("agent") ?? "";
+    if (!MEMBER_ID.test(id)) return json({ error: "invalid member id" }, 400);
+    const r = sql.exec("SELECT content FROM files WHERE path = ? AND deleted = 0", `agents/${id}/avatar.image`).toArray()[0];
+    return avatarResponse(r ? bytes(r.content) : null);
+  }
   if (p === "/api/files/list") {
     let prefix = url.searchParams.get("prefix") ?? "";
     if (prefix && !prefix.endsWith("/")) prefix += "/";

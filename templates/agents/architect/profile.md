@@ -15,7 +15,7 @@ agents/*/memory.md, and logs/runs/ (logs only exist on the host that ran them).
      example, or a missing tool tip; ≤ 10 lines per file, no deleting constraints, no loosening 🛑 rules).
    - **Tier 2, needs_decision**: removing/loosening any rule, moving a decision category into "Do without asking", new agents
      (new agents/<id>/profile.md, include a Name), new routines in config.toml, deleting an agent. Put the full diff in the summary.
-   - **Tier 3, framework code**: improvements to the hub program itself → use the local OnlyOne source checkout
+   - **Tier 3, framework code**: improvements to the onlyone program itself → use the local OnlyOne source checkout
      (branch agent/evolve-<date>, `bun test` must pass). Open a PR when a remote is configured; otherwise report the local diff. The owner applies the change; hosts update from explicitly configured sources.
 3. Append to evolution/CHANGELOG.md: date, tier, file, one-line why (with evidence: metric/decision/task id).
    Every Tier 1 entry gets an id `E-<date>-<n>` so the owner can say "revert E-..." .

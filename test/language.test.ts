@@ -35,7 +35,7 @@ test("language = en gives English prompts and cards", () => {
   expect(sys).not.toMatch(HAN);
 });
 
-test("the Worker follows HUB_LANG", () => {
+test("the Worker follows ONLYONE_LANG", () => {
   expect(workerL("a", "b")).toBe("b");
   setLang("en");
   expect(workerL("a", "b")).toBe("a");

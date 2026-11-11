@@ -9,37 +9,121 @@ OnlyOne runs a small team of Claude Code and Codex agents on your own computers.
 - **Quiet** — no noise, no raw errors. You hear about results and decisions, nothing else.
 - **Yours** — runs on your machines and your own free Cloudflare account. No shared service, no one else's server.
 
+Manage the team in chat: “Add a member called Tuan who researches content ideas, and have them report three
+ideas every weekday at 9.” OnlyOne saves the member and recurring task directly. New members get a
+Codex-generated avatar by default, using the Codex installation and login on the coordinator computer.
+Describe an avatar to guide generation, or attach a picture and ask to use it. You can also rename members,
+change responsibilities, reschedule routines or turn them off in chat. Times use the coordinator's local
+timezone. Avatar files are kept with the member and synced between computers; they do not expire with chat attachments.
+
+## Install the CLI with npm
+
+Requires Node.js 22+ and npm. The public package is `onlyonecli`; the installed command is `onlyone`.
+On Linux (glibc x64/arm64) and macOS (x64/arm64):
+
+```bash
+npm install -g onlyonecli
+onlyone
+```
+
+Enter your already-deployed Worker's HTTPS origin, owner email and email code. OnlyOne registers this
+computer, mirrors the team's configuration and starts a background executor. No Bun, NSH or source checkout
+is needed. Claude Code / Codex must still be installed and signed in separately; setup shows which are present.
+Run `onlyone` again to ensure the service is running. `onlyone --help` and `onlyone --version` do not start it.
+
+Linux uses a systemd user service. Without user systemd, run `onlyone daemon` in the foreground or set up
+user systemd before retrying `onlyone install`. If enabling linger needs permission, setup prints the command
+needed to keep the service running after logout. macOS uses launchd; Windows uses the current user's logon
+scheduled task, which requires that user to be logged in. These services do not keep a suspended computer online.
+Windows x64 packaging is implemented, but its platform package is pending npm review and the CLI cannot run on Windows until that package is approved. Alpine/musl and Windows ARM64 are not included in the initial packages.
+
+`onlyone update`, or **Update all machines** in the app, downloads the latest stable npm release into
+`~/.onlyone/cli/releases/`. It checks the version and startup before waiting for current tasks to finish,
+switching versions and restarting. The global npm installation is never modified by remote updates.
+A candidate that fails startup rolls back to the previous version and reports the failure. No npm update
+checks run on an idle timer. Existing source installations retain their Git-based update behavior.
+
+Credentials remain in private `~/.onlyone/onlyone.toml`; override the home with `ONLYONE_HOME` before running
+setup. A different Worker requires a separate home. A failed first sync retains the binding so setup can be
+retried. If service installation fails, the device remains bound; fix the reported service error and run
+`onlyone install`. On Linux, SSH sessions missing the user-bus environment reuse `/run/user/<uid>/bus`
+when it exists. If the user service manager is unavailable, run `sudo loginctl enable-linger <user>`,
+reconnect over SSH and retry. Systems without user systemd can run `onlyone daemon` in the foreground;
+it must remain supervised to keep running after logout. Logs: `journalctl --user -u onlyone -f` on Linux, `~/.onlyone/cli/daemon.log` on macOS/Windows.
+
+To build publishable packages locally: `bun run package:npm 0.1.1` (or invoke
+`bun scripts/package-npm.ts 0.1.1 dist/npm linux-x64` for one platform). Only whitelisted generated files
+are packed. The npm workflow tests actual tarball installs on all five platforms, publishes platform packages
+first and the main package last for a `vX.Y.Z` tag. Configure npm trusted publishing for all six package names,
+or the repository's `NPM_TOKEN`, before publishing. These commands become publicly installable only after that release is published. The native App workflow and its pinned NSH version are separate.
+
 ## Install from local source
 
-Install Bun and Git, keep this source directory on the machine, and run:
+Install Bun, Git and the project's pinned NSH version. Deploy cloud from this checkout first:
 
 ```bash
 bun install --frozen-lockfile
-# Build the web client before creating the primary's Worker (requires NSH).
-NSH=nsh bash app/build-web.sh
-bash install.sh --primary
-# On additional macOS or Linux machines:
-bash install.sh
+bunx wrangler login
+# Put these in an ignored .env file (chmod 600 .env), or export them:
+# ONLYONE_WORKER_NAME=onlyone
+# CLOUDFLARE_ACCOUNT_ID=<your-account-id>
+# ONLYONE_OWNER_EMAIL=<your-email>
+# ONLYONE_MAIL_FROM=login@<your-verified-resend-domain>
+# ONLYONE_RESEND_API_KEY=<your-resend-key>
+# ONLYONE_DOMAIN=<your-cloudflare-domain>
+bun run deploy:cloud
 ```
 
-The primary setup asks you to log in to your own Cloudflare account. Workers stays within the Free plan budget.
-On Windows, run `.\install.ps1` from the local source directory.
-The installer uses this checkout and never clones or updates a remote repository.
+This builds the web client and deploys the Worker, custom domain, secrets and initial templates together.
+Open the printed HTTPS address from any device and sign in with the 8-character email code. Cloud provides the interface and login independently of execution computers.
+Verify the sender domain in Resend before deployment. Only the configured owner email can sign in.
+
+On macOS, open the locally built desktop app and sign in to that address. The app automatically registers this Mac,
+downloads the team's configuration and starts its executor. Opening the app again reuses the service; no separate
+`init` or `daemon` command is needed. Tasks keep running after the app quits. Signing out stops new work and lets
+the current work finish. Each cloud origin has its own private mirror under `~/.onlyone/app/`, separate from CLI data.
+The installed Mac client includes its execution runtime; Claude Code / Codex still need to be installed and signed in.
+Web and mobile clients manage the team without starting a local executor.
+
+For a headless computer, or on Linux, install the npm CLI and follow its binding prompts:
+
+```bash
+npm install -g onlyonecli
+onlyone
+```
+
+For source development, run `bun src/cli.ts init https://<your-cloudflare-domain>` and
+`bun src/cli.ts install` from this checkout instead.
+
+The first computer to join becomes the fixed coordinator. Later computers join the same fleet. When the
+coordinator is offline, cloud remains accessible and requests wait in its inbox until it reconnects.
+
+`onlyone cloud deploy` uses the same explicit deployment flow. Updating an execution computer does not deploy cloud.
+Keep a secure backup of `.cloud-deploy/<worker-name>/state.json`: it preserves the installation's instance,
+machine credential and push keys across deployments. This ignored file and its directory are private (0600/0700).
+Repeated deployments keep the same OnlyOne instance and do not overwrite its files.
+
+OnlyOne stays within the Cloudflare Free plan target. Enrollment adds at most 6 requests and a conservative 100
+written rows per computer (18 requests / 300 rows for three computers), plus one-time template initialization.
+There are no enrollment timers or background emails. Owner status and host inbox nudges use hibernating WebSockets.
+Check `onlyone status` or authenticated `/api/usage` after deployment and again after several hours of real use.
 
 ## Client apps
 
-Build and install the desktop client from this source directory (requires NSH):
+The npm package installs the CLI executor. Build native client apps separately from this checkout with NSH:
 
 ```bash
-bash install-client.sh
+nsh package app --target macos
+# Other targets: linux, windows, android, ios
 ```
 
-On Windows, run `.\install-client.ps1`. For mobile, use `nsh package app --target android` or
-`nsh package app --target ios`; iOS requires your own signing configuration and the SDK check documented in AGENTS.md.
+Install the generated app for your platform. iOS requires your own signing configuration and the SDK check
+documented in AGENTS.md. Local clients are updated by rebuilding and installing again.
+To fetch a published web client, explicitly set `ONLYONE_CLIENT_BASE_URL` to your release-assets URL;
+archives are checked against that source's `sha256sums`.
 
-To install a published desktop client or fetch a web client, explicitly set `ONLYONE_CLIENT_BASE_URL` to your release-assets URL.
-Downloaded archives are checked against that source's `sha256sums`. No public download or App update source is configured by default.
-Local clients are updated by rebuilding and installing again.
+A raw `nsh package` creates only the UI. For a Mac app with a bundled executor, run
+`bash scripts/package-executor.sh <path-to-OnlyOne.app>` afterwards to add the executor and renew the signature.
 
 ## Use
 
@@ -48,12 +132,18 @@ Open your OnlyOne address on any device and sign in with a code sent to your ema
 Then just talk to it. When it needs you, you'll get a notification with the choices; answer right there.
 
 The CLI is `onlyone`; local state lives in `~/.onlyone` (override with `ONLYONE_HOME`), with bootstrap configuration in `onlyone.toml`.
-The native app ID is `dev.onlyone.app`. This app uses a fresh identity and does not import previous installations.
+The native app ID is `dev.onlyone.app`.
 
 ## Development
+
+Run `nsh run app` for Mac development. The UI hot reloads, and the source executor automatically validates saves
+and gracefully restarts when its bundled code changes. No manual daemon restart or repackaging is needed; running
+tasks finish first, and invalid saves leave the current executor running. This source watcher is disabled in installed builds.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for tests, builds and optional release packaging.
 
 ## License
 
-MIT. Original copyright notices are retained in [LICENSE](LICENSE).
+OnlyOne is based on [Noop](https://github.com/huacnlee/noop), originally created by Jason Lee (huacnlee), with modifications by GoodCheng.
+
+MIT. Original copyright (c) 2026 Jason Lee; modifications copyright (c) 2026 GoodCheng. See [LICENSE](LICENSE).

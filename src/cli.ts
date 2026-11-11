@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // onlyone — CLI + daemon for the agent fleet.
+import { CLI_VERSION, displayRev, npmBuild } from "./release";
 import { guestCmd } from "./guest";
 import { $ } from "bun";
 import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
@@ -17,6 +18,8 @@ import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./reso
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
+import { lockDaemon } from "./daemon-lock";
+import { watchDevelopment } from "./dev-reload";
 import { computeMetrics } from "./metrics";
 import { writeUsageReport } from "./usage-report";
 import { supervise } from "./supervisor";
@@ -24,15 +27,17 @@ import { collect, LEARN_PROMPT } from "./sessions";
 import { medic } from "./medic";
 import { githubStarved } from "./github";
 import { doctor, visual } from "./visual";
-import { answerFromChat, appendEvent, cancelTask, drainInbound, feed, handleOwnerMessage, mediaDays, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as hubStatus } from "./server";
+import { answerFromChat, appendEvent, cancelTask, drainInbound, feed, handleOwnerMessage, mediaDays, pruneMedia, recentChat, setApplyOp, setCancelTask, setUpdateFleet, onSettingsSaved, startServer, status as onlyoneStatus } from "./server";
 import { addFollowUp, followUpTarget, reopenTask, type BrainOut, ClaudeModel, systemPrompt, dataActs, localStore, logBrain, think } from "./brain";
 import { isWrite, runTool } from "../cloud/src/tools";
 import { cloudDeploy, startCloudBridge } from "./cloud";
-import { adoptCloudUrl, readHubToml } from "./sync";
+import { adoptCloudUrl, readOnlyOneToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
 import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
 import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
+import { teamActs } from "./team";
+import { publishStatus } from "./server";
 
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
@@ -68,7 +73,7 @@ export function signalChanged(r: { name: string; signal?: string }, state: Recor
   return true;
 }
 
-function runRoutines(cfg: Cfg, host: string, primary: boolean) {
+export function runRoutines(cfg: Cfg, host: string, primary: boolean) {
   const state: Record<string, string> = existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : {};
   maybeProposeNext(cfg, host, state);
   for (const r of cfg.routine ?? []) {
@@ -89,7 +94,7 @@ function runRoutines(cfg: Cfg, host: string, primary: boolean) {
       state[r.name] = new Date().toISOString();
       try {
         const rep = writeUsageReport();
-        appendEvent({ from: "hub", kind: "notice", text: rep.markdown });
+        appendEvent({ from: "onlyone", kind: "notice", text: rep.markdown });
         journal(host, `📊 usage report → ${rep.file}`);
       } catch (e) { journal(host, `📊 usage report failed: ${(e as Error).message}`); }
       continue;
@@ -252,10 +257,10 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     // the owner asked for this (and it is not an internal sub-step) → bring back the result
     if (res.status === "done" && !res.attachments?.length && !res.followups?.length && isNoChangeRoutine(meta.source, res.summary)) {} // journal only
     else if (res.status === "done" && ownerWork && !meta.parent)
-      void notify(meta.source === "owner@chat" ? res.summary : `${meta.title}\n${res.summary}`, cfg, { kind: "notice", ref: meta.id, attachments: res.attachments, from: `${agentName(agent)}@${host}` });
+      void notify(meta.source === "owner@chat" ? res.summary : `${meta.title}\n${res.summary}`, cfg, { kind: "notice", ref: meta.id, attachments: res.attachments, from: `${agent}@${host}` });
     // every other finished task (routines, follow-ups, sub-steps) → a quiet result line in the team channel, no push
     else if (res.status === "done")
-      void notify(`${meta.title}\n${res.summary}`, cfg, { kind: "system", ref: meta.id, attachments: res.attachments, from: `${agentName(agent)}@${host}`, quiet: true });
+      void notify(`${meta.title}\n${res.summary}`, cfg, { kind: "system", ref: meta.id, attachments: res.attachments, from: `${agent}@${host}`, quiet: true });
     if (res.status !== "done") void track(handleFailure(meta, body, res.summary, out, cfg, host));
   }
   await _commitPush(`[${host}] ${res.status} ${meta.id}: ${meta.title}`);
@@ -358,6 +363,7 @@ function noteUnservable(cfg: Cfg, host: string) {
 let running = 0;
 /** Set when the daemon is asked to stop or restart: running agents finish first instead of being killed and redone. */
 let draining = false;
+let stopCloudBridge: (() => Promise<void>) | undefined;
 const RESTART_FLAG = () => P("..", "restart-requested");
 /** Follow-up work a finished task still owes (retry bookkeeping etc.): drain waits for it too. */
 const inflight = new Set<Promise<unknown>>();
@@ -371,9 +377,12 @@ export function restartAllowed(force = false, file = LAST_RESTART(), t = Date.no
 async function drainAndExit(why: string, host: string) {
   if (draining) return;
   draining = true;
+  const bridgeStopped = stopCloudBridge?.();
   if (running) console.log(`${why}: waiting for ${running} running task(s) to finish`);
   // `running` covers each task from claim until its agent process exited and its result was committed
   while (running > 0 || inflight.size > 0) { await Bun.sleep(3000); await Promise.allSettled([...inflight]); }
+  await bridgeStopped;
+  await stopCloudBridge?.(); // flush replies produced by tasks that finished during the drain
   try {
     mkdirSync(P("logs"), { recursive: true });
     writeFileSync(LAST_RESTART(), new Date().toISOString());
@@ -382,16 +391,20 @@ async function drainAndExit(why: string, host: string) {
     await locked(async () => {
       await _pull();
       if (u?.state === "waiting") heartbeat(loadConfig(), running, sample(loadConfig()));
-      journal(host, `🔄 daemon ${why}: all running work finished, exiting`);
-      await _commitPush(`[${host}] ${why}`, { force: true });
+      const message = `🔄 daemon ${why}: all running work finished, exiting`;
+      if (why === "source changed") console.log(message);
+      else journal(host, message);
+      // A development save keeps lazy journals/heartbeats on disk; real task changes still commit normally.
+      await _commitPush(`[${host}] ${why}`, why === "source changed" ? undefined : { force: true });
     });
   } catch {}
+  if (npmBuild) (await import("./npm-runtime")).activateNpmUpdate();
   process.exit(0);
 }
 
 const UPDATE_DONE = () => P("..", "update-handled");
 /** The owner's "update every machine": once per request, now (not at the hourly check), running work finishing
- *  first. The primary redeploys the Worker and the web app even when its code was already current. */
+ *  first. Cloud deployments are managed separately. */
 async function ownerUpdate(c: Cfg, host: string) {
   let at = "";
   try { at = JSON.parse(readFileSync(UPDATE_REQUEST(), "utf8")).at ?? ""; } catch { return; }
@@ -400,32 +413,27 @@ async function ownerUpdate(c: Cfg, host: string) {
   if (!at || at <= done) return;
   writeFileSync(UPDATE_DONE(), at);
   const from = runningRev().rev;
-  const before = from?.slice(0, 7) ?? "?";
+  const before = displayRev(from) ?? "?";
   // each step goes out in the heartbeat at once, so the owner watches it in Settings › 版本
   const report = async (state: UpdateState["state"], detail?: string) => {
     setUpdateState({ at, state, detail, from });
     await locked(async () => { await _pull(); heartbeat(c, running, sample(c)); await _commitPush(`[${host}] update: ${state}`, { force: true }); }).catch(() => {});
   };
-  await report("updating", L("Pulling and testing the new code", "拉取并测试新代码"));
-  const updated = await selfUpdate({ force: true, deploy: true }).catch(() => false);
+  await report("updating", L("Downloading and checking the new version", "下载并检查新版本"));
+  let updated: boolean;
+  try { updated = await selfUpdate({ force: true }); }
+  catch (error) { await report("failed", String(error)); return; }
   if (updated) {
     journal(host, `⬆️ updated on the owner's request (was ${before}); restarting${running ? ` after ${running} running task(s)` : ""}`);
     await report(running ? "waiting" : "restarting", running ? L(`Restarting after ${running} running task(s) finish`, `等 ${running} 个任务跑完后重启`) : undefined);
     void drainAndExit("self-update", host);
     return;
   }
+  if (npmBuild) { await report("current", CLI_VERSION); return; }
   const now7 = (Bun.spawnSync(["git", "-C", CODE, "rev-parse", "--short", "HEAD"], { stdout: "pipe" }).stdout.toString().trim()) || before;
   const stale = now7 !== before; // the code moved but this process could not take it (local edits, failing tests)
-  if (isPrimary(c, host) && c.cloud?.url) {
-    await report("deploying", L("Redeploying", "重新发布线上"));
-    const cloud = await import("./cloud");
-    const err = await cloud.cloudDeploy(c).then((u) => (u ? "" : cloud.lastDeployError || "unknown"), (e) => String(e));
-    journal(host, `⬆️ already at ${now7}; ${err ? `redeploying the Worker failed: ${err.replace(/\s+/g, " ").slice(-300)}` : "redeployed the Worker and the web app"}`);
-    await report(err ? "failed" : "current", err ? L(`Code is current, redeploy failed: ${err.replace(/\s+/g, " ").slice(0, 120)}`, `代码已是最新，重新发布线上失败：${err.replace(/\s+/g, " ").slice(0, 120)}`) : L("Redeployed", "已重新发布线上"));
-  } else {
-    journal(host, stale ? `⬆️ not updated (still running ${before}; local edits or failing tests)` : `⬆️ already at ${now7}`);
-    await report(stale ? "failed" : "current", stale ? L("Local changes or failing tests, still running the old code", "有本地改动或测试没通过，仍在运行旧代码") : undefined);
-  }
+  journal(host, stale ? `⬆️ not updated (still running ${before}; local edits or failing tests)` : `⬆️ already at ${now7}`);
+  await report(stale ? "failed" : "current", stale ? L("Local changes or failing tests, still running the old code", "有本地改动或测试没通过，仍在运行旧代码") : undefined);
 }
 
 /** A good report doesn't forward raw errors. Retry, call the medic for tooling problems, and only after that
@@ -452,7 +460,7 @@ async function handleFailure(meta: Record<string, string>, body: string, summary
   if (!ownerCares || cfg.notify?.on_failure === false) return; // routine/internal work: journal only; architect reviews failures
   const reason = summary.split("\n")[0].replace(/\s+/g, " ").slice(0, 140);
   await notify(L(`Could not finish "${meta.title}": ${reason}. Tell me if you want a different approach.`, `没能完成「${meta.title}」：${reason}。我会在日报里跟进；需要换个做法可以直接告诉我。`), cfg,
-    { kind: "notice", ref: meta.id, from: `${agentName(meta.agent || "lead")}@${host}` });
+    { kind: "notice", ref: meta.id, from: `${meta.agent || "lead"}@${host}` });
 }
 const GH_HEAVY = new Set(["dispatcher", "reviewer", "ops-watcher", "oss-triage", "release-manager"]);
 
@@ -708,7 +716,15 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
 }
 
 async function daemon(cfg: Cfg) {
+  if (!existsSync(P("config.toml"))) throw new Error("OnlyOne is not initialized. Sign in from the Mac app, or run: onlyone init <cloud-url>");
+  const unlock = lockDaemon(ROOT);
+  process.once("exit", unlock);
+  mkdirSync(P("journal"), { recursive: true });
+  const readyFile = P("..", "service-ready");
+  process.once("exit", () => { try { unlinkSync(readyFile); } catch {} });
+  for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void drainAndExit("stop", hostName(cfg)));
   const host = hostName(cfg);
+  const development = !Bun.argv[1]?.startsWith("/$bunfs/") && existsSync(P("..", "dev-source"));
   const every = (cfg.host?.tick_seconds ?? 60) * 1000;
   console.log(`onlyone daemon on ${host} caps=${hostCaps(cfg).join(",")} tick=${every / 1000}s parallel≤${cfg.host?.max_parallel ?? "cores/3"}`);
   onSettingsSaved((summary) => locked(async () => {
@@ -716,7 +732,7 @@ async function daemon(cfg: Cfg) {
     journal(host, `⚙️ owner changed settings: ${summary}`);
     await _commitPush(`[${host}] settings: ${summary.slice(0, 60)}`);
   }));
-  if (isPrimary(cfg, host)) startCloudBridge(cfg);
+  if (isPrimary(cfg, host)) stopCloudBridge = startCloudBridge(cfg);
   const appendFollowUp = (tid: string, text: string) => locked(async () => {
     await _pull();
     for (const dir of ["inbox", "active", "waiting", "blocked", "done", "failed"]) {
@@ -808,9 +824,14 @@ async function daemon(cfg: Cfg) {
     return { ok: true, id, ...(prevFile ? { follows: prev } : {}) };
   });
   const store = localStore({
-    status: hubStatus, feed: () => feed("", 2000),
+    status: onlyoneStatus, feed: () => feed("", 2000),
     acts: {
       ...dataActs(host),
+      ...teamActs(host, {
+        report: (text) => appendEvent({ from: "onlyone", kind: "system", text, ...(chatNow?.channel ? { channel: chatNow.channel } : {}),
+          ...(chatNow?.thread && chatNow.reply ? { ref: chatNow.reply, thread: true } : {}) }),
+        changed: () => { publishStatus(); wakeDaemon(); },
+      }),
       // said on a task's page: it stays in that conversation, however the model read it
       create_task: async (op) => {
         const m = chatNow;
@@ -835,7 +856,7 @@ async function daemon(cfg: Cfg) {
     const room = channel ? channels().find((c) => c.slug === channel) : undefined;
     const m = { text, replyTo: reply, answered, chat: recentChat(text, { channel }), sentAt, ...(room ? { channel: { slug: room.slug, name: room.name, goal: room.goal } } : {}) };
     chatNow = { text, chat: m.chat, reply, thread, channel: room?.slug };
-    const post = (r: string, ref?: string) => appendEvent({ from: "hub", kind: "system", text: r.slice(0, 2000), ...(ref ? { ref } : {}), ...(thread ? { thread } : {}), ...(room ? { channel: room.slug } : {}) });
+    const post = (r: string, ref?: string) => appendEvent({ from: "onlyone", kind: "system", text: r.slice(0, 2000), ...(ref ? { ref } : {}), ...(thread ? { thread } : {}), ...(room ? { channel: room.slug } : {}) });
     let out: BrainOut;
     try {
       out = await think(m, store, model, post);
@@ -865,15 +886,26 @@ async function daemon(cfg: Cfg) {
     }
     await _commitPush(`[${host}] recover`);
   });
-  await locked(async () => { await _pull(); journal(host, `🟢 daemon started (${hostCaps(cfg).join(", ")})`); await _commitPush(`[${host}] up`); });
-  for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void drainAndExit("stop", host));
+  await locked(async () => {
+    await _pull();
+    const message = `🟢 daemon started (${hostCaps(cfg).join(", ")})`;
+    if (development) console.log(message);
+    else journal(host, message);
+    await _commitPush(`[${host}] up`);
+  });
+  if (development) {
+    const close = await watchDevelopment(CODE, () => void drainAndExit("source changed", host));
+    process.once("exit", close);
+    console.log("development: watching executor source; saves restart after running work finishes");
+  }
+  writeFileSync(readyFile, String(process.pid), { mode: 0o600 });
   // a stray rejection (a voided notify/medic) used to kill the process → systemd restart → running work requeued
   process.on("unhandledRejection", (e) => console.error("unhandled rejection", e));
   process.on("uncaughtException", (e) => console.error("uncaught exception", e));
   let lastUpdate = 0, failures = 0;
   for (;;) {
     const c = loadConfig();
-    if (adoptCloudUrl(c.cloud?.url)) journal(host, `☁️ hub moved: now syncing with ${c.cloud.url}`);
+    if (adoptCloudUrl(c.cloud?.url)) journal(host, `☁️ onlyone moved: now syncing with ${c.cloud.url}`);
     if (existsSync(RESTART_FLAG())) { // `onlyone restart` (throttled) / `onlyone restart --force`
       const force = readFileSync(RESTART_FLAG(), "utf8").includes("force");
       if (restartAllowed(force)) { unlinkSync(RESTART_FLAG()); void drainAndExit("restart", host); }
@@ -897,7 +929,7 @@ async function daemon(cfg: Cfg) {
 
 async function status(cfg: Cfg, brief = false) {
   if (brief) { // what a person wants to see right after installing
-    const url = readHubToml().cloud?.url ?? cfg.cloud?.url;
+    const url = readOnlyOneToml().cloud?.url ?? cfg.cloud?.url;
     if (!url) return void console.log(`  ✗ ${hostName(cfg)} is not connected to your OnlyOne yet. Run: onlyone init <onlyone-url>`);
     const hosts = onlineHosts(cfg).map((h) => h.host);
     console.log(`  ✓ ${hostName(cfg)} is part of your team${hosts.length > 1 ? ` (${hosts.length} machines online)` : ""}`);
@@ -905,10 +937,10 @@ async function status(cfg: Cfg, brief = false) {
     return;
   }
   // the server this machine actually syncs with is onlyone.toml's; the shared config only proposes one (adopted next tick)
-  const hub = String(readHubToml().cloud?.url ?? "").replace(/\/$/, ""), shared = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
-  console.log(`server: ${hub || "local (not connected to a hub)"}${shared && hub && shared !== hub ? `   (shared config says ${shared}: switching on the next tick)` : ""}`);
-  if (hub) { // today's Cloudflare usage against the free plan (cloud/src/budget.ts)
-    const u = await fetch(`${hub}/api/usage`, { headers: { Authorization: `Bearer ${cfg.server?.token}` }, signal: AbortSignal.timeout(5000) })
+  const onlyone = String(readOnlyOneToml().cloud?.url ?? "").replace(/\/$/, ""), shared = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
+  console.log(`server: ${onlyone || "local (not connected to a onlyone)"}${shared && onlyone && shared !== onlyone ? `   (shared config says ${shared}: switching on the next tick)` : ""}`);
+  if (onlyone) { // today's Cloudflare usage against the free plan (cloud/src/budget.ts)
+    const u = await fetch(`${onlyone}/api/usage`, { headers: { Authorization: `Bearer ${cfg.server?.token}` }, signal: AbortSignal.timeout(5000) })
       .then((r) => (r.ok ? r.json() : null)).catch(() => null) as any;
     const pct = (k: string) => `${Math.round((100 * u[k]) / u.free[k])}%`;
     if (u?.free) console.log(`cloudflare today (UTC): ${u.requests} requests ${pct("requests")} · ${u.rowsRead} rows read ${pct("rowsRead")} · ${u.rowsWritten} rows written ${pct("rowsWritten")} of the free plan · db ${(u.dbBytes / 1e6).toFixed(0)} MB · ${u.level}`);
@@ -936,10 +968,12 @@ async function status(cfg: Cfg, brief = false) {
 
 const HELP = `OnlyOne — your own AI team
 
-  onlyone init [<hub-url>] [--token <machine-token>]   join your hub (owner email login, or a machine token); asks for the URL if not given
-  onlyone init --primary         the first machine, once: deploy your own Cloudflare Worker (holds the fleet data), seed ~/.onlyone/data
+  onlyone                        bind this computer and ensure its background service is running
+  onlyone --version              show the CLI version
+
+  onlyone init [<onlyone-url>] [--token <machine-token>]   join your onlyone (owner email login, or a machine token); asks for the URL if not given
   onlyone install                run as a service (systemd / launchd / Task Scheduler)
-  onlyone update                 update from configured Git origin (none by default)
+  onlyone update                 update from npm (packaged CLI) or configured Git origin (source)
   onlyone fix ["what is wrong"]  AI medic: diagnose & repair this install (auto-runs on install/update/daemon failures)
   onlyone doctor                 check dependencies (agents, gh, headless GUI tools)
   onlyone visual …               headless display for GUI testing: start/run/shot/record/input/stop
@@ -954,8 +988,7 @@ const HELP = `OnlyOne — your own AI team
   onlyone usage                  weekly usage report (also posted every Monday by the built-in routine)
   onlyone agents                 list fleet members
   onlyone notify "text"          test Slack/Discord
-  onlyone security [--json]      check this OnlyOne deployment (2FA, sessions, OAuth clients, allow-lists) and this machine's OnlyOne setup
-  onlyone 2fa setup              bind (or re-bind) the authenticator app every sign-in requires; onlyone 2fa confirm <code> · onlyone 2fa status
+  onlyone security [--json]      check this OnlyOne deployment (email login, sessions, OAuth clients, allow-lists) and this machine's OnlyOne setup
   onlyone guest join <url> <code> · run · install · uninstall   low-trust guest worker for shared machines (no memory, no machine key)
   onlyone guest invite <label> · list · assign <G-id> <T-id> · results [--ack] · revoke <G-id>   (primary side)
   onlyone revoke-sessions        security valve: sign out every phone, browser and MCP connector at once (machines keep working)
@@ -963,6 +996,19 @@ const HELP = `OnlyOne — your own AI team
 
 async function main() {
   const [cmd, ...rest] = Bun.argv.slice(2);
+  if (cmd === "--version" || cmd === "-v") return void console.log(CLI_VERSION);
+  if (cmd === "--help" || cmd === "-h") return void console.log(HELP);
+  if (cmd === "--self-check") { loadConfig(); return void console.log("ok"); }
+  if (!cmd) {
+    const saved = readOnlyOneToml();
+    if (!saved.server?.token || !existsSync(P("config.toml"))) {
+      if (!(await init())) return;
+    }
+    await install();
+    console.log(`Execution tools: ${["claude", "codex"].map(c => `${c}: ${Bun.which(c) ? "installed (sign in separately)" : "missing"}`).join("; ")}`);
+    return;
+  }
+  if (cmd === "desktop") return (await import("./desktop")).desktop();
   if (cmd === "guest") return guestCmd(rest, loadConfig); // a guest machine has no onlyone config at all
   const cfg = loadConfig();
   setApprovalGate((src) => needsApproval(loadConfig(), src));
@@ -970,11 +1016,8 @@ async function main() {
   const host = hostName(cfg);
   switch (cmd) {
     case "init": {
-      // a bare `--worker` (older install lines) means the default: join an existing onlyone
-      const args = rest.flatMap((a, i) => (a === "--worker" && (!rest[i + 1] || rest[i + 1].startsWith("-")) ? [] : [a]));
-      const { values, positionals } = parseArgs({ args, allowPositionals: true,
-        options: { worker: { type: "string" }, token: { type: "string" }, primary: { type: "boolean" } } });
-      return init({ ...values, worker: values.worker ?? positionals[0] });
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { token: { type: "string" } } });
+      return init({ ...values, worker: positionals[0] });
     }
     case "install": return install();
     case "visual": return visual(rest);
@@ -991,7 +1034,17 @@ async function main() {
       return void console.log(force ? "onlyone restarts as soon as its running tasks finish"
         : "onlyone restarts once its running tasks finish (at most once per hour; --force to skip the limit)");
     }
-    case "update": return void console.log((await selfUpdate({ force: true })) ? "updated" : "up to date"); // asked by a person: retry even a release this host rejected
+    case "update": {
+      const updated = await selfUpdate({ force: true });
+      if (npmBuild && updated) {
+        const { requestNpmRestart } = await import("./npm-runtime");
+        setUpdateState({ at: new Date().toISOString(), state: "waiting", from: CLI_VERSION, detail: "Waiting for running tasks to finish" });
+        requestNpmRestart();
+        await install();
+        console.log("New version verified; service will switch after running tasks finish");
+      } else console.log(updated ? "updated" : "up to date");
+      return;
+    }
     case "daemon": return daemon(cfg);
     case "tick": return tick(cfg);
     case "add": {
@@ -1037,59 +1090,13 @@ async function main() {
         if (existsSync(prof)) console.log(`${p.split("/").pop()!.padEnd(16)} ${readFileSync(prof, "utf8").split("\n")[0].replace(/^# /, "")}`);
       }
       return;
-    case "login": { // show the pending sign-in code (used when email isn't configured)
-      const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
-      const r = url ? await fetch(`${url}/api/host/login-code`, { headers: { Authorization: `Bearer ${cfg.server?.token}` } }).catch(() => null) : null;
-      if (!r?.ok) return void console.log(L("No pending code: enter your email in the app, press Send code, then run onlyone login", "没有待使用的验证码：先在 app 里输入邮箱，点「发送验证码」，再运行 onlyone login"));
-      const c = (await r.json()) as { email: string; code: string; expires: number };
-      return void console.log(L(`\n  Code for ${c.email}: ${c.code}  (valid for ${Math.max(1, Math.round((c.expires - Date.now()) / 60000))} minutes)\n`, `\n  ${c.email} 的验证码：${c.code}  （${Math.max(1, Math.round((c.expires - Date.now()) / 60000))} 分钟内有效）\n`));
-    }
+    case "login": return void console.log(L("Sign in at your cloud URL with the code sent to your email.", "在云端地址使用邮箱验证码登录。"));
     case "security": {
       const { securityReport, formatReport } = await import("./security");
       const items = await securityReport(cfg, host, isPrimary(cfg, host));
       console.log(rest.includes("--json") ? JSON.stringify({ host, items }, null, 2) : formatReport(host, items));
       if (items.some((i) => i.level === "bad")) process.exitCode = 1;
       return;
-    }
-    case "2fa": { // the mandatory second factor; bound from a machine only (the machine key is the root of trust)
-      const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
-      if (!url) return void console.log(L("[cloud] url is not configured", "没有配置 [cloud] url"));
-      const call = (path: string, body?: unknown) => fetch(`${url}${path}`, { method: body === undefined ? "GET" : "POST",
-        headers: { Authorization: `Bearer ${cfg.server?.token}`, "x-onlyone-host": host, "content-type": "application/json" }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-      if (rest[0] === "status" || !rest[0]) {
-        const r = await call("/api/host/2fa");
-        if (!r.ok) { process.exitCode = 1; const body = await r.text(); return void console.log(L(`Query failed: HTTP ${r.status} ${body}`, `查询失败：HTTP ${r.status} ${body}`)); }
-        const d = (await r.json()) as { bound: boolean; since: number | null };
-        return void console.log(d.bound ? L(`✓ 2FA is bound (${new Date(d.since ?? 0).toLocaleString()})`, `✓ 两步验证已绑定（${new Date(d.since ?? 0).toLocaleString()}）`) : L("✗ 2FA is not bound: nobody can log in. Run onlyone 2fa setup", "✗ 还没有绑定两步验证：任何人都无法登录。运行 onlyone 2fa setup"));
-      }
-      if (rest[0] === "confirm") { // the second half of setup when it can't prompt (no terminal)
-        const c = await call("/api/host/2fa/confirm", { totp: String(rest[1] ?? "").trim() });
-        const d = (await c.json().catch(() => ({}))) as { error?: string; replaced?: boolean };
-        if (!c.ok) { process.exitCode = 1; return void console.log(`✗ ${d.error ?? `HTTP ${c.status}`}`); }
-        return void console.log(d.replaced ? L("✓ Re-bound, the old authenticator no longer works.", "✓ 已换绑，旧的验证器已失效。") : L("✓ 2FA is on: logging in now needs the email code and the authenticator number.", "✓ 两步验证已开启：以后登录需要邮箱验证码 + 验证器上的数字。"));
-      }
-      if (rest[0] !== "setup") return void console.log(L("usage: onlyone 2fa setup | onlyone 2fa confirm <6 digits> | onlyone 2fa status", "usage: onlyone 2fa setup | onlyone 2fa confirm <6 位数字> | onlyone 2fa status"));
-      const st = (await (await call("/api/host/2fa")).json().catch(() => ({}))) as { bound?: boolean };
-      if (st.bound) console.log(L("⚠ Already bound: confirming makes the old authenticator stop working at once.", "⚠ 已经绑定过：确认后旧的验证器立即失效。"));
-      const r = await call("/api/host/2fa/setup", {});
-      if (!r.ok) { process.exitCode = 1; const body = await r.text(); return void console.log(L(`Failed: HTTP ${r.status} ${body}`, `失败：HTTP ${r.status} ${body}`)); }
-      const { secret, uri } = (await r.json()) as { secret: string; uri: string };
-      console.log(L("\nScan the QR code with an authenticator app (Google Authenticator / 1Password / Authy …):\n", "\n用验证器 App（Google Authenticator / 1Password / Authy …）扫描二维码：\n"));
-      const qr = Bun.which("qrencode") ? await $`qrencode -t ansiutf8 -m 2 ${uri}`.quiet().nothrow() : null;
-      if (qr?.exitCode === 0) console.log(qr.stdout.toString());
-      else console.log(L("(install qrencode to show the QR code here)", "（装了 qrencode 就能在这里显示二维码）"));
-      console.log(L(`Or enter the key by hand: ${secret.match(/.{1,4}/g)!.join(" ")}\n`, `扫不了就手动输入密钥：${secret.match(/.{1,4}/g)!.join(" ")}\n`));
-      if (!process.stdin.isTTY) return void console.log(L("Within 10 minutes of scanning, run: onlyone 2fa confirm <6 digits from the authenticator>", "扫码后 10 分钟内运行：onlyone 2fa confirm <验证器上的 6 位数字>"));
-      for (let i = 0; i < 3; i++) {
-        const code = (prompt(L("Enter the 6 digits from the authenticator app to confirm:", "输入验证器 App 上的 6 位数字确认：")) ?? "").trim();
-        if (!code) break;
-        const c = await call("/api/host/2fa/confirm", { totp: code });
-        const d = (await c.json().catch(() => ({}))) as { ok?: boolean; error?: string; replaced?: boolean };
-        if (c.ok) return void console.log(d.replaced ? L("✓ Re-bound, the old authenticator no longer works.", "✓ 已换绑，旧的验证器已失效。") : L("✓ 2FA is on: logging in now needs the email code and the authenticator number.", "✓ 两步验证已开启：以后登录需要邮箱验证码 + 验证器上的数字。"));
-        console.log(`✗ ${d.error ?? `HTTP ${c.status}`}`);
-      }
-      process.exitCode = 1;
-      return void console.log(L("Not confirmed, the binding did not take effect.", "没有确认，绑定未生效。"));
     }
     case "revoke-sessions": { // a sign-in alert you didn't expect: everyone but the machines is out
       const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
@@ -1100,6 +1107,7 @@ async function main() {
       return void console.log(L(`✓ Revoked ${revoked} login(s) (phones, browsers, MCP connectors). Log in again with an email code.\n  If you suspect the mailbox is compromised, change its password first, then consider rotating the machine key.`, `✓ 已撤销 ${revoked} 个登录（手机、浏览器、MCP 连接器）。需要重新用邮箱验证码登录。\n  如果怀疑邮箱被盗，先改邮箱密码，再考虑轮换机器密钥。`));
     }
     case "cloud": {
+      if (npmBuild) throw new Error("Deploy the Worker from a source checkout with bun run deploy:cloud; this npm CLI connects to an already-deployed Worker");
       if (rest[0] !== "deploy") return void console.log("usage: onlyone cloud deploy");
       return void (await cloudDeploy(cfg));
     }
@@ -1111,8 +1119,8 @@ async function main() {
 if (import.meta.main) {
   try { await main(); } catch (e) {
     const cmd = Bun.argv[2] ?? "";
-    console.error(e);
-    if (["init", "install", "update", "tick", "learn"].includes(cmd) && !process.env.HUB_NO_MEDIC) {
+    console.error(npmBuild && ["", "install"].includes(cmd) && e instanceof Error ? e.message : e);
+    if (["tick", "learn"].includes(cmd) && !process.env.ONLYONE_NO_MEDIC) {
       await medic(`\`onlyone ${Bun.argv.slice(2).join(" ")}\` failed:\n${(e as Error)?.stack ?? e}`, loadConfig(), { auto: true, kind: `cmd-${cmd}` });
     }
     process.exit(1);

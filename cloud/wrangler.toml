@@ -1,13 +1,11 @@
 # Your own OnlyOne coordination plane on Cloudflare's free plan.
-# Deployed by `onlyone cloud deploy` (also run by `onlyone init` on the primary). Each user deploys into their own account.
+# Deployed independently by `bun run deploy:cloud`; executors only connect to it.
 name = "onlyone"
 main = "src/index.ts"
 compatibility_date = "2026-10-01"
 workers_dev = true
-# Secrets (set by `onlyone cloud deploy`, never in this file):
-#   HUB_TOKEN        machine (fleet) credential
-#   HUB_OWNER_EMAIL  owner allow-list for email-code login (comma-separated) — from [email] to
-#   HUB_SMTP         JSON {host, port, secure, user, pass, from} — from [email]
+# Secrets are uploaded atomically with each version by cloud/deploy.ts:
+# ONLYONE_TOKEN, ONLYONE_INSTANCE, ONLYONE_OWNER_EMAIL, ONLYONE_RESEND_API_KEY, ONLYONE_MAIL_FROM, ONLYONE_VAPID_*
 
 [assets]
 binding = "ASSETS"
@@ -16,14 +14,9 @@ not_found_handling = "single-page-application"
 run_worker_first = ["/*.wasm", "/*.js", "/*.mjs", "/*.css", "/api/*", "/media/*", "/mcp", "/oauth/*", "/.well-known/*"]
 
 [[durable_objects.bindings]]
-name = "HUB"
-class_name = "Hub"
+name = "ONLYONE"
+class_name = "OnlyOne"
 
 [[migrations]]
 tag = "v1"
-new_sqlite_classes = ["Hub"]
-
-# Login codes by email without SMTP: turn on Email Routing for one of your domains and verify the owner address,
-# then set HUB_MAIL_FROM (an address on that domain). `onlyone cloud deploy` does this from [email].
-[[send_email]]
-name = "EMAIL"
+new_sqlite_classes = ["OnlyOne"]

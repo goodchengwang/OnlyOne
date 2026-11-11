@@ -9,6 +9,9 @@
     "host": "./host.js"
   },
   "capabilities": {
+    "process": {
+      "execute": ["/bin/sh"]
+    },
     "clipboard": true,
     "statusBar": true,
     "network": {

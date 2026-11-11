@@ -6,7 +6,7 @@ mock.module("cloudflare:email", () => ({ EmailMessage: class {} }));
 mock.module("cloudflare:sockets", () => ({ connect: () => { throw new Error("No network in this test"); } }));
 // The Worker has its own runtime types; Bun supplies the bindings above.
 const workerModule = "../cloud/src/index";
-const { Hub } = await import(workerModule);
+const { OnlyOne } = await import(workerModule);
 
 test("cloud retries return one event and queue one task; identical new messages stay separate", () => {
   const db = new Database(":memory:");
@@ -19,7 +19,7 @@ test("cloud retries return one event and queue one task; identical new messages 
     toInbox: (e: unknown) => queued.push(e),
     hostOnline: () => true,
   };
-  const send = (id?: string) => Hub.prototype.ownerMessage.call(host as any, "Same message", undefined, undefined, false, id);
+  const send = (id?: string) => OnlyOne.prototype.ownerMessage.call(host as any, "Same message", undefined, undefined, false, id);
   try {
     const first = send("local:one");
     expect(send("local:one")).toEqual(first);

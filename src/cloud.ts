@@ -4,14 +4,9 @@
 // `onlyone cloud deploy` deploys the Worker into the owner's Cloudflare account (wrangler login once) and records the URL.
 import { $ } from "bun";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { basename, join } from "node:path";
-import { type Jwk, newVapidKeys } from "../cloud/src/push";
-import { ipAllowed, parseAllowList } from "../cloud/src/ipallow";
-import { type Cfg, CODE, L, P, _commitPush, _pull, hostName, journal, locked, HOME_DIR } from "./core";
+import { type Cfg, L, P, _commitPush, hostName, journal, locked, HOME_DIR } from "./core";
 import { updateChannel } from "./channels";
-import { writeHubToml } from "./sync";
-import { ensureWebClient } from "./webclient";
 import { type Event, MEDIA, appendEvent, applyOp, handleOwnerMessage, saveSettings, setMirror, settingsView, status, cancelTask, updateFleet } from "./server";
 
 const base = (cfg: Cfg) => String(cfg.cloud?.url ?? "").replace(/\/$/, "");
@@ -33,6 +28,9 @@ export async function cloudMedia(cfg: Cfg, path: string): Promise<Uint8Array | n
 /** Primary: run the bridge loop. */
 export function startCloudBridge(cfg: Cfg) {
   if (!base(cfg) || !cfg.server?.token) return;
+  let stopped = false;
+  let socket: WebSocket | undefined;
+  let reconnect: ReturnType<typeof setTimeout> | undefined;
   const pending: Event[] = [];
   // an event's images live in this machine's media folder ("/media/<name>"): upload them first, then point the event at the copies
   const upload = async (url: string): Promise<string | null> => {
@@ -61,26 +59,28 @@ export function startCloudBridge(cfg: Cfg) {
   // acks it, so a daemon restarting mid-batch got the same owner messages again and made duplicate tasks (T-0641)
   const cursorFile = join(HOME_DIR, "cloud-inbox.json");
   const saved = (() => { try { return JSON.parse(readFileSync(cursorFile, "utf8")); } catch { return {}; } })();
-  const sameHub = saved.url === base(cfg);
+  const sameOnlyOne = saved.url === base(cfg);
   const seen: string[] = Array.isArray(saved.seen) ? saved.seen : [];
   const saveCursor = () => { try { writeFileSync(cursorFile, JSON.stringify({ url: base(cfg), after, seen: seen.slice(-500) })); } catch {} };
-  let after = sameHub ? Number(saved.after) || 0 : 0, n = 0, busy = false, lastStatus = "", lastShape = "", lastPush = 0;
+  let after = sameOnlyOne ? Number(saved.after) || 0 : 0, n = 0, busy = false, lastStatus = "", lastShape = "", lastPush = 0;
   let watchers = 1; // owner clients connected (the Worker reports it); until it says otherwise, assume someone looks
   // push the dashboard at once when its shape changes (an answered decision must leave "待你决定" at once); live agent
   // activity alone is pushed at most once a minute and only while an owner client is open; an unchanged dashboard
   // every ~15 min (Cloudflare free plan: cloud/src/budget.ts)
   const pushStatus = async (force = false) => {
-    const s = status();
+    // A new avatar must finish syncing before a status frame makes clients request its image.
+    const view = await locked(() => ({ status: status(), settings: settingsView() }));
+    const s = view.status;
     const st = JSON.stringify(s);
     const shape = JSON.stringify({ ...s, active: s.active.map(({ activity: _, ...t }) => t) });
     const due = shape !== lastShape || (watchers > 0 && st !== lastStatus && Date.now() - lastPush > 60_000) || force;
     if (!due) return;
-    const r = await call(cfg, "/api/host/state", { method: "PUT", body: JSON.stringify({ status: s, settings: settingsView() }) });
+    const r = await call(cfg, "/api/host/state", { method: "PUT", body: JSON.stringify(view) });
     if (r) { lastStatus = st; lastShape = shape; lastPush = Date.now(); if (typeof r.watchers === "number") watchers = r.watchers; }
   };
   // housekeeping every few seconds: mirror events up, push the dashboard (both cost nothing when nothing changed)
   const loop = async () => {
-    if (busy) return; busy = true;
+    if (busy || stopped) return; busy = true;
     try {
       await flush();
       await pushStatus(n++ % 300 === 0); // a forced re-push every ~15 min; the Worker skips unchanged writes
@@ -116,25 +116,29 @@ export function startCloudBridge(cfg: Cfg) {
   };
   /** Fetch and handle inbox items until none are left (each call also acks what came before `after`). */
   const drain = async () => {
+    if (stopped) return;
     if (draining) { again = true; return; }
     draining = true; lastDrain = Date.now();
     try {
       do {
         again = false;
         for (let page = 0; page < 20; page++) {
+          if (stopped) break;
           const r = await call(cfg, `/api/host/inbox?after=${after}`);
           const items = r?.items ?? [];
-          for (const it of items) await handle(it);
+          for (const it of items) { if (stopped) break; await handle(it); }
           if (!items.length) break;
           await pushStatus();
         }
-      } while (again);
+      } while (again && !stopped);
     } catch (err) { console.error(`cloud bridge inbox: ${err}`); }
     draining = false;
   };
   let backoff = 5_000;
   const connect = () => {
+    if (stopped) return;
     const ws = new WebSocket(base(cfg).replace(/^http/i, "ws") + "/api/host/stream", { headers: { Authorization: `Bearer ${cfg.server?.token}` } } as any);
+    socket = ws;
     let ping: ReturnType<typeof setInterval> | undefined, pong = Date.now();
     ws.onopen = () => {
       live = true; backoff = 5_000; pong = Date.now();
@@ -150,27 +154,27 @@ export function startCloudBridge(cfg: Cfg) {
     };
     ws.onclose = () => {
       live = false; clearInterval(ping);
-      setTimeout(connect, backoff); backoff = Math.min(backoff * 2, 5 * 60_000);
+      if (!stopped) reconnect = setTimeout(connect, backoff);
+      backoff = Math.min(backoff * 2, 5 * 60_000);
     };
     ws.onerror = () => {};
   };
   void loop();
   connect();
-  setInterval(loop, (cfg.cloud?.poll_seconds ?? 3) * 1000);
+  const timer = setInterval(loop, (cfg.cloud?.poll_seconds ?? 3) * 1000);
   console.log(`cloud bridge → ${base(cfg)}`);
+  return async () => {
+    stopped = true;
+    clearInterval(timer);
+    clearTimeout(reconnect);
+    socket?.close();
+    // Finish the current message, leave later inbox items queued, then upload its replies.
+    while (draining || busy) await Bun.sleep(50);
+    await flush();
+  };
 }
 
-/** Web Push VAPID keypair: generated once, kept in ~/.onlyone/vapid.json (0600) so redeploys keep phones subscribed. */
-async function vapidKeys(): Promise<{ publicKey: string; privateJwk: Jwk }> {
-  const f = join(HOME_DIR, "vapid.json");
-  if (existsSync(f)) return JSON.parse(readFileSync(f, "utf8"));
-  const k = await newVapidKeys();
-  mkdirSync(join(f, ".."), { recursive: true });
-  writeFileSync(f, JSON.stringify(k), { mode: 0o600 });
-  return k;
-}
-
-/** [cloud] allow_ips (a string or a list of IPs / CIDRs) → the HUB_ALLOW_IPS secret ("" = no IP restriction).
+/** [cloud] allow_ips (a string or a list of IPs / CIDRs) → the ONLYONE_ALLOW_IPS secret ("" = no IP restriction).
  *  undefined when config.toml has no allow_ips at all: a deploy then leaves the Worker's list as it is, so a machine
  *  whose config is behind (not synced yet) cannot switch the allow-list off by redeploying. */
 export function allowIps(cfg: Cfg): string | undefined {
@@ -182,85 +186,11 @@ export function allowIps(cfg: Cfg): string | undefined {
 /** Why the last cloudDeploy returned false (for the journal: a daemon's console is out of the owner's sight). */
 export let lastDeployError = "";
 
-/** Deploy the Worker into the owner's Cloudflare account; set the token secret; record the URL (onlyone.toml + shared config). */
-export async function cloudDeploy(cfg: Cfg) {
+/** Explicit deployment shares the standalone path and never changes this executor's identity. */
+export async function cloudDeploy(_cfg: Cfg) {
   lastDeployError = "";
-  const fail = (why: string) => { lastDeployError = why; console.log(why); return false as const; };
-  const dir = join(CODE, "cloud");
-  const wr = ["bunx", "wrangler"];
-  // a login with several accounts can't deploy non-interactively: [cloud] account (or CLOUDFLARE_ACCOUNT_ID) picks one
-  const account = process.env.CLOUDFLARE_ACCOUNT_ID || cfg.cloud?.account;
-  const env = { ...process.env, ...(account ? { CLOUDFLARE_ACCOUNT_ID: account } : {}) };
-  const who = await $`${wr} whoami`.cwd(dir).env(env).quiet().nothrow();
-  if (!/logged in/i.test(who.stdout.toString())) {
-    return fail(L("Log in to your own Cloudflare account first (the free plan is enough):\n  bunx wrangler login\nThen run again: onlyone cloud deploy", "先登录你自己的 Cloudflare 账号（免费版即可）：\n  bunx wrangler login\n然后重新运行：onlyone cloud deploy"));
-  }
-  if (!cfg.server?.token) return fail(L("[server] token is missing, run onlyone init first", "缺少 [server] token，先运行 onlyone init"));
-  if (!(await ensureWebClient())) return fail(L("Web client unavailable; the Worker was not deployed. Build it with NSH=nsh bash app/build-web.sh, or set ONLYONE_CLIENT_BASE_URL, then run onlyone cloud deploy", "客户端网页不可用，Worker 没有部署。请运行 NSH=nsh bash app/build-web.sh 构建，或设置 ONLYONE_CLIENT_BASE_URL 后重试 onlyone cloud deploy"));
-  const name = cfg.cloud?.name ?? "onlyone";
-  // IP allow-list: refuse a list that doesn't parse, or that would shut out the very machine deploying it
-  const allow = allowIps(cfg);
-  if (allow) {
-    const { nets, bad } = parseAllowList(allow);
-    if (bad.length) return fail(L(`[cloud] allow_ips has entries that cannot be parsed: ${bad.join(" ")}`, `[cloud] allow_ips 里有无法识别的项：${bad.join(" ")}`));
-    const prev = String(cfg.cloud?.domain ? `https://${cfg.cloud.domain}` : cfg.cloud?.url ?? "").replace(/\/$/, "");
-    const mine = prev ? (await fetch(`${prev}/cdn-cgi/trace`).then((r) => r.text()).catch(() => "")).match(/^ip=(.+)$/m)?.[1]?.trim() : undefined;
-    if (mine && !ipAllowed(mine, nets)) return fail(L(`This machine's public IP ${mine} is not in [cloud] allow_ips: it could not reach the Worker after deploying. Add it first.`, `本机出口 IP ${mine} 不在 [cloud] allow_ips 里：部署后这台机器会连不上 Worker。先把它加进去再部署。`));
-  }
-  console.log(L(`Deploying to your Cloudflare account (Worker: ${name})…`, `部署到你的 Cloudflare 账号（Worker：${name}）…`));
-  // [cloud] domain (e.g. onlyone.example.com on a zone in the same account) attaches a Custom Domain and becomes the URL
-  const domain = String(cfg.cloud?.domain ?? "").trim();
-  const deploy = () => $`${wr} deploy --name ${name} ${domain ? ["--domain", domain] : []}`.cwd(dir).env(env).quiet().nothrow();
-  let dep = await deploy();
-  let out = dep.stdout.toString() + dep.stderr.toString();
-  // a brand-new Cloudflare account has no workers.dev subdomain yet, and wrangler can only ask for one with a
-  // terminal in front of it — we run it quietly, so on that first deploy hand the user's terminal over for that
-  // one-time question, then deploy quietly again to capture the URL (a custom domain never needs workers.dev)
-  if (dep.exitCode !== 0 && !domain && /register a workers\.dev subdomain/i.test(out)) {
-    const link = out.match(/https:\/\/dash\.cloudflare\.com\/\S+\/workers\/onboarding/)?.[0];
-    if (!process.stdin.isTTY)
-      return fail(L(`This Cloudflare account has no workers.dev subdomain yet (every account registers one before its first Worker deploy).\nRegister at: ${link ?? "Cloudflare dashboard → Workers & Pages"}\nor run bunx wrangler deploy once interactively in cloud/ and follow the prompts.\nThen run again: onlyone cloud deploy`, `这个 Cloudflare 账号还没有 workers.dev 子域名（账号第一次部署 Worker 都要先注册一个）。\n注册入口：${link ?? "Cloudflare 控制台 → Workers & Pages"}\n或在 cloud/ 目录交互式运行一次 bunx wrangler deploy，按提示注册。\n然后重新运行：onlyone cloud deploy`));
-    console.log(L("This account has no workers.dev subdomain yet: register one at wrangler's next prompt (one time; every Worker on this account uses it as its prefix)…", "账号还没有 workers.dev 子域名：按 wrangler 接下来的提示注册一个（一次性，之后这个账号的 Worker 都用它做前缀）…"));
-    const ask = Bun.spawn([...wr, "deploy", "--name", name], { cwd: dir, env, stdin: "inherit", stdout: "inherit", stderr: "inherit" });
-    if ((await ask.exited) !== 0) return fail(L("The workers.dev subdomain was not registered. Register it, then run again: onlyone cloud deploy", "workers.dev 子域名没有注册成；注册好之后重新运行：onlyone cloud deploy"));
-    dep = await deploy();
-    out = dep.stdout.toString() + dep.stderr.toString();
-  }
-  if (dep.exitCode !== 0) return fail(out.slice(-1500));
-  const url = domain ? `https://${domain}` : out.match(/https:\/\/[\w.-]+\.workers\.dev/)?.[0];
-  const secrets: Record<string, string> = { HUB_TOKEN: cfg.server.token, ...(allow !== undefined ? { HUB_ALLOW_IPS: allow } : {}) };
-  const e = cfg.email ?? {};
-  if (e.to && e.host) {
-    secrets.HUB_OWNER_EMAIL = String(e.to);
-    secrets.HUB_SMTP = JSON.stringify({ host: e.host, port: e.port ?? 465, secure: e.secure ?? (e.port ?? 465) === 465, user: e.user, pass: e.pass, from: e.from ?? e.user });
-  } else if (e.to && e.from) { // Cloudflare Email Routing: no SMTP, `from` is an address on a domain with Email Routing on
-    secrets.HUB_OWNER_EMAIL = String(e.to);
-    secrets.HUB_MAIL_FROM = String(e.from).match(/<([^>]+)>/)?.[1] ?? String(e.from);
-  } else console.log(L("Email is not configured, login codes cannot be sent: fill in [email] in the shared config.toml and run onlyone cloud deploy again", "还没配置邮箱：登录验证码发不出去，在共享的 config.toml 里填 [email] 后重新运行 onlyone cloud deploy"));
-  if (cfg.owner?.language) secrets.HUB_LANG = String(cfg.owner.language);
-  const vapid = await vapidKeys();
-  secrets.HUB_VAPID_PUBLIC = vapid.publicKey;
-  secrets.HUB_VAPID_PRIVATE = JSON.stringify(vapid.privateJwk);
-  // `secret bulk` reads JSON from stdin — values never touch argv or the console.
-  const sec = Bun.spawn([...wr, "secret", "bulk", "--name", name], { cwd: dir, env, stdin: new Blob([JSON.stringify(secrets)]), stdout: "pipe", stderr: "pipe" });
-  if ((await sec.exited) !== 0) return fail(L("Setting the Worker secrets failed:\n", "设置 Worker 密钥失败：\n") + (await new Response(sec.stderr).text()).slice(-800));
-  if (!url) return fail(L("Deployed, but the address was not detected: put the workers.dev address in [cloud] url in config.toml", "部署成功，但没识别到地址；请把 workers.dev 地址写进 config.toml 的 [cloud] url"));
-  // ---- record the URL (machine-local onlyone.toml first: the data sync itself goes through this Worker)
-  writeHubToml({ cloud: { url, name, ...(account ? { account } : {}), ...(domain ? { domain } : {}) } });
-  await locked(async () => {
-    await _pull();
-    const f = P("config.toml");
-    let s = readFileSync(f, "utf8");
-    // keep the account too: without it the primary's next redeploy (on every update) may land in another account
-    const block = `[cloud]\nurl = "${url}"\nname = "${name}"\n${account ? `account = "${account}"\n` : ""}${domain ? `domain = "${domain}"\n` : ""}${allow !== undefined ? `allow_ips = "${allow}"\n` : ""}`;
-    s = /^\[cloud\]/m.test(s) ? s.replace(/^\[cloud\][^\[]*/m, `${block}\n`) : `${s.trimEnd()}\n\n${block}`;
-    writeFileSync(f, s);
-    writeFileSync(P("README.md"), L(`# OnlyOne data\n\nPrivate data (kept in your own Cloudflare Worker): tasks, decisions, memory, logs.\n\n## Client\n\nAddress: **${url}**\n\nOpen it and paste the token to connect (or log in with an email code; the machine token is in ~/.onlyone/onlyone.toml on the host). This address is deployed in your own Cloudflare account and does not change.\n`, `# OnlyOne data\n\n私有数据（保存在你自己的 Cloudflare Worker 里）：任务、决策、记忆、日志。\n\n## 客户端\n\n地址：**${url}**\n\n打开后粘贴 token 连接（或用邮箱验证码登录；机器 token 在主机的 ~/.onlyone/onlyone.toml 里）。这个地址部署在你自己的 Cloudflare 账号里，固定不变。\n`));
-    journal(hostName(cfg), `☁️ cloud hub deployed: ${url}`);
-    await _commitPush(`cloud hub ${url}`);
-  });
-  console.log(L(`✓ Deployed: ${url}`, `✓ 已部署：${url}`));
-  return url;
+  try { return await (await import("../cloud/deploy")).deployCloud(); }
+  catch (error) { lastDeployError = error instanceof Error ? error.message : "Cloud deployment failed"; console.error(lastDeployError); return false as const; }
 }
 
 /** Record an owner message id as handled; false when it was already handled (a replay after a restart or Worker switch). */

@@ -1,5 +1,5 @@
-// Optional source-IP allow-list for the Worker (secret HUB_ALLOW_IPS: comma/space-separated IPs or CIDRs, v4 and v6).
-// Unset or empty: every IP may connect (auth still applies). Set: anything else gets 403 before reaching the Hub.
+// Optional source-IP allow-list for the Worker (secret ONLYONE_ALLOW_IPS: comma/space-separated IPs or CIDRs, v4 and v6).
+// Unset or empty: every IP may connect (auth still applies). Set: anything else gets 403 before reaching the OnlyOne.
 
 function v4(s: string): bigint | null {
   const p = s.split(".");

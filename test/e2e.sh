@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end: sandbox data mirror synced to an offline fake of the Worker files API
-# (HUB_SYNC_FAKE = the real cloud/src/files.ts over a local SQLite file), fake agent CLIs, run ticks.
+# (ONLYONE_SYNC_FAKE = the real cloud/src/files.ts over a local SQLite file), fake agent CLIs, run ticks.
 set -euo pipefail
 trap 'echo "FAIL: e2e.sh line $LINENO: $BASH_COMMAND" >&2' ERR
 SRC=$(cd "$(dirname "$0")/.." && pwd)
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
-export ONLYONE_HOME="$W" HUB_DATA="$W/data" HUB_HOST=pc HUB_SYNC_FAKE="$W/worker.sqlite"
+export ONLYONE_HOME="$W" ONLYONE_DATA_DIR="$W/data" ONLYONE_HOST=pc ONLYONE_SYNC_FAKE="$W/worker.sqlite"
 cd "$SRC"; onlyone() { bun "$SRC/src/cli.ts" "$@"; }
 onlyone init --primary >/dev/null
 cd "$W/data"
@@ -85,7 +85,7 @@ tick_until "grep -qs 'Results from delegated subtasks' tasks/done/$SPL.md"
 grep -q "Results from delegated subtasks" tasks/done/$SPL.md
 ! grep -l "parent: $SPL" tasks/proposed/*.md 2>/dev/null
 # a second host joins and mirrors the same data
-ONLYONE_HOME="$W/w2" HUB_DATA="$W/w2/data" HUB_HOST=w2 bun "$SRC/src/cli.ts" init --worker http://unused --token x >/dev/null
+ONLYONE_HOME="$W/w2" ONLYONE_DATA_DIR="$W/w2/data" ONLYONE_HOST=w2 bun "$SRC/src/cli.ts" init --worker http://unused --token x >/dev/null
 cmp tasks/done/T-0001.md "$W/w2/data/tasks/done/T-0001.md"
 test ! -e "$W/w2/data/config.local.toml.pc" && ! grep -q fake-agent "$W/w2/data/config.local.toml"
 echo "E2E OK"; cat journal/*.md

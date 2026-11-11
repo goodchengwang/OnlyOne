@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const W = mkdtempSync(join(tmpdir(), "hub-decisions-"));
+const W = mkdtempSync(join(tmpdir(), "onlyone-decisions-"));
 let judgeReply: any = null;
 const sent: string[] = [];
 const realRunner = await import("../src/runner");
@@ -14,8 +14,8 @@ mock.module("../src/notify", () => ({ ...realNotify, openDecisionIds: () => new 
 
 let core: typeof import("../src/core"), dec: typeof import("../src/decisions"), auto: typeof import("../src/autonomy");
 beforeAll(async () => {
-  process.env.HUB_DATA ||= join(W, "data"); // test/preload.ts normally sets a temp dir already
-  process.env.HUB_SYNC = "local";
+  process.env.ONLYONE_DATA_DIR ||= join(W, "data"); // test/preload.ts normally sets a temp dir already
+  process.env.ONLYONE_SYNC = "local";
   core = await import("../src/core");
   if (!core.DATA.startsWith(tmpdir())) throw new Error(`DATA=${core.DATA} is not a temp dir; refusing to touch real data`);
   for (const d of ["decisions/open", "decisions/closed"]) rmSync(core.P(d), { recursive: true, force: true });

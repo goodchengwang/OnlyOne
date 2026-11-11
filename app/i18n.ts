@@ -3,7 +3,7 @@
 import { signal } from "nsh";
 
 export type Lang = "en" | "zh";
-export const LANG_KEY = "hub.lang";
+export const LANG_KEY = "onlyone.lang";
 export const lang = signal<Lang>("en");
 /** The text in the current language. Read inside a render or a function so a switch picks it up. */
 export const L = (en: string, zh: string): string => (lang() === "zh" ? zh : en);

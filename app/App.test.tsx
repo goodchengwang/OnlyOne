@@ -1,22 +1,22 @@
 import { describe, expect, open, test } from "nsh/test";
 import { URL as ParsedURL } from "url";
 
-const URL = "http://hub.test:8787";
-const STORAGE = { "hub.url": URL, "hub.token": "tok" };
+const URL = "http://onlyone.test:8787";
+const STORAGE = { "onlyone.url": URL, "onlyone.token": "tok" };
 const ts = (min: number) => new Date(Date.now() - (60 - min) * 60000).toISOString();
 
 const events = [
   { id: "e1", ts: ts(1), from: "lead@mac", kind: "notice", text: "开始处理 `T-0007`，*很快*完成" },
   {
-    id: "e2", ts: ts(2), from: "hub", kind: "decision", ref: "D-0001",
+    id: "e2", ts: ts(2), from: "onlyone", kind: "decision", ref: "D-0001",
     text: "要不要升级依赖？建议：B", options: ["A: 不升级", "B: 升级", "C: 先评估"],
   },
   {
-    id: "e3", ts: ts(3), from: "hub", kind: "proposals", ref: "P-0002",
+    id: "e3", ts: ts(3), from: "onlyone", kind: "proposals", ref: "P-0002",
     text: "待批准清单", options: ["1 写测试", "2 修文档", "all", "none"],
   },
   { id: "e4", ts: ts(4), from: "owner", kind: "owner", text: "P-0002 1" },
-  { id: "e5", ts: ts(5), from: "hub", kind: "system", text: "⚙️ 设置已更新：{\"routines\":{}}" },
+  { id: "e5", ts: ts(5), from: "onlyone", kind: "system", text: "⚙️ 设置已更新：{\"routines\":{}}" },
   { id: "e6", ts: ts(6), from: "dev@linux-box", kind: "notice", text: "T-0005 修好了，见 https://github.com/acme/app/pull/42" },
 ];
 const status = {
@@ -35,12 +35,12 @@ const status = {
 };
 
 const prDecision = {
-  id: "e7", ts: ts(7), from: "hub", kind: "decision", ref: "D-H0003",
+  id: "e7", ts: ts(7), from: "onlyone", kind: "decision", ref: "D-H0003",
   text: "合并 nsh #747 吗？按 D-H0002 的反馈改好了，见 `nsh#1` 和 other#3\n\n建议：*A*",
   options: ["A: squash 合并 https://github.com/acme/nsh/pull/747 — 进入发布", "B: 继续修改"],
 };
 
-function hub(posts: { text: string; reply_to?: string }[], extra: unknown[] = []) {
+function onlyone(posts: { text: string; reply_to?: string }[], extra: unknown[] = []) {
   return {
     [`GET ${URL}/api/feed`]: { body: { events: [...events, ...extra] } },
     [`GET ${URL}/api/feed?*`]: { body: { events: [] } },
@@ -74,56 +74,51 @@ function auth(log: Auth, opts: { start?: number; code?: string } = {}) {
 const newLog = (): Auth => ({ starts: [], verifies: [], logouts: 0 });
 
 describe("login", () => {
-  test("email and authenticator codes log in and keep the session", async () => {
+  test("email codes log in and keep the session", async () => {
     const log = newLog();
-    const app = await open("./App.tsx", { network: { ...hub([]), ...auth(log) } });
+    const app = await open("./App.tsx", { network: { ...onlyone([]), ...auth(log) } });
     await app.waitFor("Sign in to OnlyOne");
     await app.clear("id:url");
-    await app.type("id:url", "hub.test:8787/");
+    await app.type("id:url", "onlyone.test:8787/");
     await app.type("id:email", "ceo@example.com");
     await app.press("id:send-code");
     await app.waitFor("id:code");
     expect(log.starts).toEqual([{ email: "ceo@example.com" }]);
     expect(app.shows("text:/Resend \\(\\d+s\\)/")).toBe(true);
-    await app.type("id:totp", "654321");
-    await app.type("id:code", "AB12CD34"); // submits only with both factors
+    await app.type("id:code", "AB12CD34"); // submits with the email code alone
     await app.waitFor("id:composer");
-    expect(log.verifies).toEqual([{ email: "ceo@example.com", code: "AB12CD34", totp: "654321" }]);
-    expect(app.storage()["hub.token"]).toBe("sess");
-    expect(app.storage()["hub.url"]).toBe(URL);
-    expect(app.storage()["hub.email"]).toBe("ceo@example.com");
+    expect(log.verifies).toEqual([{ email: "ceo@example.com", code: "AB12CD34" }]);
+    expect(app.storage()["onlyone.token"]).toBe("sess");
+    expect(app.storage()["onlyone.url"]).toBe(URL);
+    expect(app.storage()["onlyone.email"]).toBe("ceo@example.com");
   });
 
-  test("served by the hub: no address field; a pasted code with spaces works", async () => {
+  test("served by the onlyone: no address field; a pasted code with spaces works", async () => {
     const log = newLog();
     const app = await open("./App.tsx", {
       host: { handlers: { page: { origin: URL } } },
-      storage: { "hub.email": "ceo@example.com" },
-      network: { ...hub([]), ...auth(log) },
+      storage: { "onlyone.email": "ceo@example.com" },
+      network: { ...onlyone([]), ...auth(log) },
     });
     await app.waitFor("Sign in to OnlyOne");
     expect(app.shows("id:url")).toBe(false);
     expect(app.value("id:email")).toBe("ceo@example.com");
     await app.submit("id:email");
     await app.waitFor("id:code");
-    await app.type("id:totp", "654321");
     await app.paste("id:code", { text: "AB12 CD34" });
     await app.waitFor("id:composer");
   });
 
   test("a wrong code, rate limits and no email configured are explained", async () => {
     const log = newLog();
-    const app = await open("./App.tsx", { host: { handlers: { page: { origin: URL } } }, network: { ...hub([]), ...auth(log) } });
+    const app = await open("./App.tsx", { host: { handlers: { page: { origin: URL } } }, network: { ...onlyone([]), ...auth(log) } });
     await app.type("id:email", "ceo@example.com");
     await app.press("id:send-code");
-    await app.type("id:totp", "654321");
     await app.type("id:code", "00000000");
     await app.waitFor("bad code");
     expect(app.value("id:code")).toBe("00000000");
     await app.clear("id:code");
     await app.type("id:code", "AB12CD34");
-    expect(app.value("id:totp")).toBe("");
-    await app.type("id:totp", "654321");
     await app.waitFor("id:composer");
 
     const limited = await open("./App.tsx", { host: { handlers: { page: { origin: URL } } }, network: auth(newLog(), { start: 429 }) });
@@ -152,14 +147,14 @@ describe("login", () => {
       network: { [`GET ${URL}/api/feed`]: { status: 401 }, [`GET ${URL}/api/status`]: { status: 401 } },
     });
     await app.waitFor("Your session expired. Please sign in again.");
-    expect(app.storage()["hub.token"]).toBe(undefined);
+    expect(app.storage()["onlyone.token"]).toBe(undefined);
   });
 
   test("退出登录 calls logout and forgets the session", async () => {
     const log = newLog();
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
-      network: { ...hub([]), ...auth(log), [`GET ${URL}/api/settings`]: { status: 500 } },
+      network: { ...onlyone([]), ...auth(log), [`GET ${URL}/api/settings`]: { status: 500 } },
     });
     await app.press("id:user-menu");
     await app.press("id:settings");
@@ -167,23 +162,23 @@ describe("login", () => {
     await app.press("id:logout");
     await app.waitFor("Sign in to OnlyOne");
     expect(log.logouts).toBe(1);
-    expect(app.storage()["hub.token"]).toBe(undefined);
+    expect(app.storage()["onlyone.token"]).toBe(undefined);
   });
   for (const platform of ["ios", "android"] as const) {
     test(`the mobile account menu on ${platform} switches appearance and language`, async () => {
-      const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: platform === "android" ? 1200 : 390, height: 844, platform });
+      const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]), width: platform === "android" ? 1200 : 390, height: 844, platform });
       if (platform === "ios") await app.press("label:Menu");
       await app.press("id:user-menu");
       await app.press("id:theme-dark");
-      expect(app.storage()["hub.theme"]).toBe("dark");
+      expect(app.storage()["onlyone.theme"]).toBe("dark");
       await app.press("id:theme-light");
-      expect(app.storage()["hub.theme"]).toBe("light");
+      expect(app.storage()["onlyone.theme"]).toBe("light");
       await app.press("id:menu-language");
       await app.press("id:menu-language-back");
       await app.waitFor("id:settings");
       await app.press("id:menu-language");
       await app.press("id:menu-lang-zh");
-      expect(app.storage()["hub.lang"]).toBe("zh");
+      expect(app.storage()["onlyone.lang"]).toBe("zh");
       await app.waitUntil(() => !app.shows("id:menu-lang-zh"));
       await app.press("id:user-menu");
       await app.press("id:settings");
@@ -191,13 +186,13 @@ describe("login", () => {
     });
   }
   test("the sidebar user menu switches appearance and language and opens settings", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]), width: 1200, height: 800, platform: "macos" });
     await app.press("id:user-menu");
     await app.press("id:theme-dark");
-    expect(app.storage()["hub.theme"]).toBe("dark");
+    expect(app.storage()["onlyone.theme"]).toBe("dark");
     await app.press("id:menu-language");
     await app.press("id:menu-lang-zh");
-    expect(app.storage()["hub.lang"]).toBe("zh");
+    expect(app.storage()["onlyone.lang"]).toBe("zh");
     await app.waitFor("主会话");
     await app.waitFor("唐僧");
     expect(app.shows("Tripitaka")).toBe(false);
@@ -212,7 +207,7 @@ describe("channel", () => {
     const many = Array.from({ length: 90 }, (_, i) => ({
       id: `long-${i}`, ts: ts(10 + i / 100), from: "agent", kind: "notice", text: `Long timeline message ${i}`,
     }));
-    const app = await open("./App.tsx", { storage: STORAGE, width: 390, height: 800, platform: "ios", network: hub([], many) });
+    const app = await open("./App.tsx", { storage: STORAGE, width: 390, height: 800, platform: "ios", network: onlyone([], many) });
     await app.waitFor("Long timeline message 89");
     expect(app.shows("Long timeline message 0")).toBe(false);
     await app.scroll("id:timeline", -20000);
@@ -227,7 +222,7 @@ describe("channel", () => {
       id: `jump-${i}`, ts: ts(10 + i / 100), from: "agent", kind: "notice",
       text: `Jump message ${i}\n${"Long message content. ".repeat(i % 9 + 1)}`,
     }));
-    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: hub([], many) });
+    const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "macos", network: onlyone([], many) });
     await app.waitFor("text:/Jump message 499/");
     await app.wait(350);
     const start = Date.now();
@@ -242,7 +237,7 @@ describe("channel", () => {
   });
   test("the channel shows the newest 200 messages; older ones load on request", async () => {
     const many = Array.from({ length: 250 }, (_, i) => ({ id: `page-${i}`, ts: ts(i / 5), from: "agent", kind: "notice", text: `Paged message ${i}` }));
-    const app = await open("./App.tsx", { storage: STORAGE, width: 390, height: 800, platform: "ios", network: hub([], many) });
+    const app = await open("./App.tsx", { storage: STORAGE, width: 390, height: 800, platform: "ios", network: onlyone([], many) });
     await app.waitFor("Paged message 249");
     const toTop = async (seen: string) => { for (let i = 0; i < 100 && !app.shows(seen); i++) await app.scroll("id:timeline", -2000).catch(() => {}); };
     await toTop("id:timeline-more");
@@ -258,7 +253,7 @@ describe("channel", () => {
     const arrive = (text: string) => later.push({ id: text, ts: new Date().toISOString(), from: "agent", kind: "notice", text });
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 390, height: 800, platform,
-      network: { ...hub([], many), [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }) },
+      network: { ...onlyone([], many), [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }) },
     });
     await app.waitUntil(() => app.texts().some((text) => text.startsWith("Tail message")));
     if (app.shows("label:Back to bottom")) await app.press("label:Back to bottom");
@@ -295,13 +290,13 @@ describe("channel", () => {
   });
 
   test("a new message preserves existing content", async () => {
-    const url = "http://hub.test:8787";
+    const url = "http://onlyone.test:8787";
     let arrival = false;
     const old = { id: "old", ts: "2026-11-07T01:00:00Z", from: "lead", kind: "notice", text: "Existing message stays in place" };
     const next = { id: "next", ts: "2026-11-07T02:00:00Z", from: "lead", kind: "notice", text: "New message enters smoothly" };
     const app = await open("./App.tsx", {
       width: 600, height: 800,
-      storage: { "hub.url": url, "hub.token": "tok" },
+      storage: { "onlyone.url": url, "onlyone.token": "tok" },
       network: {
         [`GET ${url}/api/feed`]: { body: { events: [old] } },
         [`GET ${url}/api/feed?*`]: () => ({ body: { events: arrival ? [next] : [] } }),
@@ -316,9 +311,9 @@ describe("channel", () => {
   });
 
   test("proposal selection survives a recycled timeline cell", async () => {
-    const proposal = { id: "proposal-long", ts: ts(8), from: "hub", kind: "proposals", ref: "P-0900", text: "请选择\n1. 保存选择" };
+    const proposal = { id: "proposal-long", ts: ts(8), from: "onlyone", kind: "proposals", ref: "P-0900", text: "请选择\n1. 保存选择" };
     const many = Array.from({ length: 90 }, (_, i) => ({ id: `recycle-${i}`, ts: ts(10 + i / 100), from: "agent", kind: "notice", text: `Recycled message ${i}` }));
-    const app = await open("./App.tsx", { storage: STORAGE, width: 390, height: 800, platform: "ios", network: hub([], [proposal, ...many]) });
+    const app = await open("./App.tsx", { storage: STORAGE, width: 390, height: 800, platform: "ios", network: onlyone([], [proposal, ...many]) });
     await app.waitFor("Recycled message 89");
     await app.scroll("id:timeline", -20000);
     await app.waitFor("id:proposal-P-0900-1");
@@ -331,7 +326,7 @@ describe("channel", () => {
   });
 
   test("a message's avatar sits in the name's row on a phone, and in its own column when wide", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 390, height: 800, platform: "ios" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]), width: 390, height: 800, platform: "ios" });
     await app.waitFor("text:/修好了/");
     expect(app.shows("id:avatar-inline-e6")).toBe(true);
     expect(app.shows("id:avatar-column-e6")).toBe(false);
@@ -340,8 +335,23 @@ describe("channel", () => {
     expect(app.shows("id:avatar-inline-e6")).toBe(false);
   });
 
+  test("custom member names from status appear for id and named senders on desktop and phone", async () => {
+    for (const width of [1200, 390]) {
+      const app = await open("./App.tsx", { storage: STORAGE, width, height: 800, platform: width === 390 ? "ios" : "macos",
+        network: { ...onlyone([], [
+          { id: "custom-1", ts: ts(59), from: "content-editor@mac", kind: "notice", text: "Custom member id report" },
+          { id: "custom-2", ts: ts(59.5), from: "团团@mac", kind: "notice", text: "Custom member named report" },
+        ]), [`GET ${URL}/api/status`]: { body: { ...status, members: [{ id: "content-editor", name: "团团", avatar: "avatar-revision" }] } } },
+      });
+      await app.waitFor("Custom member named report");
+      await app.waitFor("团团");
+      expect(app.shows("content-editor")).toBe(false);
+      expect(app.shows(width === 390 ? "id:avatar-inline-custom-2" : "id:avatar-column-custom-2")).toBe(true);
+    }
+  });
+
   test("shows the timeline, cards and sidebar", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("要不要升级依赖？建议：B");
     expect(app.shows(new Date(events[0].ts).toDateString() === new Date().toDateString() ? "Today" : "Yesterday")).toBe(true);
     expect(app.shows("Decide")).toBe(true);
@@ -358,7 +368,7 @@ describe("channel", () => {
   });
 
   test("a task id is a chip that opens the task; a GitHub PR link is a plain link named repo#n", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:app#42");
     expect(app.shows("id:gh-chip-app-42")).toBe(false);
     expect(app.shows("text:/github\\.com\\/acme\\/app/")).toBe(false);
@@ -370,7 +380,7 @@ describe("channel", () => {
 
   test("an id inside a file path stays plain text; one on its own is a chip", async () => {
     const extra = [{ id: "e30", ts: ts(40), from: "dev@linux-box", kind: "notice", text: "依据 tasks/done/T-0005.md 和 D-0294/notes，不重复 T-0005" }];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], extra), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], extra), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:/tasks\\/done\\/T-0005\\.md/");
     expect(app.shows("text:/D-0294\\/notes/")).toBe(true);
     // The chip of the id on its own (the earlier message has one too).
@@ -383,10 +393,10 @@ describe("channel", () => {
     const said = [
       { id: "e10", ts: ts(10), from: "owner", kind: "owner", ref: "T-0005", text: "登录页在手机上也看一下" },
       { id: "e11", ts: ts(11), from: "dev@linux-box", kind: "notice", ref: "T-0005", text: "手机上也正常，截图附上" },
-      { id: "e12", ts: ts(12), from: "hub", kind: "system", ref: "T-0005", text: "收到，已补充到 T-0005" },
+      { id: "e12", ts: ts(12), from: "onlyone", kind: "system", ref: "T-0005", text: "收到，已补充到 T-0005" },
     ];
     const app = await open("./App.tsx", { storage: STORAGE, network: {
-      ...hub(posts, said),
+      ...onlyone(posts, said),
       [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0005", title: "修复登录页", agent: "dev", state: "done", created: ts(1), request: "请修复登录页在手机上的布局", runs: [
         { ts: ts(5), host: "linux-box", cli: "codex", status: "done", summary: "已修复登录页布局，桌面验证通过" },
       ] } },
@@ -399,7 +409,7 @@ describe("channel", () => {
     expect(app.shows("text:手机上也正常，截图附上")).toBe(true);
     await app.type("id:task-composer", "再看下 iPad");
     await app.press("id:task-send");
-    expect(app.value("id:task-composer")).toBe(""); // reads as sent before the hub answers
+    expect(app.value("id:task-composer")).toBe(""); // reads as sent before the onlyone answers
     expect(app.shows("Sending…")).toBe(false);
     await app.waitUntil(() => posts.length === 1);
     expect(posts[0]).toEqual({ text: "再看下 iPad", reply_to: "T-0005", thread: true });
@@ -411,11 +421,11 @@ describe("channel", () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const said = [
       { id: "e20", ts: ts(20), from: "owner", kind: "owner", ref: "T-0005", thread: true, text: "只在任务里说的话" },
-      { id: "e21", ts: ts(21), from: "hub", kind: "system", ref: "T-0005", thread: true, text: "任务里的回复" },
+      { id: "e21", ts: ts(21), from: "onlyone", kind: "system", ref: "T-0005", thread: true, text: "任务里的回复" },
       { id: "e22", ts: ts(22), from: "dev@linux-box", kind: "notice", ref: "T-0005", text: "主要结果在主会话" },
     ];
     const net = {
-      ...hub(posts, said),
+      ...onlyone(posts, said),
       [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0005", title: "t", agent: "lead", state: "done", decisions: ["D-0701"], events: [
         { id: "e1", ts: ts(1), from: "dev@linux-box", kind: "notice", ref: "T-0005", text: "很久以前的对话" },
         { id: "e2", ts: ts(2), from: "dev@linux-box", kind: "decision", ref: "D-0701", text: "要合并吗？", options: ["A: 合并", "B: 等"] },
@@ -435,7 +445,7 @@ describe("channel", () => {
   });
 
     test("a decision's PR references are links, host-lettered ids are chips, option buttons shorten PR links", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], [prDecision]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], [prDecision]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:/D-H0002/");
     expect(app.shows("id:gh-chip-nsh-747")).toBe(false);
     expect(app.shows("text:/A: squash 合并 nsh#747 — 进入发布/")).toBe(true);
@@ -455,7 +465,7 @@ describe("channel", () => {
       { id: "e10", ts: ts(10), from: "owner", kind: "owner", ref: "T-0129", text: "Review NSH#746, 754 770" },
       { id: "e11", ts: ts(11), from: "lead@linux-box", kind: "notice", ref: "T-0129", text: "都审完了。可以合并：#746（重跑 CI）、#770（要等 `#763` 先合）。" },
     ];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], thread), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], thread), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:#770");
     await app.press("text:#770");
     await app.press("text:NSH#746");
@@ -467,7 +477,7 @@ describe("channel", () => {
       { id: "e10", ts: ts(10), from: "lead@linux-box", kind: "notice", text: "见 https://github.com/acme/core-api/pull/41" },
       { id: "e11", ts: ts(11), from: "lead@linux-box", kind: "notice", text: "core-api #41 只等评审。video-tool #2、#3 和 docs #12 都能合并。\ncore-api：#42 待审；\ndocs：#13 无检查记录。" },
     ];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], thread), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], thread), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:#42");
     for (const n of ["#2", "#3", "#12", "#13"]) expect(app.shows(`text:${n}`)).toBe(false);
     await app.press("text:core-api #41");
@@ -479,7 +489,7 @@ describe("channel", () => {
     const thread = [
       { id: "e10", ts: ts(10), from: "reviewer@linux-box", kind: "notice", text: "已评审 NSH #1394 https://github.com/acme/nsh/pull/1394 ，没发现问题。" },
     ];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], thread), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], thread), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:NSH #1394");
     expect(app.shows("text:nsh#1394")).toBe(false);
     await app.press("text:NSH #1394");
@@ -488,7 +498,7 @@ describe("channel", () => {
 
   test("an answer quotes the card it replies to; pressing the quote goes back to the card", async () => {
     const reply = { id: "e9", ts: ts(9), from: "owner", kind: "owner", ref: "D-0001", text: "B，但先跑一遍测试" };
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([], [reply]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], [reply]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:reply-to-D-0001");
     expect(app.shows("text:要不要升级依赖？建议：B >> nth=1")).toBe(true);
     await app.press("id:reply-to-D-0001");
@@ -496,12 +506,12 @@ describe("channel", () => {
 
   test("answers a decision with one tap", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:opt-D-0001-B");
     await app.press("id:opt-D-0001-B");
     await app.waitUntil(() => posts.length === 1);
     expect(posts[0]).toMatchObject({ text: "D-0001 B" });
-    // the sidebar drops it at once, before the hub's status catches up
+    // the sidebar drops it at once, before the onlyone's status catches up
     expect(app.shows("text:要不要升级依赖？")).toBe(true);
     await app.waitUntil(() => !app.shows("text:要不要升级依赖？"));
   });
@@ -510,7 +520,7 @@ describe("channel", () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const menu = { id: "menu-1", ts: ts(9), from: "Tudi@lb", kind: "menu", ref: "D-0900", text: "*D-0900* · Tudi：团队空闲了，下一步做哪些？\n1. [rust-maintainer] 修复快捷键串窗\n2. [rust-maintainer] 修复窗口属性丢失\n3. [rust-maintainer] 修复依赖冲突\n建议：*1*",
       options: ["1. [rust-maintainer] 修复快捷键串窗", "2. [rust-maintainer] 修复窗口属性丢失", "3. [rust-maintainer] 修复依赖冲突"] };
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, [menu]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts, [menu]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:proposal-D-0900-1");
     await app.press("id:proposal-D-0900-1");
     await app.press("id:proposal-D-0900-3");
@@ -523,7 +533,7 @@ describe("channel", () => {
   test("replies to an agent's message: the reply names its task and quotes it", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const kai = { id: "e9", ts: ts(9), from: "Kai@lb", kind: "notice", ref: "T-0125", text: "\n  \t nsh #812   主要修的是文字排版\n细节在 PR 里" };
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, [kai]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts, [kai]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:reply-e9");
     expect(app.shows("id:reply-e1")).toBe(false); // a message with no task can't be replied to
     await app.hover("text:/主要修的是文字排版/");
@@ -542,7 +552,7 @@ describe("channel", () => {
 
   test("a question can be ignored from its card or from the sidebar", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, [prDecision]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts, [prDecision]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:ignore-D-H0003");
     await app.press("id:ignore-D-H0003");
     await app.waitUntil(() => posts.length === 1);
@@ -560,7 +570,7 @@ describe("channel", () => {
     const withTask = { ...status, decisions: [{ ...status.decisions[0], task: "T-0003" }] };
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
-      network: { ...hub([]), [`GET ${URL}/api/status`]: { body: withTask }, [`POST ${URL}/api/tasks/cancel`]: (r: { body?: string | null }) => { cancels.push(JSON.parse(r.body!)); return { body: { ok: true } }; } },
+      network: { ...onlyone([]), [`GET ${URL}/api/status`]: { body: withTask }, [`POST ${URL}/api/tasks/cancel`]: (r: { body?: string | null }) => { cancels.push(JSON.parse(r.body!)); return { body: { ok: true } }; } },
     });
     await app.waitFor("text:要不要升级依赖？ >> nth=0");
     app.onDialog((d) => (d.title === "Cancel T-0003?" ? "Cancel task" : null));
@@ -577,7 +587,7 @@ describe("channel", () => {
 
   test("Other instructions replies to the item from the composer", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:opt-D-0001-B");
     await app.press("id:other-D-0001");
     await app.waitFor("id:reply-chip >> text:要不要升级依赖？建议：B");
@@ -591,7 +601,7 @@ describe("channel", () => {
   test("a message's quick actions copy its text and reply to its task", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const done = { id: "e8", ts: ts(8), from: "lead@mac", kind: "notice", ref: "T-0009", text: "T-0009 已完成，PR 已开" };
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts, [done]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts, [done]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("id:copy-e8");
     await app.hover("text:/已完成，PR 已开/");
     await app.press("id:copy-e8");
@@ -608,7 +618,7 @@ describe("channel", () => {
   });
 
   test("a machine in the sidebar opens its page, and its tasks open theirs", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("Channel");
     await app.press("label:Load 42% · Disk 120 GB free · 1 running");
     await app.waitFor("Machine linux-box");
@@ -624,7 +634,7 @@ describe("channel", () => {
     const host = { ...status.hosts[0], running: [{ ...status.hosts[0].running[0], activity: { at: new Date().toISOString(), step, model: "claude-opus-5-5" } }] };
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 390, height: 844, platform: "ios",
-      network: { ...hub([]), [`GET ${URL}/api/status`]: { body: { ...status, hosts: [host] } } },
+      network: { ...onlyone([]), [`GET ${URL}/api/status`]: { body: { ...status, hosts: [host] } } },
     });
     await app.press("label:Menu");
     await app.press("label:Load 42% · Disk 120 GB free · 1 running");
@@ -637,7 +647,7 @@ describe("channel", () => {
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
       network: {
-        ...hub([]),
+        ...onlyone([]),
         [`GET ${URL}/api/tasks?*`]: (r: { url: string }) => {
           const u = new ParsedURL(r.url), offset = Number(u.searchParams.get("offset"));
           if (u.searchParams.get("q")) return { body: { tasks: [row(70)], total: 1 } };
@@ -669,7 +679,7 @@ describe("channel", () => {
     const app = await open("./App.tsx", {
       storage: { ...STORAGE, "onlyone.channels.since": ts(-10000) }, width: 1200, height: 800, platform: "macos",
       network: {
-        ...hub([]),
+        ...onlyone([]),
         [`GET ${URL}/api/channels`]: { body: { channels: chans } },
         [`POST ${URL}/api/channels`]: (r: { body?: string | null }) => { posts.push(JSON.parse(r.body!)); return { body: { ok: true } }; },
       },
@@ -710,7 +720,7 @@ describe("channel", () => {
     ];
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
-      network: { ...hub(posts, talk), [`GET ${URL}/api/channels`]: { body: { channels: chans } }, [`GET ${URL}/api/channels/feed?*`]: { body: { events: talk } } },
+      network: { ...onlyone(posts, talk), [`GET ${URL}/api/channels`]: { body: { channels: chans } }, [`GET ${URL}/api/channels/feed?*`]: { body: { events: talk } } },
     });
     await app.waitFor("id:composer");
     expect(app.shows("日文已完成 80%，剩下 API 文档")).toBe(false);
@@ -727,7 +737,7 @@ describe("channel", () => {
   });
 
   test("a dropped connection stays quiet until reconnecting keeps failing", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]) });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]) });
     await app.waitFor("id:composer");
     expect(app.shows("text:/Lost connection/")).toBe(false);
     await app.waitUntil(() => app.shows("text:/Lost connection/"), { timeout: 30_000 });
@@ -737,7 +747,7 @@ describe("channel", () => {
     const nohost = { id: "T-0097", title: "在 Windows 上实测拖入文件", agent: "reviewer", state: "nohost", needs: "os:windows", created: ts(40), updated: ts(40) };
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
-      network: { ...hub([]), [`GET ${URL}/api/status`]: { body: { ...status, recent: [nohost, ...status.recent] } } },
+      network: { ...onlyone([]), [`GET ${URL}/api/status`]: { body: { ...status, recent: [nohost, ...status.recent] } } },
     });
     await app.waitFor("id:side-queued");
     await app.waitFor("Waiting for Windows machine"); // 排队 starts open
@@ -751,7 +761,7 @@ describe("channel", () => {
     const parked = { id: "T-0236", title: "macos-check · 2026-11-04 10:00", agent: "rust-maintainer", state: "parked", started: ts(40), updated: ts(40) };
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
-      network: { ...hub([]), [`GET ${URL}/api/status`]: { body: { ...status, recent: [parked, ...status.recent] } } },
+      network: { ...onlyone([]), [`GET ${URL}/api/status`]: { body: { ...status, recent: [parked, ...status.recent] } } },
     });
     await app.waitFor("Waiting");
     await app.press("label:T-0236 · Waiting on external result");
@@ -762,7 +772,9 @@ describe("channel", () => {
     let updates = 0;
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
-      network: { ...hub([]), [`GET ${URL}/api/settings`]: { status: 500 }, [`POST ${URL}/api/fleet/update`]: () => { updates++; return { body: { ok: true } }; } },
+      network: { ...onlyone([]), [`GET ${URL}/api/settings`]: { status: 500 },
+        [`GET ${URL}/api/status`]: { body: { ...status, hosts: [...status.hosts, { host: "npm-box", caps: [], rev: "0.1.1" }] } },
+        [`POST ${URL}/api/fleet/update`]: () => { updates++; return { body: { ok: true } }; } },
     });
     await app.press("label:Load 42% · Disk 120 GB free · 1 running");
     await app.waitFor("id:rev-linux-box");
@@ -771,6 +783,9 @@ describe("channel", () => {
     await app.press("id:settings");
     await app.press("id:settings-tab-version");
     await app.waitFor("id:version-linux-box");
+    expect(app.shows("Development · c1cc085")).toBe(true);
+    expect(app.shows("CLI · v0.1.1")).toBe(true);
+    expect(app.shows("Development")).toBe(true);
     app.onDialog((d) => (d.title === "Update all machines?" ? "Cancel" : null));
     await app.press("id:update-fleet");
     await app.waitUntil(() => app.dialogs().length === 1);
@@ -791,7 +806,7 @@ describe("channel", () => {
     ];
     const app = await open("./App.tsx", {
       storage: STORAGE, width: 1200, height: 800, platform: "macos",
-      network: { ...hub([]), [`GET ${URL}/api/settings`]: { status: 500 }, [`GET ${URL}/api/status`]: { body: { ...status, hosts, update: { at } } } },
+      network: { ...onlyone([]), [`GET ${URL}/api/settings`]: { status: 500 }, [`GET ${URL}/api/status`]: { body: { ...status, hosts, update: { at } } } },
     });
     await app.press("id:user-menu");
     await app.press("id:settings");
@@ -806,7 +821,7 @@ describe("channel", () => {
 
   test("sends a task with the button, and the drawer opens on phones", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts) });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts) });
     await app.waitFor("id:composer");
     await app.press("label:Menu");
     await app.waitFor("Needs your decision");
@@ -825,7 +840,7 @@ describe("images", () => {
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
   function withUploads(posts: { text: string; reply_to?: string; attachments?: string[] }[], uploads: string[]) {
     return {
-      ...hub(posts),
+      ...onlyone(posts),
       [`POST ${URL}/api/uploads`]: () => {
         uploads.push(`/media/shot-${uploads.length + 1}.png`);
         return { body: { url: uploads[uploads.length - 1] } };
@@ -835,7 +850,7 @@ describe("images", () => {
 
   test("a zoomed image pages through its message's images in a loop", async () => {
     const shots = { id: "i1", ts: ts(8), from: "lead@mac", kind: "notice", text: "截图", attachments: ["/media/1-a.png", "/media/2-b.png"] };
-    const app = await open("./App.tsx", { ...desk, network: { ...hub([], [shots]) } });
+    const app = await open("./App.tsx", { ...desk, network: { ...onlyone([], [shots]) } });
     await app.waitFor("label:View full size");
     await app.press("label:View full size >> nth=0");
     await app.waitFor("text:1 / 2");
@@ -849,7 +864,7 @@ describe("images", () => {
     const report = { id: "r1", ts: ts(8), from: "lead@mac", kind: "notice", text: "推送通知梳理完成", attachments: ["/media/1762650000000-push-notifications.md"] };
     const app = await open("./App.tsx", {
       ...desk,
-      network: { ...hub([], [report]), [`GET ${URL}/media/*`]: { body: "# Push notifications\n\nAPNs and **FCM** support." } },
+      network: { ...onlyone([], [report]), [`GET ${URL}/media/*`]: { body: "# Push notifications\n\nAPNs and **FCM** support." } },
     });
     await app.waitFor("id:doc-attachment");
     expect(app.shows("text:push-notifications")).toBe(true);
@@ -880,7 +895,7 @@ describe("images", () => {
     const app = await open("./App.tsx", {
       ...desk,
       network: {
-        ...hub([], [{ id: "e1", ts: ts(1), from: "dev@linux-box", kind: "notice", text: "见 T-0005" }, report]),
+        ...onlyone([], [{ id: "e1", ts: ts(1), from: "dev@linux-box", kind: "notice", text: "见 T-0005" }, report]),
         [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0005", title: "调研", agent: "dev", state: "done", created: ts(1), request: "调研", runs: [] } },
         [`GET ${URL}/media/*`]: { body: "# Task findings" },
       },
@@ -902,7 +917,7 @@ describe("images", () => {
     const report = { id: "r1", ts: ts(8), from: "lead@mac", kind: "notice", text: "报告", attachments: ["/media/1762650000000-flaky.md"] };
     const app = await open("./App.tsx", {
       ...desk,
-      network: { ...hub([], [report]), [`GET ${URL}/media/*`]: () => (++calls === 1 ? { status: 500, body: "" } : { body: "# Second try" }) },
+      network: { ...onlyone([], [report]), [`GET ${URL}/media/*`]: () => (++calls === 1 ? { status: 500, body: "" } : { body: "# Second try" }) },
     });
     await app.waitFor("id:doc-retry");
     expect(app.shows("text:Couldn’t load (500)")).toBe(true);
@@ -915,7 +930,7 @@ describe("images", () => {
     const report = { id: "r1", ts: ts(8), from: "lead@mac", kind: "notice", text: "报告", attachments: ["/media/1762650000000-report.md"] };
     const app = await open("./App.tsx", {
       ...desk, width: 390, height: 844,
-      network: { ...hub([], [report]), [`GET ${URL}/media/*`]: { body: "# Report" } },
+      network: { ...onlyone([], [report]), [`GET ${URL}/media/*`]: { body: "# Report" } },
     });
     await app.waitFor("id:doc-sheet");
     expect(app.shows("id:doc-expand")).toBe(false);
@@ -965,7 +980,7 @@ describe("images", () => {
     await app.waitFor("id:composer");
     await app.paste("id:composer", { files: [here("icon.png")] });
     await app.waitFor("id:attachment");
-    await app.paste("id:composer", { files: [here("hub.ts")] });
+    await app.paste("id:composer", { files: [here("onlyone.ts")] });
     await app.waitFor("id:attach-note");
     expect(app.shows("Only images can be sent")).toBe(true);
     expect(app.count("id:attachment")).toBe(1);
@@ -990,7 +1005,7 @@ describe("keyboard", () => {
     let fail = true;
     const attempts: string[] = [];
     const posts: { text: string }[] = [];
-    const ok = hub(posts);
+    const ok = onlyone(posts);
     const network = { ...ok, [`POST ${URL}/api/messages`]: (r: { body?: string | null }) =>
       { attempts.push(JSON.parse(r.body!).client_id); return fail ? { status: 500, body: {} } : (ok as any)[`POST ${URL}/api/messages`](r); } };
     const app = await open("./App.tsx", { ...desk, network });
@@ -1013,7 +1028,7 @@ describe("keyboard", () => {
   for (const delay of [0, 4000]) test(`a delivery receipt clears the local bubble when the lost response takes ${delay}ms`, async () => {
     let receipt: any = null;
     const app = await open("./App.tsx", { ...desk, network: {
-      ...hub([]),
+      ...onlyone([]),
       [`GET ${URL}/api/feed?*`]: () => ({ body: { events: receipt ? [receipt] : [] } }),
       [`POST ${URL}/api/messages`]: (r: { body?: string | null }) => {
         const m = JSON.parse(r.body!);
@@ -1033,7 +1048,7 @@ describe("keyboard", () => {
 
   test("a just-sent message can be recalled by its button: the words return and nothing is posted", async () => {
     const posts: { text: string }[] = [];
-    const app = await open("./App.tsx", { ...desk, network: hub(posts) });
+    const app = await open("./App.tsx", { ...desk, network: onlyone(posts) });
     await app.waitFor("id:composer");
     await app.type("id:composer", "发错了");
     await app.submit("id:composer");
@@ -1047,7 +1062,7 @@ describe("keyboard", () => {
 
   test("the recall button goes away once the message has left", async () => {
     const posts: { text: string }[] = [];
-    const app = await open("./App.tsx", { ...desk, network: hub(posts) });
+    const app = await open("./App.tsx", { ...desk, network: onlyone(posts) });
     await app.waitFor("id:composer");
     await app.type("id:composer", "看一下");
     await app.submit("id:composer");
@@ -1058,7 +1073,7 @@ describe("keyboard", () => {
 
   test("a delivered message shows a check that goes away on its own", async () => {
     const posts: { text: string }[] = [];
-    const app = await open("./App.tsx", { ...desk, network: hub(posts) });
+    const app = await open("./App.tsx", { ...desk, network: onlyone(posts) });
     await app.waitFor("id:composer");
     await app.type("id:composer", "送达了吗");
     await app.submit("id:composer");
@@ -1069,7 +1084,7 @@ describe("keyboard", () => {
 
   test("Enter sends from the composer", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { ...desk, network: hub(posts) });
+    const app = await open("./App.tsx", { ...desk, network: onlyone(posts) });
     await app.waitFor("id:composer");
     await app.type("id:composer", "看一下日志");
     await app.submit("id:composer");
@@ -1080,7 +1095,7 @@ describe("keyboard", () => {
 
   test("number keys answer the pending decision; r replies to it", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { ...desk, network: hub(posts) });
+    const app = await open("./App.tsx", { ...desk, network: onlyone(posts) });
     await app.waitFor("id:opt-D-0001-B");
     // P-0002 is answered (e4), so D-0001 is the pending one.
     await app.keyboard.press("2");
@@ -1090,7 +1105,7 @@ describe("keyboard", () => {
 
   test("Alt+number answers while the cursor is in the composer", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { ...desk, network: hub(posts) });
+    const app = await open("./App.tsx", { ...desk, network: onlyone(posts) });
     await app.waitFor("id:opt-D-0001-B");
     await app.type("id:composer", "");
     await app.keyboard.press("alt+2");
@@ -1099,7 +1114,7 @@ describe("keyboard", () => {
   });
 
   test("r replies, Escape cancels the reply, ? shows the shortcuts", async () => {
-    const app = await open("./App.tsx", { ...desk, network: hub([]) });
+    const app = await open("./App.tsx", { ...desk, network: onlyone([]) });
     await app.waitFor("id:opt-D-0001-B");
     await app.keyboard.press("r");
     await app.waitFor("id:reply-chip >> text:要不要升级依赖？建议：B");
@@ -1113,7 +1128,7 @@ describe("keyboard", () => {
   });
 
   test("mod+, opens team settings", async () => {
-    const app = await open("./App.tsx", { ...desk, network: { ...hub([]), [`GET ${URL}/api/settings`]: { status: 500 } } });
+    const app = await open("./App.tsx", { ...desk, network: { ...onlyone([]), [`GET ${URL}/api/settings`]: { status: 500 } } });
     await app.waitFor("id:composer");
     await app.keyboard.press("mod+,");
     await app.waitFor("Team settings");
@@ -1143,7 +1158,7 @@ describe("team settings", () => {
       height: 800,
       platform: "macos",
       network: {
-        ...hub([]),
+        ...onlyone([]),
         [`GET ${URL}/api/settings`]: () => ({ body: view }),
         [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
           const p = JSON.parse(r.body!);
@@ -1193,7 +1208,7 @@ describe("team settings", () => {
       height: 800,
       platform: "macos",
       network: {
-        ...hub([]),
+        ...onlyone([]),
         [`GET ${URL}/api/settings`]: () => ({ body: view }),
         [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
           const p = JSON.parse(r.body!);
@@ -1241,7 +1256,7 @@ describe("notifications", () => {
   }
   function server(log: { subs: unknown[]; unsubs: unknown[]; tests: number; puts: unknown[] }) {
     return {
-      ...hub([]),
+      ...onlyone([]),
       [`GET ${URL}/api/push/vapid`]: { body: { publicKey: "BPublicKey" } },
       [`POST ${URL}/api/push/subscribe`]: (r: { body?: string | null }) => (log.subs.push(JSON.parse(r.body!)), { body: { ok: true } }),
       [`POST ${URL}/api/push/unsubscribe`]: (r: { body?: string | null }) => (log.unsubs.push(JSON.parse(r.body!)), { body: { ok: true } }),
@@ -1319,7 +1334,7 @@ describe("notifications", () => {
 
   test("badge, unread divider, and a notification opening an event", async () => {
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.lastSeen": events[0].ts, "hub.notifyAsked": "1" },
+      storage: { ...STORAGE, [`onlyone.read:${URL}`]: JSON.stringify({ through: events[0].ts, ids: [], marked: [] }), "onlyone.notifyAsked": "1" },
       host: { handlers: browser(device()) },
       network: server(newLog()),
       width: 1200, height: 800, platform: "macos",
@@ -1333,8 +1348,8 @@ describe("notifications", () => {
 
   test("mark a message unread, the channel's unread count, and mark all as read", async () => {
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.lastSeen": events[0].ts, "hub.notifyAsked": "1" },
-      network: hub([]),
+      storage: { ...STORAGE, [`onlyone.read:${URL}`]: JSON.stringify({ through: events[0].ts, ids: [], marked: [] }), "onlyone.notifyAsked": "1" },
+      network: onlyone([]),
       width: 1200, height: 800, platform: "macos",
     });
     await app.waitFor("New messages");
@@ -1349,13 +1364,13 @@ describe("notifications", () => {
     await app.rightClick("id:channel-unread");
     await app.press("id:read-all");
     await app.waitUntil(() => app.count("id:channel-unread") === 0 && app.count("id:unread-dot-e6") === 0);
-    expect(app.storage()["hub.markedUnread"]).toBe("[]");
+    expect(JSON.parse(app.storage()[`onlyone.read:${URL}`]).marked).toEqual([]);
   });
 
   test("the unread divider skips an event the channel hides", async () => {
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.lastSeen": events[3].ts, "hub.notifyAsked": "1" },
-      network: hub([]),
+      storage: { ...STORAGE, [`onlyone.read:${URL}`]: JSON.stringify({ through: events[3].ts, ids: [], marked: [] }), "onlyone.notifyAsked": "1" },
+      network: onlyone([]),
       width: 1200, height: 800, platform: "macos",
     });
     await app.waitFor("New messages");
@@ -1364,7 +1379,7 @@ describe("notifications", () => {
   test("logging out turns this device's notifications off", async () => {
     const log = newLog();
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.notifyAsked": "1" },
+      storage: { ...STORAGE, "onlyone.notifyAsked": "1" },
       host: { handlers: browser(device({ subscribed: true, permission: "granted", endpoint: "https://push.test/e1" })) },
       network: { ...server(log), [`POST ${URL}/api/auth/logout`]: { body: { ok: true } } },
     });
@@ -1380,7 +1395,7 @@ describe("notifications", () => {
 describe("voice input", () => {
   test("the microphone dictates into the composer until pressed again; nothing is sent", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("label:Voice input");
     await app.type("id:composer", "提醒我：");
     await app.press("label:Voice input");
@@ -1403,7 +1418,7 @@ describe("voice input", () => {
   });
 
   test("sending while listening stops it; a refused microphone is explained", async () => {
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub([]), width: 1200, height: 800, platform: "macos" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([]), width: 1200, height: 800, platform: "macos" });
     await app.press("label:Voice input");
     await app.hear("看一下日志");
     expect(app.value("id:composer")).toBe("看一下日志");
@@ -1420,7 +1435,7 @@ describe("voice input", () => {
 
   test("on a phone, listening shows a red stop button where the mic was; stopping keeps the words", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
-    const app = await open("./App.tsx", { storage: STORAGE, network: hub(posts), width: 390, height: 844, platform: "ios" });
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone(posts), width: 390, height: 844, platform: "ios" });
     await app.waitFor("label:Voice input");
     await app.press("label:Voice input");
     await app.waitFor("label:Stop voice input");
@@ -1435,7 +1450,7 @@ describe("voice input", () => {
 });
 
 test("clicking outside the macOS composer collapses an empty draft", async () => {
-  const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 1100, height: 760, platform: "macos", network: hub([]) });
+  const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 1100, height: 760, platform: "macos", network: onlyone([]) });
   await app.waitFor("id:composer");
   expect(app.count("id:attach")).toBe(1);
   expect(app.shows("id:send")).toBe(false);
@@ -1465,7 +1480,7 @@ describe("phones", () => {
   function settingsServer(puts: unknown[]) {
     let v = view();
     return {
-      ...hub([]),
+      ...onlyone([]),
       [`GET ${URL}/api/settings`]: () => ({ body: v }),
       [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
         const p = JSON.parse(r.body!);
@@ -1481,7 +1496,7 @@ describe("phones", () => {
     test(`${platform}: settings success uses a dismissible toast without an inline note`, async () => {
       const desktop = platform === "macos";
       const app = await open("./App.tsx", {
-        storage: { ...STORAGE, "hub.notifyAsked": "1" },
+        storage: { ...STORAGE, "onlyone.notifyAsked": "1" },
         width: desktop ? 1100 : 390, height: 844, platform, network: settingsServer([]),
       });
       await app.waitFor("id:composer");
@@ -1510,7 +1525,7 @@ describe("phones", () => {
 
   test("phone settings checks a model immediately while saving", async () => {
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
+      storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
       network: { ...settingsServer([]), [`PUT ${URL}/api/settings`]: { body: view(), delay: 5000 } },
     });
     await app.waitFor("id:composer");
@@ -1526,7 +1541,7 @@ describe("phones", () => {
   test("phone model keeps the accepted selection when effective settings are stale", async () => {
     const stale = { ...view(), current: { clis: { agents: { reporter: ["claude"] } } } };
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
+      storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
       network: { ...settingsServer([]), [`PUT ${URL}/api/settings`]: { body: stale } },
     });
     await app.waitFor("id:composer");
@@ -1541,7 +1556,7 @@ describe("phones", () => {
 
   test("phone settings shows an error when saving fails", async () => {
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
+      storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
       network: { ...settingsServer([]), [`PUT ${URL}/api/settings`]: { status: 500, body: "error" } },
     });
     await app.waitFor("id:composer");
@@ -1557,7 +1572,7 @@ describe("phones", () => {
 
   test("iOS settings allows logout", async () => {
     const log = newLog();
-    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: { ...settingsServer([]), ...auth(log) } });
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: { ...settingsServer([]), ...auth(log) } });
     await app.waitFor("id:composer");
     await app.press("id:settings-top");
     await app.waitFor("id:phone-settings");
@@ -1570,7 +1585,7 @@ describe("phones", () => {
   for (const platform of ["ios", "android"] as const) {
     test(`${platform}: settings is a grouped list whose rows push pages; back returns to the channel`, async () => {
       const puts: unknown[] = [];
-      const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform, network: settingsServer(puts) });
+      const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform, network: settingsServer(puts) });
       await app.waitFor("id:composer");
       await app.press("id:settings-top");
       await app.waitFor("id:phone-settings");
@@ -1604,7 +1619,7 @@ describe("phones", () => {
   }
 
   test("a horizontal swipe opens the phone sidebar", async () => {
-    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: settingsServer([]) });
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: settingsServer([]) });
     await app.waitFor("id:composer");
     await app.drag("id:channel-swipe", { x: 0, y: -100 });
     expect(app.shows("id:drawer")).toBe(false);
@@ -1617,7 +1632,7 @@ describe("phones", () => {
   });
 
   test("the sidebar opens from the left; a machine opens its page and back returns to the channel", async () => {
-    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: hub([]) });
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: onlyone([]) });
     await app.waitFor("id:composer");
     expect(app.shows("Needs your decision")).toBe(false);
     await app.press("label:Menu");
@@ -1631,7 +1646,7 @@ describe("phones", () => {
   });
 
   test("a phone browser draws its own header with a back button", async () => {
-    const app = await open("./App.tsx", { storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "web", network: settingsServer([]) });
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "web", network: settingsServer([]) });
     await app.waitFor("id:composer");
     await app.press("id:settings-top");
     await app.waitFor("id:phone-settings");
@@ -1655,7 +1670,7 @@ describe("rules and memory", () => {
     "agents/dev/profile.md": "# dev 的档案\n\n负责前端",
   };
   function rulesServer(reads: string[]) {
-    const routes: Record<string, any> = { ...hub([]) };
+    const routes: Record<string, any> = { ...onlyone([]) };
     for (const [pre, list] of Object.entries(files)) routes[`GET ${URL}/api/files/list?prefix=${enc(pre)}`] = { body: { files: list } };
     for (const [p, content] of Object.entries(docs)) {
       routes[`GET ${URL}/api/files/read?path=${enc(p)}`] = () => {
@@ -1687,7 +1702,7 @@ describe("rules and memory", () => {
     const reads: string[] = [];
     const view = { current: {}, effective: { agents: [], autonomy: "onboarding", routines: [], max_parallel: 2 }, options: { clis: [], autonomy: [] } };
     const app = await open("./App.tsx", {
-      storage: { ...STORAGE, "hub.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
+      storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios",
       network: { ...rulesServer(reads), [`GET ${URL}/api/settings`]: { body: view } },
     });
     await app.waitFor("id:composer");
@@ -1714,7 +1729,7 @@ describe("commands", () => {
   function server(posts: { text: string; reply_to?: string }[], puts: unknown[], updates: { n: number }) {
     let v = view([{ name: "日报", text: "把今天各项目的进展整理成日报发给我" }]);
     return {
-      ...hub(posts),
+      ...onlyone(posts),
       [`GET ${URL}/api/settings`]: () => ({ body: v }),
       [`PUT ${URL}/api/settings`]: (r: { body?: string | null }) => {
         const p = JSON.parse(r.body!);
@@ -1811,10 +1826,10 @@ test("channels share per-message read state with main chat, and Menu can mark al
   const c = { slug: "omamail", name: "Omamail", goal: "Mail quality", status: "active", created: ts(-900), last_activity: older.ts, stale: false, count: 1,
     items: [{ id: "T-0700", kind: "task", title: "Review mail", state: "done", updated: older.ts }] };
   const app = await open("./App.tsx", { storage: STORAGE, width: 1200, height: 800, platform: "linux", network: {
-    ...hub([], [older, ...later]),
+    ...onlyone([], [older, ...later]),
     [`GET ${URL}/api/channels`]: { body: { channels: [c, { ...c, slug: "mail-perf", name: "Mail performance" }] } },
     [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0700", title: "Review mail", agent: "lead", state: "done", request: "Review mail", runs: [], steps: [], events: [older] } },
-    [`GET ${URL}/api/channels/feed?*`]: { body: { events: [older, { id: "step", ts: ts(-299), from: "agent", kind: "notice", text: "Running cargo test", ref: "T-0700", thread: true }, { id: "ack", ts: ts(-298), from: "hub", kind: "notice", text: "收到 D-1", ref: "T-0700" }] } },
+    [`GET ${URL}/api/channels/feed?*`]: { body: { events: [older, { id: "step", ts: ts(-299), from: "agent", kind: "notice", text: "Running cargo test", ref: "T-0700", thread: true }, { id: "ack", ts: ts(-298), from: "onlyone", kind: "notice", text: "收到 D-1", ref: "T-0700" }] } },
   } });
   await app.waitFor("id:side-channel-unread-omamail");
   await app.waitFor("id:side-channel-unread-mail-perf");
@@ -1823,14 +1838,14 @@ test("channels share per-message read state with main chat, and Menu can mark al
   expect(app.shows("text:Running cargo test")).toBe(false); // task-thread steps stay on the task page
   expect(app.shows("text:收到 D-1")).toBe(false);
   await app.waitUntil(() => {
-    const raw = app.storage()[`hub.read:${URL}`];
+    const raw = app.storage()[`onlyone.read:${URL}`];
     return !!raw && JSON.parse(raw).ids.includes("shared-old");
   });
   expect(app.shows("id:side-channel-unread-omamail")).toBe(false);
   expect(app.shows("id:side-channel-unread-mail-perf")).toBe(false);
   await app.press("id:user-menu");
   await app.press("id:mark-all-read");
-  await app.waitUntil(() => { const raw = app.storage()[`hub.read:${URL}`]; return !!raw && !!JSON.parse(raw).through; });
+  await app.waitUntil(() => { const raw = app.storage()[`onlyone.read:${URL}`]; return !!raw && !!JSON.parse(raw).through; });
   expect(app.shows("id:menu-unread-count")).toBe(false);
 });
 
@@ -1838,15 +1853,15 @@ describe("folding page heads", () => {
   const omamail = { slug: "omamail", name: "Omamail", goal: "Mail quality and releases", status: "active", created: ts(-900), last_activity: ts(5), stale: false, count: 0, refs: [], items: [] };
   const quiet = { ...omamail, slug: "quiet", name: "Quiet room", goal: "Nothing much" };
   const talk = Array.from({ length: 60 }, (_, i) => ({ id: `fold-${i}`, ts: ts(1 + i / 100), from: "agent", kind: "notice", text: `Channel line ${i}`, channel: "omamail" }));
-  const channelHub = () => ({
-    ...hub([], talk),
+  const channelOnlyOne = () => ({
+    ...onlyone([], talk),
     [`GET ${URL}/api/channels`]: { body: { channels: [omamail, quiet] } },
     [`GET ${URL}/api/channels/feed?*`]: (r: { url: string }) => ({ body: { events: r.url.includes("quiet") ? [] : talk } }),
   });
 
   for (const platform of ["macos", "ios", "android"] as const) {
     test(`a channel's head folds into the bar away from the top and unfolds back there (${platform})`, async () => {
-      const app = await open("./App.tsx", { storage: STORAGE, width: platform === "macos" ? 1200 : 390, height: 800, platform, network: channelHub() });
+      const app = await open("./App.tsx", { storage: STORAGE, width: platform === "macos" ? 1200 : 390, height: 800, platform, network: channelOnlyOne() });
       await app.waitFor("id:composer");
       // the bar no longer carries a connection pill
       expect(app.shows("text:Live")).toBe(false);
@@ -1898,7 +1913,7 @@ describe("folding page heads", () => {
     test(`a task's head folds into the bar and its actions come back at the top (${platform})`, async () => {
       const said = Array.from({ length: 40 }, (_, i) => ({ id: `task-said-${i}`, ts: ts(10 + i / 100), from: "dev@linux-box", kind: "notice", ref: "T-0007", thread: true, text: `Task progress ${i}` }));
       const app = await open("./App.tsx", { storage: STORAGE, width: platform === "macos" ? 1200 : 390, height: 800, platform, network: {
-        ...hub([], said),
+        ...onlyone([], said),
         [`GET ${URL}/api/status`]: { body: { ...status, active: [{ ...status.active[0], state: "active", started: ts(50) }] } },
         [`GET ${URL}/api/tasks/get?*`]: { body: { id: "T-0007", title: "截图检查 gallery", agent: "dev", host: "linux-box", state: "active", started: ts(50), request: "截图检查 gallery", runs: [] } },
       } });
@@ -1946,7 +1961,7 @@ describe("decision notification", () => {
         storage: STORAGE, platform, width: 320, height: 740,
         safeArea: { top: 59, bottom: 34, left: 0, right: 0 },
         network: {
-          ...hub([]),
+          ...onlyone([]),
           [`GET ${URL}/api/feed?*`]: () => ({ body: { events: next } }),
         },
       });

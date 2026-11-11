@@ -1,5 +1,5 @@
 // Built-in weekly usage report: what the fleet did in the last 7 days, compared with the 7 days before, in the style
-// of a hosting provider's weekly analytics email. Computed from the hub files (no AI run, no model cost), written to
+// of a hosting provider's weekly analytics email. Computed from the onlyone files (no AI run, no model cost), written to
 // reports/usage/<date>.md and posted to the main chat so everyone using this OnlyOne sees it.
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { P, list, readDoc } from "./core";
@@ -102,7 +102,7 @@ export function usageReport(end = Date.now()) {
   return { markdown: lines.join("\n") + "\n", now, prev, file: `reports/usage/${day(end)}.md` };
 }
 
-/** Writes the report into the hub and returns it (the caller posts it to the chat). */
+/** Writes the report into the onlyone and returns it (the caller posts it to the chat). */
 export function writeUsageReport(end = Date.now()) {
   const r = usageReport(end);
   mkdirSync(P("reports", "usage"), { recursive: true });

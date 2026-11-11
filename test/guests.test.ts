@@ -13,7 +13,7 @@ function sql() {
     return { toArray: () => rows, one: () => rows[0] };
   } } as unknown as SqlStorage;
 }
-const req = (path: string, method = "GET", body?: unknown) => new Request(`https://hub${path}`, { method, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) });
+const req = (path: string, method = "GET", body?: unknown) => new Request(`https://onlyone${path}`, { method, ...(body === undefined ? {} : { body: typeof body === "string" ? body : JSON.stringify(body) }) });
 const call = async (s: SqlStorage, path: string, who: "machine" | "owner", method = "GET", body?: unknown) => {
   const r = req(path, method, body);
   const res = (await guestsAdmin(s, r, new URL(r.url), who))!;
@@ -91,7 +91,7 @@ test("untrusted guest text is stripped of terminal escapes", () => {
 test("guest invite prints install lines that join as the guest, with no login", async () => {
   const { guestInvite } = await import("../src/guest");
   const out = guestInvite("https://onlyone.example.com", "ABC123");
-  expect(out).toContain(`$env:ONLYONE_GUEST = "https://onlyone.example.com ABC123"; .\\install.ps1`);
-  expect(out).toContain("bash install.sh --guest https://onlyone.example.com ABC123");
+  expect(out).toContain("npm install -g onlyonecli");
+  expect(out).toContain("onlyone guest install");
   expect(out).toContain("onlyone guest join https://onlyone.example.com ABC123");
 });

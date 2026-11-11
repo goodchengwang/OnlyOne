@@ -4,7 +4,7 @@
 - Read any code, issues, PRs, logs; run tests/builds locally
 - Commit on `agent/*` branches, open **Draft PRs**, fix CI/lint/typos/tests
 - Signed comments, triage labels, asking for reproduction steps on issues/PRs
-- Write anything inside this hub (journal, reports, memory)
+- Write anything inside this onlyone (journal, reports, memory)
 - Any situation where `decisions/closed` already has a precedent for the same kind of question → follow the precedent
 
 ## 🛑 Must ask (status=needs_decision)
@@ -20,7 +20,7 @@
 - Do all the preparation that doesn't need the decision first, so the owner can unblock it with one word
 
 ## Hard limits
-- Never write secrets into the hub repo; never `rm -rf` outside your working directory; never push to main/master
+- Never write secrets into the onlyone repo; never `rm -rf` outside your working directory; never push to main/master
 - Stop only processes you started, by the PID you recorded when you started them; never kill by name or command-line pattern
   (`pkill -f`, `killall`, `taskkill /IM`): that also kills the owner's and other agents' processes. For desktop GUI apps use
   `onlyone visual start/run/shot/stop`, which tracks and stops only its own session's processes.

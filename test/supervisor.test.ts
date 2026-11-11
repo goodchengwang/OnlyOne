@@ -14,7 +14,7 @@ const ctx = (o: Partial<Ctx> = {}): Ctx => ({ now: NOW, online: [mac, lin, old],
 const task = (m: Record<string, string>, folder: "waiting" | "blocked" = "waiting"): Task =>
   ({ folder, meta: { title: m.id, created: new Date(NOW - H).toISOString(), waiting_on: "x", wait_check: "true", ...m } });
 
-// Every test file shares one throwaway hub (see test/preload.ts), and reroute/resume move tasks into
+// Every test file shares one throwaway onlyone (see test/preload.ts), and reroute/resume move tasks into
 // tasks/inbox with their host requirement stripped. A leftover there is a pickable task, so a later
 // file's pickTask() test would pick it up instead of its own fixture. Remove what this file created.
 afterAll(() => {

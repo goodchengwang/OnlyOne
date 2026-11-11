@@ -9,6 +9,6 @@ test("markdown attachments are documents, images are not", () => {
 
 test("attachment names drop the storage timestamps", () => {
   expect(attachmentName("/media/1762650000000-1762650000123-push-notifications.md")).toBe("push-notifications.md");
-  expect(attachmentName("https://hub.example/media/1762650000000-report.md?token=x")).toBe("report.md");
+  expect(attachmentName("https://onlyone.example/media/1762650000000-report.md?token=x")).toBe("report.md");
   expect(attachmentName("/media/plain.md")).toBe("plain.md");
 });

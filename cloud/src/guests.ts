@@ -1,5 +1,5 @@
 // Guest workers: low-trust machines (shared / public test devices) that get one task at a time and nothing else.
-// A guest never holds HUB_TOKEN: it joins with a one-time code the owner mints, and gets its own revocable token.
+// A guest never holds ONLYONE_TOKEN: it joins with a one-time code the owner mints, and gets its own revocable token.
 // Its whole API is /api/guest/{next,result,heartbeat}; every other route is closed to it (index.ts routes guests here
 // before anything else). It never sees files, memory, chat, settings or other guests' tasks, and its results are
 // untrusted: the primary picks them up and reviews them, nothing is applied automatically.

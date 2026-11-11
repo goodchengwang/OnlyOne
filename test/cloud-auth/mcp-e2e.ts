@@ -1,9 +1,9 @@
-// MCP end to end against the real Worker under `wrangler dev` (no SMTP: the login code comes from /api/host/login-code).
-//   cd cloud && bunx wrangler dev --port 8799 --var HUB_TOKEN:machinetok
-//   BASE=http://localhost:8799 TOKEN=machinetok bun test/cloud-auth/mcp-e2e.ts
+// MCP end to end against cloud/test/standalone.toml.
+//   BASE=http://localhost:8798 TOKEN=test-machine bun test/cloud-auth/mcp-e2e.ts
 // Walks the path a claude.ai / ChatGPT connector takes: 401 → metadata → DCR → sign-in page → PKCE token → MCP session,
 // then checks tools and that a fleet event reaches the client as an MCP notification over the SSE stream.
 import { pkceChallenge } from "../../cloud/src/mcp";
+import { capturedCode } from "./mail";
 const BASE = process.env.BASE ?? "http://localhost:8799", TOKEN = process.env.TOKEN ?? "machinetok";
 let fail = 0;
 const ok = (c: unknown, m: string) => { console.log(`${c ? "✓" : "✗"} ${m}`); if (!c) fail++; };
@@ -24,15 +24,15 @@ const client = await (await fetch(asm.registration_endpoint, { method: "POST", h
   body: JSON.stringify({ client_name: "e2e", redirect_uris: [redirect], token_endpoint_auth_method: "none" }) })).json() as any;
 ok(client.client_id, `registered ${client.client_id}`);
 
-// 3. authorize: email → code (CLI delivery) → redirect with code
+// 3. authorize: email → emailed code → redirect with code
 const verifier = crypto.randomUUID() + crypto.randomUUID();
 const q = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: redirect, state: "xyz",
   code_challenge: await pkceChallenge(verifier), code_challenge_method: "S256", scope: "onlyone", resource: prm.resource });
 ok((await (await fetch(`${asm.authorization_endpoint}?${q}`)).text()).includes("发送验证码"), "sign-in page");
 const step = (b: Record<string, string>) => fetch(`${asm.authorization_endpoint}?${q}`, { method: "POST", body: new URLSearchParams(b), redirect: "manual" });
 const sent = await (await step({ step: "send", email: "owner@example.com" })).text();
-ok(sent.includes("onlyone login"), "code page (code shown by `onlyone login`)");
-const { code: emailCode } = await (await fetch(`${BASE}/api/host/login-code`, { headers: M })).json() as any;
+ok(sent.includes('name="code"') && !sent.includes('name="totp"'), "code page needs only the email code");
+const emailCode = await capturedCode(BASE, TOKEN);
 r = await step({ step: "verify", email: "owner@example.com", code: emailCode });
 const loc = new URL(r.headers.get("location") ?? "http://x/");
 ok(r.status === 302 && loc.searchParams.get("state") === "xyz" && loc.searchParams.get("code"), `302 → ${loc.origin}${loc.pathname}`);
@@ -42,7 +42,7 @@ const tok = await (await fetch(asm.token_endpoint, { method: "POST", headers: { 
   body: new URLSearchParams({ grant_type: "authorization_code", code: loc.searchParams.get("code")!, client_id: client.client_id, code_verifier: verifier, redirect_uri: redirect }) })).json() as any;
 ok(tok.access_token && tok.refresh_token, "access + refresh token");
 const A = { authorization: `Bearer ${tok.access_token}` };
-ok((await fetch(`${BASE}/api/status`, { headers: A })).status === 200, "access token is an owner session");
+ok((await fetch(`${BASE}/api/status`, { headers: A })).status === 403, "MCP access token cannot access owner APIs");
 
 // 5. MCP session
 let id = 0, sid = "";
@@ -58,9 +58,9 @@ const init = await call("initialize", { protocolVersion: "2025-06-18", capabilit
 ok(init.result?.serverInfo?.name === "onlyone" && sid, `initialize (session ${sid.slice(0, 8)}…)`);
 await fetch(`${BASE}/mcp`, { method: "POST", headers: { ...A, "content-type": "application/json", "mcp-session-id": sid }, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
 const tools = (await call("tools/list")).result.tools.map((t: any) => t.name);
-ok(tools.length === 11 && tools.includes("search") && tools.includes("fetch"), `tools/list: ${tools.join(", ")}`);
+ok(tools.includes("get_status") && tools.includes("search") && tools.includes("fetch") && tools.includes("send_message") && !tools.some((name: string) => /merge|release|deploy|settings/.test(name)), `tools/list: ${tools.join(", ")}`);
 const tool = async (name: string, args = {}) => { const x = await call("tools/call", { name, arguments: args }); return x.result.isError ? x.result : JSON.parse(x.result.content[0].text); };
-ok((await tool("get_status")).hub, "get_status");
+ok((await tool("get_status")).onlyone, "get_status");
 const { cursor } = await tool("get_feed", { limit: 5 });
 ok(typeof cursor === "number", `get_feed cursor ${cursor}`);
 await call("resources/subscribe", { uri: "onlyone://tasks/T-9001" });

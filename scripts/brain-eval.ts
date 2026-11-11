@@ -40,7 +40,7 @@ const status = () => ({ hosts: [{ host: "huacnlee-omarchy-lb", online: true, run
 let did: WriteOp[] = [];
 const rec = async (op: any) => { did.push(op); return { ok: true, id: op.id ?? "T-0300" }; };
 const st = localStore({ root, status, feed: () => feed,
-  acts: { create_task: rec, amend_task: rec, cancel_task: rec, set_priority: rec, reassign_task: rec, remember: rec, edit_memory: rec, answer_decision: rec } });
+  acts: { create_task: rec, amend_task: rec, cancel_task: rec, set_priority: rec, reassign_task: rec, upsert_member: rec, upsert_routine: rec, remember: rec, edit_memory: rec, answer_decision: rec } });
 
 type Case = { name: string; text: string; chat?: string[]; replyTo?: string; answered?: string;
   expect: (o: BrainOut, w: WriteOp[]) => boolean; want: string };
@@ -60,14 +60,21 @@ const cases: Case[] = [
   { name: "amend by context", text: "语音那个，停止按钮做成方形的", chat: ["lead: T-0204: stop button wired, testing on the iOS simulator"], want: "amend_task T-0204",
     expect: (_, w) => W(w, "amend_task").some((x: any) => x.id === "T-0204") },
   { name: "new dev request", text: "帮我给 disktree 加一个按文件类型过滤的功能", want: "create_task (disktree)", expect: (_, w) => W(w, "create_task").length === 1 && W(w, "amend_task").length === 0 },
-  { name: "correct finished task", text: "不行，回复太长了，一句话就够", chat: ["lead: T-0186 done: the router model writes a one-line ack", "hub: 好，我去把 MCP 接上，做完给你看。"],
-    want: "create_task follows T-0186 (or amend T-0203)", expect: (_, w) => W(w, "create_task").some((x: any) => x.follows === "T-0186") || W(w, "amend_task").some((x: any) => x.id === "T-0203") },
+  { name: "correct finished task", text: "不行，回复太长了，一句话就够", chat: ["lead: T-0186 done: the router model writes a one-line ack", "onlyone: 好，我去把 MCP 接上，做完给你看。"],
+    want: "amend T-0186 (reopens it), create_task follows T-0186, or amend T-0203", expect: (_, w) => W(w, "create_task").some((x: any) => x.follows === "T-0186") || W(w, "amend_task").some((x: any) => x.id === "T-0186" || x.id === "T-0203") },
   { name: "decision answer in words", text: "nsh #830 那个可以合并", want: "answer_decision D-0030 A", expect: (_, w) => W(w, "answer_decision").some((x: any) => x.id === "D-0030" && /^A\b|合并/.test(x.answer)) },
   { name: "decision amend", text: "等等，还是先等 Android 测完", answered: "D-0030", want: "answer_decision D-0030 B", expect: (_, w) => W(w, "answer_decision").some((x: any) => x.id === "D-0030" && /^B|Android|等/.test(x.answer)) },
   { name: "cancel", text: "T-0207 不用做了", want: "cancel_task T-0207", expect: (_, w) => W(w, "cancel_task").some((x: any) => x.id === "T-0207") },
   { name: "reprioritise", text: "nsh#831 的 review 优先处理", want: "set_priority T-0207 urgent|high", expect: (_, w) => W(w, "set_priority").some((x: any) => x.id === "T-0207" && /urgent|high/.test(x.priority)) },
   { name: "reassign", text: "T-0207 交给 lead 来做", want: "reassign_task T-0207 lead", expect: (_, w) => W(w, "reassign_task").some((x: any) => x.id === "T-0207" && x.agent === "lead") },
   { name: "routines question", text: "我们现在有哪些定时任务？", want: "reply lists routines, no writes", expect: (o, w) => noWrites(o, w) && /pr-review|triage/.test(o.reply) },
+  { name: "add member with default avatar", text: "添加一位叫小白的成员，负责每天整理内容选题。", want: "upsert_member, default generated avatar, no code task",
+    expect: (_, w) => W(w, "upsert_member").some((x: any) => x.name === "小白" && x.generate_avatar !== false) && !W(w, "create_task").length },
+  { name: "member avatar management", text: "把 reviewer 的头像换成戴眼镜的小猫，默认用 Codex 生成。",
+    chat: ["lead: T-0204: stop button wired, testing on the iOS simulator"], replyTo: "T-0204", want: "upsert_member reviewer avatar, no code task",
+    expect: (_, w) => W(w, "upsert_member").some((x: any) => x.id === "reviewer" && (x.avatar_prompt || x.generate_avatar)) && !W(w, "create_task").length },
+  { name: "add routine directly", text: "每天早上9点让 lead 整理三个内容选题，只读汇报，添加成例行任务。", want: "upsert_routine daily 09:00 lead, no code task",
+    expect: (_, w) => W(w, "upsert_routine").some((x: any) => x.agent === "lead" && x.every === "daily 09:00") && !W(w, "create_task").length },
 ];
 
 const model = new ClaudeModel(MODEL);

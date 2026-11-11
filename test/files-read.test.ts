@@ -62,7 +62,7 @@ test("worker list/read: files table only, whitelist enforced", async () => {
 });
 
 test("local server list/read", () => {
-  const root = mkdtempSync(join(tmpdir(), "hub-read-"));
+  const root = mkdtempSync(join(tmpdir(), "onlyone-read-"));
   mkdirSync(join(root, "agents/lead"), { recursive: true });
   writeFileSync(join(root, "agents/lead/profile.md"), "hi");
   writeFileSync(join(root, "config.toml"), "secret");
@@ -71,4 +71,25 @@ test("local server list/read", () => {
   expect(readDataFile("config.toml", root)).toBeNull();
   expect(readDataFile("memory/x.md", root)).toBeUndefined();
   expect(listDataFiles("tasks/", root)).toBeNull();
+});
+
+test("worker avatar reads one durable file by key and refuses traversal and active content", async () => {
+  const sql = sqlOf();
+  initFilesSchema(sql);
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+  const req = new Request("http://x/api/files/commit", { method: "POST", body: JSON.stringify({ msg: "avatar", changes: [
+    { path: "agents/editor/avatar.image", base_version: 0, content: png },
+    { path: "agents/unsafe/avatar.image", base_version: 0, content: b64("<svg onload='alert(1)'/>") },
+  ] }) });
+  expect((await handleFiles(sql, req, new URL(req.url), "m"))!.status).toBe(200);
+  sql.queries.length = 0;
+  const r = handleReadFiles(sql, new URL("http://x/api/files/avatar?agent=editor"))!;
+  expect(r.status).toBe(200);
+  expect(r.headers.get("content-type")).toBe("image/png");
+  expect(Buffer.from(await r.arrayBuffer()).toString("base64")).toBe(png);
+  expect(sql.queries).toHaveLength(1);
+  expect(sql.queries[0]).toContain("WHERE path = ?");
+  expect(handleReadFiles(sql, new URL("http://x/api/files/avatar?agent=../editor"))!.status).toBe(400);
+  expect(handleReadFiles(sql, new URL("http://x/api/files/avatar?agent=unsafe"))!.status).toBe(415);
+  expect(handleReadFiles(sql, new URL("http://x/api/files/avatar?agent=missing"))!.status).toBe(404);
 });

@@ -34,7 +34,7 @@ const plain = (s: string) => s.replace(/```[\s\S]*?```/g, " ").replace(/[*_`#>\[
 export function notificationFor(ev: NotifyEvent, prefs: NotifyRules, now = new Date()): { title: string; body: string } | null {
   const kind = ev.kind;
   if (!KINDS.includes(kind)) return null; // never system / owner
-  if (kind === "notice" && /^hub(@|$)/.test(String(ev.from ?? ""))) return null; // hub's own housekeeping
+  if (kind === "notice" && /^onlyone(@|$)/.test(String(ev.from ?? ""))) return null; // onlyone's own housekeeping
   // Settings call notices "results".
   if (prefs.kinds?.[kind === "notice" ? "result" : kind] === false) return null;
   const urgent = kind === "decision" && ev.priority === "urgent";

@@ -34,12 +34,12 @@ export async function notify(text: string, cfg: Cfg, o: NotifyOpts = {}): Promis
   const n = cfg.notify ?? {};
   const ids: string[] = [];
   const files = (o.attachments ?? []).filter((f) => existsSync(f));
-  // 1) the hub's own chat timeline (primary-local; workers forward to the primary server)
-  const ev = { from: o.from ?? `hub@${hostName(cfg)}`, kind: o.kind ?? "notice", text, ref: o.ref, options: o.options } as Omit<Event, "id" | "ts">;
-  if (isPrimary(cfg)) { appendEvent({ ...ev, attachments: files.map(storeMedia) }); ids.push("hub"); }
+  // 1) the onlyone's own chat timeline (primary-local; workers forward to the primary server)
+  const ev = { from: o.from ?? `onlyone@${hostName(cfg)}`, kind: o.kind ?? "notice", text, ref: o.ref, options: o.options } as Omit<Event, "id" | "ts">;
+  if (isPrimary(cfg)) { appendEvent({ ...ev, attachments: files.map(storeMedia) }); ids.push("onlyone"); }
   else {
     const urls = (await Promise.all(files.map((f) => uploadMedia(f, cfg)))).filter(Boolean) as string[];
-    if (await forwardEvent({ ...ev, attachments: urls }, cfg)) ids.push("hub");
+    if (await forwardEvent({ ...ev, attachments: urls }, cfg)) ids.push("onlyone");
   }
   if (o.quiet) return ids;
   // 2) phone push via ntfy (self-hostable; tap opens the chat page)

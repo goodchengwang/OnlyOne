@@ -1,4 +1,4 @@
-// MCP server + OAuth 2.1 (cloud/src/mcp.ts) against a bun:sqlite stand-in for the Hub Durable Object.
+// MCP server + OAuth 2.1 (cloud/src/mcp.ts) against a bun:sqlite stand-in for the OnlyOne Durable Object.
 import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { initFilesSchema } from "../cloud/src/files";
@@ -19,7 +19,7 @@ function sqlOf() {
   };
 }
 
-function hub() {
+function onlyone() {
   const sql = sqlOf();
   initFilesSchema(sql);
   sql.exec(`CREATE TABLE events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, json TEXT);
@@ -37,12 +37,12 @@ function hub() {
   const file = (path: string, content: string) => sql.exec("INSERT OR REPLACE INTO files (path, content, hash, version, updated, by, deleted, rev) VALUES (?, ?, '', 1, ?, 'x', 0, ?)",
     path, new TextEncoder().encode(content), new Date(Date.now() + rev * 1000).toISOString(), ++rev);
   const host: McpHost = {
-    sql, status: () => ({ tasks: { active: 1 }, decisions: [{ id: "D-0099", question: "合并吗？" }], hosts: [{ host: "h1", online: true }], active: [], hub: { online: true } }),
+    sql, status: () => ({ tasks: { active: 1 }, decisions: [{ id: "D-0099", question: "合并吗？" }], hosts: [{ host: "h1", online: true }], active: [], onlyone: { online: true } }),
     events: (after, limit) => sql.exec("SELECT seq, json FROM events WHERE seq > ? ORDER BY seq LIMIT ?", after, limit).toArray().map((r) => ({ seq: r.seq, ev: JSON.parse(r.json) })),
     say: (text, ref) => { said.push({ text, ref }); return append({ from: "owner", kind: "owner", text, ref }); },
     enqueue: (op) => { queued.push(op); },
     startCode: async (email) => (email === "owner@example.com" ? { status: 200, body: { ok: true } } : { status: 400, body: { error: "invalid email" } }),
-    checkCode: async (email, code) => (code === "123456" ? { email } : { error: "验证码不对" }),
+    checkCode: async (email, code) => (code === "K7QM4XPR" ? { email } : { error: "验证码不对" }),
     newSession: async (email) => { const s = crypto.randomUUID().replace(/-/g, ""); sql.exec("INSERT INTO sessions (id, email) VALUES (?, ?)", s, email); return s; },
     dropSession: async () => {},
   };
@@ -73,7 +73,7 @@ const tool = async (mcp: Mcp, name: string, args: unknown = {}) => {
 };
 
 test("unauthenticated /mcp → 401 pointing at the protected-resource metadata", async () => {
-  const { mcp } = hub();
+  const { mcp } = onlyone();
   const r = await mcp.fetch(post("/mcp", { jsonrpc: "2.0", id: 1, method: "initialize" }), null);
   expect(r.status).toBe(401);
   expect(r.headers.get("www-authenticate")).toContain(`resource_metadata="${B}/.well-known/oauth-protected-resource"`);
@@ -84,7 +84,7 @@ test("unauthenticated /mcp → 401 pointing at the protected-resource metadata",
 });
 
 test("OAuth: register → sign in with email code → PKCE token → refresh rotates", async () => {
-  const { mcp, sql } = hub();
+  const { mcp, sql } = onlyone();
   expect((await mcp.fetch(post("/oauth/register", { redirect_uris: ["https://evil.example.com/cb#x"] }), null)).status).toBe(400);
   const reg = await mcp.fetch(post("/oauth/register", { client_name: "Claude", redirect_uris: ["https://claude.ai/api/mcp/auth_callback"] }), null);
   expect(reg.status).toBe(201);
@@ -103,7 +103,7 @@ test("OAuth: register → sign in with email code → PKCE token → refresh rot
   const form = (o: Record<string, string>) => new Request(`${B}/oauth/authorize?${q}`, { method: "POST", body: new URLSearchParams(o) });
   expect(await (await mcp.fetch(form({ step: "send", email: "owner@example.com" }), null)).text()).toContain('name="code"');
   expect(await (await mcp.fetch(form({ step: "verify", email: "owner@example.com", code: "000000" }), null)).text()).toContain("验证码不对");
-  const ok = await mcp.fetch(form({ step: "verify", email: "owner@example.com", code: "123456" }), null);
+  const ok = await mcp.fetch(form({ step: "verify", email: "owner@example.com", code: "K7QM4XPR" }), null);
   expect(ok.status).toBe(302);
   const back = new URL(ok.headers.get("location")!);
   expect(back.origin + back.pathname).toBe("https://claude.ai/api/mcp/auth_callback");
@@ -112,7 +112,7 @@ test("OAuth: register → sign in with email code → PKCE token → refresh rot
   const tok = (b: Record<string, string>) => mcp.fetch(new Request(`${B}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(b) }), null);
   expect((await tok({ grant_type: "authorization_code", code, client_id: client.client_id, code_verifier: "wrong".repeat(10) })).status).toBe(400);
   // the failed attempt burnt the code (single use) — get a fresh one
-  const again = new URL((await mcp.fetch(form({ step: "verify", email: "owner@example.com", code: "123456" }), null)).headers.get("location")!).searchParams.get("code")!;
+  const again = new URL((await mcp.fetch(form({ step: "verify", email: "owner@example.com", code: "K7QM4XPR" }), null)).headers.get("location")!).searchParams.get("code")!;
   const t = (await (await tok({ grant_type: "authorization_code", code: again, client_id: client.client_id, code_verifier: verifier, redirect_uri: "https://claude.ai/api/mcp/auth_callback" })).json()) as any;
   expect(t.token_type).toBe("Bearer");
   expect(sql.exec("SELECT email FROM sessions WHERE id = ?", t.access_token).toArray()[0]?.email).toBe("owner@example.com");
@@ -126,7 +126,7 @@ test("OAuth: register → sign in with email code → PKCE token → refresh rot
 });
 
 test("initialize, tools/list, resources", async () => {
-  const { mcp } = hub();
+  const { mcp } = onlyone();
   const init = await rpc(mcp, "initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } });
   expect(init.sid).toMatch(/^[0-9a-f]{32}$/);
   expect(init.body.result.protocolVersion).toBe("2025-06-18");
@@ -134,7 +134,7 @@ test("initialize, tools/list, resources", async () => {
   expect((await rpc(mcp, "notifications/initialized", {}, init.sid, null)).status).toBe(202);
   const names = (await rpc(mcp, "tools/list", {}, init.sid)).body.result.tools.map((t: any) => t.name);
   expect(names).toEqual(["get_status", "list_tasks", "get_task", "list_decisions", "get_feed", "wait_for_events", "list_agents", "list_routines", "read_memory",
-    "search_journal", "search", "fetch", "send_message", "create_task", "amend_task", "cancel_task", "set_priority", "reassign_task", "remember", "edit_memory", "answer_decision"]);
+    "search_journal", "search", "fetch", "send_message", "create_task", "amend_task", "cancel_task", "set_priority", "reassign_task", "upsert_member", "upsert_routine", "remember", "edit_memory", "answer_decision"]);
   expect(names.some((n: string) => /merge|release|setting/.test(n))).toBe(false);
   const res = (await rpc(mcp, "resources/list")).body.result.resources.map((r: any) => r.uri);
   expect(res).toContain("onlyone://tasks/T-0184");
@@ -145,7 +145,7 @@ test("initialize, tools/list, resources", async () => {
 });
 
 test("tools: read and owner-level writes", async () => {
-  const { mcp, said, queued } = hub();
+  const { mcp, said, queued } = onlyone();
   expect((await tool(mcp, "get_status")).data.decisions[0].id).toBe("D-0099");
   expect((await tool(mcp, "list_tasks")).data.tasks.map((t: any) => t.id)).toEqual(["T-0184"]);
   expect((await tool(mcp, "list_tasks", { state: "all", query: "typo" })).data.tasks.map((t: any) => t.id)).toEqual(["T-0100"]);
@@ -175,7 +175,7 @@ test("tools: read and owner-level writes", async () => {
 });
 
 test("wait_for_events returns as soon as an event lands", async () => {
-  const { mcp, append } = hub();
+  const { mcp, append } = onlyone();
   const cursor = (await tool(mcp, "get_feed")).data.cursor;
   const t0 = Date.now();
   const p = tool(mcp, "wait_for_events", { cursor, timeout_seconds: 10 });
@@ -187,7 +187,7 @@ test("wait_for_events returns as soon as an event lands", async () => {
 });
 
 test("SSE stream delivers events as notifications/message and resources/updated for subscriptions", async () => {
-  const { mcp, append } = hub();
+  const { mcp, append } = onlyone();
   const { sid } = await rpc(mcp, "initialize", { protocolVersion: "2025-11-25" });
   await rpc(mcp, "resources/subscribe", { uri: "onlyone://tasks/T-0184" }, sid);
   await rpc(mcp, "logging/setLevel", { level: "info" }, sid);
@@ -195,7 +195,7 @@ test("SSE stream delivers events as notifications/message and resources/updated 
   expect(r.headers.get("content-type")).toBe("text/event-stream");
   const reader = r.body!.getReader(), dec = new TextDecoder();
   append({ from: "lead@h1", kind: "result", text: "T-0184 PR opened", ref: "T-0184" });
-  append({ from: "hub", kind: "system", text: "debug noise" }); // below "info" → no message
+  append({ from: "onlyone", kind: "system", text: "debug noise" }); // below "info" → no message
   let buf = "";
   while (!(buf.match(/^data: \{/gm)?.length! >= 2)) buf += dec.decode((await reader.read()).value);
   const msgs = buf.split("\n").filter((l) => l.startsWith("data: {")).map((l) => JSON.parse(l.slice(6)));
@@ -232,7 +232,7 @@ async function frames(r: Response, until: (f: { id?: string; data?: any; retry?:
 }
 
 test("sessions: 400 without Mcp-Session-Id, 404 when unknown, expired or deleted; protocol version validated", async () => {
-  const { mcp, sql } = hub();
+  const { mcp, sql } = onlyone();
   const call = (h: Record<string, string>) => mcp.fetch(post("/mcp", { jsonrpc: "2.0", id: 1, method: "ping" }, h), "machine");
   expect((await call({})).status).toBe(400);
   expect((await call({ "mcp-session-id": "deadbeef" })).status).toBe(404);
@@ -255,7 +255,7 @@ test("sessions: 400 without Mcp-Session-Id, 404 when unknown, expired or deleted
 });
 
 test("capabilities follow the negotiated version", async () => {
-  const { mcp } = hub();
+  const { mcp } = onlyone();
   for (const v of ["2025-11-25", "2025-06-18", "2025-03-26"]) {
     const r = (await rpc(mcp, "initialize", { protocolVersion: v })).body.result;
     expect(r.protocolVersion).toBe(v);
@@ -265,7 +265,7 @@ test("capabilities follow the negotiated version", async () => {
 });
 
 test("GET stream: every message has an id, retry hint, priming event (2025-11-25), Last-Event-ID replays only what was missed", async () => {
-  const { mcp, append } = hub();
+  const { mcp, append } = onlyone();
   mcp.keepAliveMs = 30;
   const { sid } = await rpc(mcp, "initialize", { protocolVersion: "2025-11-25" });
   const r1 = await get(mcp, sid);
@@ -291,7 +291,7 @@ test("GET stream: every message has an id, retry hint, priming event (2025-11-25
 });
 
 test("wait_for_events over a POST SSE response: progress with the client's token, then the result", async () => {
-  const { mcp, append } = hub();
+  const { mcp, append } = onlyone();
   mcp.progressEveryMs = 20;
   const { sid } = await rpc(mcp, "initialize", { protocolVersion: "2025-06-18" });
   const cursor = (await rpc(mcp, "tools/call", { name: "get_feed", arguments: {} }, sid)).body.result.structuredContent.cursor;
@@ -317,7 +317,7 @@ test("wait_for_events over a POST SSE response: progress with the client's token
 });
 
 test("notifications/cancelled aborts wait_for_events and no response is sent", async () => {
-  const { mcp } = hub();
+  const { mcp } = onlyone();
   const { sid } = await rpc(mcp, "initialize", { protocolVersion: "2025-11-25" });
   const t0 = Date.now();
   const r = await mcp.fetch(post("/mcp", { jsonrpc: "2.0", id: "w1", method: "tools/call", params: { name: "wait_for_events", arguments: { cursor: 999999, timeout_seconds: 30 }, _meta: { progressToken: 1 } } },
@@ -330,7 +330,7 @@ test("notifications/cancelled aborts wait_for_events and no response is sent", a
 });
 
 test("resources/list_changed when the set of open tasks or decisions changes", async () => {
-  const { mcp, file, append } = hub();
+  const { mcp, file, append } = onlyone();
   const { sid } = await rpc(mcp, "initialize", { protocolVersion: "2025-06-18" });
   const r = await get(mcp, sid);
   mcp.onChanged(["onlyone://tasks/T-0184"]); // content change only → no list_changed
@@ -377,7 +377,7 @@ test("task history: every task in pages, newest first, and any one of them on it
 });
 
 test("task listings patch changed rows instead of re-reading the directory", () => {
-  const { sql, mcp, file } = hub();
+  const { sql, mcp, file } = onlyone();
   for (let i = 0; i < 50; i++) file(`tasks/done/T-1${String(i).padStart(3, "0")}.md`, `---\nid: T-1${i}\ntitle: t${i}\n---\n`);
   const queries: string[] = [];
   const exec = sql.exec.bind(sql);

@@ -121,7 +121,7 @@ export function cardFor(cause: string, items: { id: string; title: string; reaso
   };
 }
 
-// ------------------------------------------------------------------ IO: one supervisor pass over the hub
+// ------------------------------------------------------------------ IO: one supervisor pass over the onlyone
 const decisionState = (id: string) => existsSync(P("decisions", "open", `${id}.md`)) ? "open" as const
   : existsSync(P("decisions", "closed", `${id}.md`)) ? "closed" as const : undefined;
 

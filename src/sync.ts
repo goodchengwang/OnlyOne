@@ -7,8 +7,8 @@
 //   revertLocal() / resetToUpstream() discard local edits.
 // Machine-local state next to DATA: onlyone.toml (cloud url + machine token), sync.json (rev + per-path version/hash),
 // sync-base/ (content of each path as last synced; used to revert and to merge appends), sync.lock (cross-process).
-// Modes: remote (onlyone.toml has [cloud] url + [server] token) · HUB_SYNC=local (no remote; commits are no-ops) ·
-//        HUB_SYNC_FAKE=<sqlite file> (offline tests: the real Worker module over bun:sqlite, in-process).
+// Modes: remote (onlyone.toml has [cloud] url + [server] token) · ONLYONE_SYNC=local (no remote; commits are no-ops) ·
+//        ONLYONE_SYNC_FAKE=<sqlite file> (offline tests: the real Worker module over bun:sqlite, in-process).
 import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { hostname } from "node:os";
@@ -22,25 +22,25 @@ let dataDir = "", homeDir = "";
 export function setSyncData(dir: string, home = dirname(dir)) { dataDir = dir; homeDir = home; transport = undefined; }
 const D = () => dataDir;
 const HOME = () => homeDir;
-export const hubTomlPath = () => process.env.HUB_CONF || join(HOME(), "onlyone.toml");
+export const onlyoneTomlPath = () => process.env.ONLYONE_CONF || join(HOME(), "onlyone.toml");
 const STATE = () => join(HOME(), "sync.json");
 const BASE = () => join(HOME(), "sync-base");
 const LOCK = () => join(HOME(), "sync.lock");
 
 // ------------------------------------------------------------------ machine-local bootstrap config (onlyone.toml)
-export function readHubToml(): Record<string, any> {
-  try { return existsSync(hubTomlPath()) ? Bun.TOML.parse(readFileSync(hubTomlPath(), "utf8")) as any : {}; } catch { return {}; }
+export function readOnlyOneToml(): Record<string, any> {
+  try { return existsSync(onlyoneTomlPath()) ? Bun.TOML.parse(readFileSync(onlyoneTomlPath(), "utf8")) as any : {}; } catch { return {}; }
 }
 /** Merge sections into onlyone.toml (string values only). */
-export function writeHubToml(patch: Record<string, Record<string, string>>) {
-  const cur = readHubToml();
+export function writeOnlyOneToml(patch: Record<string, Record<string, string>>) {
+  const cur = readOnlyOneToml();
   for (const [s, kv] of Object.entries(patch)) cur[s] = { ...(cur[s] ?? {}), ...kv };
   const q = (v: unknown) => JSON.stringify(String(v));
   const text = "# machine-local OnlyOne bootstrap (never synced): your Worker URL + this machine's token\n" +
     Object.entries(cur).map(([s, kv]) => `[${s}]\n${Object.entries(kv as object).map(([k, v]) => `${k} = ${q(v)}`).join("\n")}\n`).join("\n");
-  mkdirSync(dirname(hubTomlPath()), { recursive: true });
-  writeFileSync(hubTomlPath(), text);
-  try { chmodSync(hubTomlPath(), 0o600); } catch {}
+  mkdirSync(dirname(onlyoneTomlPath()), { recursive: true });
+  writeFileSync(onlyoneTomlPath(), text);
+  try { chmodSync(onlyoneTomlPath(), 0o600); } catch {}
 }
 
 // ------------------------------------------------------------------ transport
@@ -55,7 +55,7 @@ function httpTransport(url: string, token: string): Transport {
     try {
       const r = await fetch(base + path, {
         method: init.method ?? "GET", body: init.body === undefined ? undefined : JSON.stringify(init.body),
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-OnlyOne-Host": process.env.HUB_HOST || require("node:os").hostname().split(".")[0] }, signal: AbortSignal.timeout(60_000),
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json", "X-OnlyOne-Host": process.env.ONLYONE_HOST || require("node:os").hostname().split(".")[0] }, signal: AbortSignal.timeout(60_000),
       });
       return { status: r.status, json: await r.json().catch(() => ({})) };
     } catch { return null; }
@@ -86,7 +86,7 @@ export async function fakeTransport(file: string, actor = hostname()): Promise<T
     // a real DO runs one request at a time; BEGIN IMMEDIATE gives the same isolation across processes
     db.exec("BEGIN IMMEDIATE");
     try {
-      const r = await handleFiles(sql, req, new URL(req.url), process.env.HUB_HOST || actor);
+      const r = await handleFiles(sql, req, new URL(req.url), process.env.ONLYONE_HOST || actor);
       db.exec("COMMIT");
       meter.rowsWritten += changes() - c0;
       return r ? { status: r.status, json: await r.json() } : { status: 404, json: {} };
@@ -98,21 +98,21 @@ export async function fakeTransport(file: string, actor = hostname()): Promise<T
 
 async function getTransport(): Promise<Transport | null> {
   if (transport !== undefined) return transport;
-  if (process.env.HUB_SYNC_FAKE) return (transport = await fakeTransport(process.env.HUB_SYNC_FAKE));
-  if (process.env.HUB_SYNC === "local") return (transport = null);
-  const h = readHubToml();
+  if (process.env.ONLYONE_SYNC_FAKE) return (transport = await fakeTransport(process.env.ONLYONE_SYNC_FAKE));
+  if (process.env.ONLYONE_SYNC === "local") return (transport = null);
+  const h = readOnlyOneToml();
   const url = h.cloud?.url, token = h.server?.token;
   return (transport = url && token ? httpTransport(String(url), String(token)) : null);
 }
-/** The shared config names a different Worker (the hub moved, e.g. to another account): switch this machine to it. */
+/** The shared config names a different Worker (the onlyone moved, e.g. to another account): switch this machine to it. */
 export function adoptCloudUrl(url: unknown): boolean {
   const next = String(url ?? "").replace(/\/$/, "");
-  if (!/^https:\/\//.test(next) || process.env.HUB_SYNC_FAKE || process.env.HUB_SYNC === "local") return false;
-  const cur = String(readHubToml().cloud?.url ?? "").replace(/\/$/, "");
+  if (!/^https:\/\//.test(next) || process.env.ONLYONE_SYNC_FAKE || process.env.ONLYONE_SYNC === "local") return false;
+  const cur = String(readOnlyOneToml().cloud?.url ?? "").replace(/\/$/, "");
   if (!cur || cur === next) return false;
-  writeHubToml({ cloud: { url: next } });
+  writeOnlyOneToml({ cloud: { url: next } });
   transport = undefined;
-  console.error(`sync: the hub moved, now syncing with ${next}`);
+  console.error(`sync: the onlyone moved, now syncing with ${next}`);
   return true;
 }
 export async function syncMode(): Promise<"remote" | "local"> { return (await getTransport()) ? "remote" : "local"; }
@@ -122,11 +122,11 @@ export async function syncMode(): Promise<"remote" | "local"> { return (await ge
  *  detect races through compare-and-swap). lazyPushMs: changes only to journals/heartbeats wait this long, or ride along
  *  with the next real change. */
 export const syncTiming = { now: () => Date.now(), pullMinMs: PULL_MIN_MS, lazyPushMs: LAZY_PUSH_MS };
-const lastPull = new Map<string, number>(), lastPush = new Map<string, number>(); // per mirror (tests switch between hosts)
+const lastPull = new Map<string, number>(); // per mirror (tests switch between hosts)
 
 // ------------------------------------------------------------------ state
 type Entry = { v: number; h: string; m: number; s: number };
-type State = { rev: number; files: Record<string, Entry> };
+type State = { rev: number; files: Record<string, Entry>; pushedAt?: number };
 function loadState(): State {
   try { return JSON.parse(readFileSync(STATE(), "utf8")); } catch { return { rev: 0, files: {} }; }
 }
@@ -145,7 +145,7 @@ const unb64 = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
 export function ignored(rel: string): boolean {
   const parts = rel.split("/");
   const first = parts[0], name = parts[parts.length - 1];
-  if (first === ".git" || first.startsWith(".git.bak") || first === "logs" || rel === "config.local.toml") return true;
+  if (first === ".git" || first.startsWith(".git.bak") || first === ".daemon-lock" || first === "logs" || rel === "config.local.toml") return true;
   return /^\.sync-tmp-|\.tmp$|~$|\.sw[po]$|^\.DS_Store$|^#.*#$/.test(name) || parts.includes(".git");
 }
 
@@ -375,11 +375,12 @@ export async function commitPush(msg: string, opts: { force?: boolean } = {}): P
       const changes = scan(st);
       if (!changes.length) { saveState(st); return true; }
       const lazy = changes.every((c) => latestOnly(c.path));
-      if (lazy && !opts.force && syncTiming.now() - (lastPush.get(HOME()) ?? -Infinity) < syncTiming.lazyPushMs) { saveState(st); return true; }
+      // Preserve lazy pacing across source reloads and service restarts.
+      if (lazy && !opts.force && syncTiming.now() - (st.pushedAt ?? -Infinity) < syncTiming.lazyPushMs) { saveState(st); return true; }
       const r = await t("/api/files/commit", { method: "POST", body: { msg, changes: wire(changes) } });
       if (!r) { saveState(st); return false; } // offline: changes stay pending locally
-      if (r.status === 429) { lastPush.set(HOME(), syncTiming.now()); saveState(st); return false; } // over the Worker's budget: later
-      if (r.status === 200) { recordCommitted(st, changes, r.json.files); lastPush.set(HOME(), syncTiming.now()); saveState(st); return true; }
+      if (r.status === 429) { st.pushedAt = syncTiming.now(); saveState(st); return false; } // over the Worker's budget: later
+      if (r.status === 200) { recordCommitted(st, changes, r.json.files); st.pushedAt = syncTiming.now(); saveState(st); return true; }
       if (r.status !== 409) { console.error(`sync: commit rejected ${r.status}: ${JSON.stringify(r.json).slice(0, 300)}`); saveState(st); return false; }
       const conflicts: string[] = r.json.conflicts ?? [];
       const { ok, lost, seen } = await _pull(st, t);
@@ -417,7 +418,7 @@ export async function syncStatus(): Promise<string> {
   const mode = await syncMode();
   const st = loadState();
   const pending = mode === "remote" ? scan(structuredClone(st)).length : 0;
-  return `${mode}${mode === "remote" ? ` → ${readHubToml().cloud?.url ?? process.env.HUB_SYNC_FAKE}` : ""} · rev ${st.rev} · ${Object.keys(st.files).length} files · ${pending} pending`;
+  return `${mode}${mode === "remote" ? ` → ${readOnlyOneToml().cloud?.url ?? process.env.ONLYONE_SYNC_FAKE}` : ""} · rev ${st.rev} · ${Object.keys(st.files).length} files · ${pending} pending`;
 }
 
 /** Drop machine sync state (tests / re-init). */

@@ -14,7 +14,7 @@ const get = (h: "a" | "b", rel: string) => readFileSync(join(hosts[h], rel), "ut
 const api = (path: string, body?: unknown) => t(path, body === undefined ? {} : { method: "POST", body });
 
 beforeAll(async () => {
-  W = mkdtempSync(join(tmpdir(), "hub-sync-"));
+  W = mkdtempSync(join(tmpdir(), "onlyone-sync-"));
   hosts.a = join(W, "a", "data"); hosts.b = join(W, "b", "data");
   mkdirSync(hosts.a, { recursive: true }); mkdirSync(hosts.b, { recursive: true });
   t = await sync.fakeTransport(join(W, "worker.sqlite"), "test");

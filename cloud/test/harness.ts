@@ -5,7 +5,7 @@ import { handleFiles, initFilesSchema } from "../src/files";
 interface Env { FILES: DurableObjectNamespace<FilesHarness> }
 
 export default {
-  fetch(req: Request, env: Env) { return env.FILES.get(env.FILES.idFromName("hub")).fetch(req); },
+  fetch(req: Request, env: Env) { return env.FILES.get(env.FILES.idFromName("onlyone")).fetch(req); },
 };
 
 export class FilesHarness extends DurableObject<Env> {

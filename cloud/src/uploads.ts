@@ -1,5 +1,5 @@
 // The owner's images sent with a chat message (POST /api/uploads, then POST /api/messages {attachments}).
-// Shared by the Worker and the local hub server (src/server.ts) so both accept the same files.
+// Shared by the Worker and the local onlyone server (src/server.ts) so both accept the same files.
 
 export const MAX_UPLOAD = 10 * 1024 * 1024;
 export const MAX_ATTACHMENTS = 10;
@@ -35,7 +35,7 @@ export function uploadProblem(type: string, size: number): { error: string; stat
 export const uploadId = (name: string) =>
   `${Date.now()}-${crypto.randomUUID().slice(0, 8)}-${(name || "image").replace(/[^\w.\-]/g, "_").slice(-80)}`;
 
-/** A message's attachments: up to 10 paths of the hub's own media ("/media/<id>"); null when malformed. */
+/** A message's attachments: up to 10 paths of the onlyone's own media ("/media/<id>"); null when malformed. */
 export function ownerAttachments(v: unknown): string[] | null {
   if (v === undefined || v === null) return [];
   if (!Array.isArray(v) || v.length > MAX_ATTACHMENTS) return null;

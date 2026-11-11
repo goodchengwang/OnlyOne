@@ -1,6 +1,6 @@
 # Packages the client apps. A tag `vX.Y.Z` publishes them as a GitHub release; pull requests touching this and
 # running it by hand only build them (workflow artifacts). Asset names carry no version, so
-# `releases/latest/download/<asset>`, which install-client.sh, install-client.ps1 and src/webclient.ts use, always resolves.
+# `releases/latest/download/<asset>`, used by src/webclient.ts, always resolves.
 name: release
 on:
   push:
@@ -10,8 +10,6 @@ on:
       - .github/workflows/release.yml
       - .github/actions/setup-nsh/**
       - scripts/check-ios-sdk.sh
-      - install-client.sh
-      - install-client.ps1
       - app/build-web.sh
   workflow_dispatch:
 
@@ -39,15 +37,17 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { target: linux, os: ubuntu-24.04, asset: onlyone-linux-x86_64.tar.gz, installer: install-client.sh }
-          - { target: windows, os: windows-latest, asset: onlyone-windows-x86_64.zip, installer: install-client.ps1 }
-          - { target: macos, os: macos-15, asset: onlyone-macos-arm64.zip, installer: install-client.sh }
+          - { target: linux, os: ubuntu-24.04, asset: onlyone-linux-x86_64.tar.gz }
+          - { target: windows, os: windows-latest, asset: onlyone-windows-x86_64.zip }
+          - { target: macos, os: macos-15, asset: onlyone-macos-arm64.zip }
           - { target: ios, os: xcode-27, asset: onlyone-ios-unsigned.ipa }
           - { target: android, os: ubuntu-24.04, asset: onlyone-android.apk }
           - { target: web, os: ubuntu-24.04, asset: onlyone-web.tar.gz }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        if: matrix.target == 'macos'
       - uses: ./.github/actions/setup-nsh
         with:
           ref: ${{ env.NSH_REF }}
@@ -85,6 +85,7 @@ jobs:
             exit 0
           fi
           (cd app && nsh package --target "$TARGET" -o "$out" "${args[@]}")
+          if [ "$TARGET" = macos ]; then bash scripts/package-executor.sh "$out/OnlyOne.app"; fi
           case "$TARGET" in
             linux) mv "$out/OnlyOne.tar.gz" "assets/$ASSET"; mv "$out"/OnlyOne-*.tar.gz assets/ ;;
             windows) mv "$out/OnlyOne.zip" "assets/$ASSET"; mv "$out"/OnlyOne-*.zip assets/ ;;
@@ -110,36 +111,7 @@ jobs:
           lipo "$app/Contents/MacOS/$executable" -verify_arch arm64
           codesign --verify --deep --strict "$app"
 
-      - name: Try the installer on this package
-        if: matrix.installer != ''
-        env:
-          ASSET: ${{ matrix.asset }}
-          INSTALLER: ${{ matrix.installer }}
-        run: |
-          (cd assets && { command -v sha256sum > /dev/null && sha256sum "$ASSET" || shasum -a 256 "$ASSET"; } > sha256sums)
-          python=python3; command -v python3 > /dev/null || python=python
-          (cd assets && exec "$python" -m http.server 8765 > /dev/null 2>&1) &
-          server=$!
-          trap 'kill "$server" 2> /dev/null || true' EXIT
-          sleep 2
-          export ONLYONE_CLIENT_BASE_URL=http://127.0.0.1:8765
-          case "$RUNNER_OS" in
-            Windows)
-              powershell -NoProfile -ExecutionPolicy Bypass -File "$INSTALLER"
-              test -f "$LOCALAPPDATA/Programs/OnlyOne/OnlyOne.exe" ;;
-            macOS)
-              bash "$INSTALLER"
-              codesign --verify --deep --strict /Applications/OnlyOne.app ;;
-            Linux)
-              bash "$INSTALLER"
-              test -x "$HOME/.local/share/onlyone-client/OnlyOne"
-              test -x "$HOME/.local/bin/onlyone-client"
-              grep -q "^Exec=$HOME/.local/share/onlyone-client/OnlyOne" "$HOME/.local/share/applications/dev.onlyone.app.desktop" ;;
-          esac
-          rm assets/sha256sums
-
       # Reuse this ARM runner for Intel after packaging and testing the native app.
-      # The installer currently supports only Apple silicon; Intel users download the archive.
       - name: Set up Intel nsh
         if: matrix.target == 'macos'
         uses: ./.github/actions/setup-nsh
@@ -157,6 +129,7 @@ jobs:
           mkdir -p assets-intel
           # The Intel CLI runs through Rosetta and also names OTA archives macos-x86_64.
           (cd app && nsh package --target macos -o "$out" "${args[@]}")
+          bash scripts/package-executor.sh "$out/OnlyOne.app" bun-darwin-x64
           ditto -c -k --keepParent "$out/OnlyOne.app" assets-intel/onlyone-macos-x86_64.zip
           mv "$out"/OnlyOne-*-macos-x86_64.tar.gz assets-intel/
           app="$RUNNER_TEMP/verify-x86_64/OnlyOne.app"

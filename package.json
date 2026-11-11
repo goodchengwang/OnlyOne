@@ -6,11 +6,13 @@
     "onlyone": "src/cli.ts"
   },
   "scripts": {
+    "deploy:cloud": "bun cloud/deploy.ts",
     "daemon": "bun src/cli.ts daemon",
     "tick": "bun src/cli.ts tick",
     "status": "bun src/cli.ts status",
     "check": "bunx tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "package:npm": "bun scripts/package-npm.ts"
   },
   "devDependencies": {
     "@types/bun": "latest",

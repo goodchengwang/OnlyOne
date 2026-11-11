@@ -6,8 +6,8 @@ your OnlyOne deployment.
 
 | | regular worker | guest worker |
 |---|---|---|
-| credential | shared machine key (`HUB_TOKEN`) | its own token, revocable per guest |
-| hub files (memory, policies, journal, decisions, tasks) | full mirror, read/write | none |
+| credential | shared machine key (`ONLYONE_TOKEN`) | its own token, revocable per guest |
+| onlyone files (memory, policies, journal, decisions, tasks) | full mirror, read/write | none |
 | chat, settings, export/import, sign-in admin | yes | no |
 | tasks | anything routed to it | only tasks explicitly assigned to that guest |
 | results | applied by the fleet | stored as untrusted; the primary reviews them |
@@ -15,14 +15,18 @@ your OnlyOne deployment.
 
 ## Set up
 1. On the primary (or any trusted machine): `onlyone guest invite "shared-win-1"` prints a one-time join code valid for
-   10 minutes, as install lines for Windows and macOS/Linux.
-2. On the shared machine, in the account that will run it, paste the line for its OS. It installs bun and OnlyOne and
-   joins as the guest, with no owner login and no machine key:
-   - Windows (PowerShell): `$env:ONLYONE_GUEST = "<url> <code>"; .\install.ps1`
-   - macOS / Linux: `bash install.sh --guest <url> <code>`
-   - OnlyOne already installed: `onlyone guest join <url> <code>`
+   10 minutes, with npm installation and guest enrollment commands.
+2. On the shared machine, install Node.js 22 or newer and run:
 
-   The install lines also start the guest as a per-account background service (systemd user unit, launchd agent, or
+   ```bash
+   npm install -g onlyonecli
+   onlyone guest join <url> <code>
+   onlyone guest install
+   ```
+
+   If OnlyOne is already installed, skip the npm command. Enrollment needs no owner login or machine key.
+   The Windows npm platform package is currently pending npm review; use a supported Linux or macOS machine meanwhile.
+   `onlyone guest install` starts a per-account background service (systemd user unit, launchd agent, or
    a hidden process from the account's Run key on Windows; no admin rights). `onlyone guest install` / `uninstall` add or
    remove it by hand, and `onlyone guest run` runs it in the foreground instead. Install and log in to `claude` (or
    `codex`) in that account first: the guest runs tasks with the machine's own login.

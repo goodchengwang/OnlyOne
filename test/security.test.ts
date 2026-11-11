@@ -64,24 +64,3 @@ test("media: active content is a sandboxed download, images stay inline", () => 
   expect(png["x-content-type-options"]).toBe("nosniff");
   expect(png["content-security-policy"]).toStartWith("sandbox");
 });
-
-test("TOTP: RFC 6238 vectors, ±1 step, single use", async () => {
-  const { b32decode, b32encode, hotp, newSecret, otpauthUri, totpMatch } = await import("../cloud/src/totp");
-  const key = new TextEncoder().encode("12345678901234567890");
-  // RFC 6238 Appendix B (SHA-1, 8 digits) at T = 59, 1111111109, 2000000000
-  expect(await hotp(key, 1, 8)).toBe("94287082");
-  expect(await hotp(key, 37037036, 8)).toBe("07081804");
-  expect(await hotp(key, 66666666, 8)).toBe("69279037");
-  const b32 = b32encode(key);
-  expect(b32).toBe("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ");
-  expect(b32decode(b32)).toEqual(key);
-  const at = 1_111_111_109_000, step = Math.floor(at / 30_000);
-  const now = await hotp(key, step), prev = await hotp(key, step - 1), old = await hotp(key, step - 2);
-  expect(await totpMatch(b32, now, -1, at)).toBe(step);
-  expect(await totpMatch(b32, prev, -1, at)).toBe(step - 1); // clock drift
-  expect(await totpMatch(b32, old, -1, at)).toBeNull();
-  expect(await totpMatch(b32, now, step, at)).toBeNull(); // already used
-  expect(await totpMatch(b32, "12345", -1, at)).toBeNull();
-  expect(newSecret()).toMatch(/^[A-Z2-7]{32}$/);
-  expect(otpauthUri("ABC", "a@b.c")).toBe("otpauth://totp/OnlyOne%3Aa%40b.c?secret=ABC&issuer=OnlyOne&algorithm=SHA1&digits=6&period=30");
-});

@@ -1,5 +1,5 @@
 // The web page's host (nsh.json `web.host`): what the app asks of the browser it runs in.
-// - page: where the app was served from (it talks to the hub that serves it), `?theme=`, and `?ref=`
+// - page: where the app was served from (it talks to the onlyone that serves it), `?theme=`, and `?ref=`
 //   (a notification opened the app on an event).
 // - Web Push: the service worker (sw.js, next to index.html), the permission, the subscription,
 //   the login session kept in IndexedDB for the worker, the app badge and the document title.

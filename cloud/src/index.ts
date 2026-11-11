@@ -2,39 +2,30 @@
 // One Durable Object (SQLite) holds: chat feed, owner→fleet inbox, the fleet's status/settings snapshot, media.
 // The machines (which run Claude/Codex) only make outbound HTTPS calls here; nothing needs to reach them.
 //
-// Client API (same shape as the local hub server):
+// Client API (same shape as the local onlyone server):
 //   GET /api/feed?since=  · WS /api/stream?token=  · POST /api/messages {text, reply_to?, attachments?: ["/media/<id>"]}
 //   GET /api/status  · GET|PUT /api/settings  · POST /api/media (multipart) · GET /media/<id>
 //   POST /api/uploads (multipart `file`; the owner's images for a message: image/*, ≤ 10 MB) → {url: "/media/<id>"}
 // Fleet API (primary host):
 //   POST /api/events (event)  · PUT /api/host/state {status, settings}  · GET /api/host/inbox?after=<seq>
-//   POST /api/host/revoke-sessions (HUB_TOKEN only)
-// Auth: HUB_TOKEN is the machine (fleet) credential. The owner logs in with an emailed one-time code:
+//   POST /api/host/revoke-sessions (ONLYONE_TOKEN only)
+// Auth: ONLYONE_TOKEN is the machine (fleet) credential. The owner logs in with an emailed one-time code:
 //   POST /api/auth/start {email} → mail code · POST /api/auth/verify {email, code} → {session} · POST /api/auth/logout
 // Web Push (owner session): GET /api/push/vapid · POST /api/push/subscribe {subscription, device_label}
 //   · POST /api/push/unsubscribe {endpoint} · POST /api/push/test · POST /api/push/answer {ref, answer}
 // Guest workers (low-trust shared machines): /api/guest/* and /api/guests/* — see guests.ts.
 // MCP (Claude / ChatGPT connectors): /mcp + OAuth 2.1 at /oauth/* and /.well-known/oauth-* — see mcp.ts and docs/mcp.md.
-// Every other /api/* and /media/* needs Bearer <HUB_TOKEN|session> (or ?token= for WebSocket / <img>).
+// Every other /api/* and /media/* needs Bearer <ONLYONE_TOKEN|session> (or ?token= for WebSocket / <img>).
 import { DurableObject } from "cloudflare:workers";
 import { b64dec, b64enc, handleFiles, handleReadFiles, initFilesSchema } from "./files";
 import { FREE, LEAN, SHED, TARGET, latestOnly } from "./budget";
 import { CHANNEL_SLUG, channelDigest, channelsView, taskHistory, taskInfo } from "./tools";
 import { CODE_RE, newCode, normCode } from "./authcode";
-import { newSecret, otpauthUri, totpMatch } from "./totp";
+import { claimPrimary } from "./bootstrap";
+import { sendResend } from "./resend";
 import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
-import { sendMail, type SmtpCfg } from "./smtp";
-import { EmailMessage } from "cloudflare:email";
-
 import { GUEST_TOKEN, guestApi, guestJoin, guestWho, guestsAdmin, initGuestSchema } from "./guests";
 
-const b64 = (t: string) => btoa(String.fromCharCode(...new TextEncoder().encode(t)));
-async function cfMail(binding: SendEmail, from: string, to: string, subject: string, text: string) {
-  const raw = [`From: OnlyOne <${from}>`, `To: ${to}`, `Subject: =?UTF-8?B?${b64(subject)}?=`,
-    `Message-ID: <${crypto.randomUUID()}@${from.split("@")[1]}>`, `Date: ${new Date().toUTCString()}`,
-    "MIME-Version: 1.0", "Content-Type: text/plain; charset=UTF-8", "Content-Transfer-Encoding: base64", "", b64(text)].join("\r\n");
-  await binding.send(new EmailMessage(from, to, raw));
-}
 import { sendPush, type PushSub, type Vapid } from "./push";
 import { CORS, Mcp } from "./mcp";
 import { L, setLang } from "./i18n";
@@ -42,16 +33,15 @@ import { ipAllowed, parseAllowList } from "./ipallow";
 import { notificationFor, type NotifyRules } from "../../app/notify";
 
 interface Env {
-  HUB: DurableObjectNamespace<Hub>; HUB_TOKEN: string; ASSETS: Fetcher;
-  HUB_OWNER_EMAIL?: string; // comma-separated allow-list
-  HUB_SMTP?: string;        // JSON SmtpCfg
-  EMAIL?: SendEmail;        // Cloudflare Email Routing binding (no SMTP needed)
-  HUB_MAIL_FROM?: string;   // sender on a domain with Email Routing on, e.g. onlyone@example.com
-  HUB_VAPID_PUBLIC?: string;  // b64url raw P-256 point
-  HUB_VAPID_PRIVATE?: string; // JWK JSON
-  HUB_MOVED_TO?: string;    // the hub moved to another Worker (e.g. another account): forward every request there
-  HUB_LANG?: string;        // [owner] language: "en" gives English text, otherwise Simplified Chinese
-  HUB_ALLOW_IPS?: string;   // optional source-IP allow-list (IPs / CIDRs, comma or space separated); set → everyone else gets 403
+  ONLYONE: DurableObjectNamespace<OnlyOne>; ONLYONE_TOKEN: string; ASSETS: Fetcher;
+  ONLYONE_OWNER_EMAIL?: string; // comma-separated allow-list
+  ONLYONE_INSTANCE: string;     // stable identity of this installation
+  ONLYONE_RESEND_API_KEY?: string;
+  ONLYONE_MAIL_FROM?: string;   // verified Resend sender
+  ONLYONE_VAPID_PUBLIC?: string;  // b64url raw P-256 point
+  ONLYONE_VAPID_PRIVATE?: string; // JWK JSON
+  ONLYONE_LANG?: string;        // [owner] language: "en" gives English text, otherwise Simplified Chinese
+  ONLYONE_ALLOW_IPS?: string;   // optional source-IP allow-list (IPs / CIDRs, comma or space separated); set → everyone else gets 403
 }
 
 const json = (d: unknown, status = 200) => Response.json(d, { status });
@@ -67,7 +57,6 @@ const CODE_TTL = 10 * 60_000, CODE_TRIES = 5, RESEND_MS = 60_000, SENDS_PER_HOUR
 const FAILS_PER_DAY = 20;
 // Owner sessions (app, browser, MCP access tokens) die after this long unused.
 const SESSION_IDLE_MS = 30 * 86_400_000;
-const TOTP_MISSING = () => L("2FA (authenticator app) is not bound yet, nobody can log in: run onlyone 2fa setup on your host first", "还没有绑定两步验证（验证器 App），任何人都无法登录：先在你的主机上运行 onlyone 2fa setup");
 
 const hex = (b: ArrayBuffer | Uint8Array) => [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, "0")).join("");
 const sha256 = async (s: string) => hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s)));
@@ -82,23 +71,21 @@ const validEmail = (e: string) => e.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
-    setLang(env.HUB_LANG);
+    setLang(env.ONLYONE_LANG);
     const url = new URL(req.url);
-    // Moved: machines still pointing here keep working (and pick up the new [cloud] url from the shared config).
-    // IP allow-list (HUB_ALLOW_IPS): checked before anything else, static assets included
-    if (env.HUB_ALLOW_IPS?.trim()) {
-      const { nets, bad } = parseAllowList(env.HUB_ALLOW_IPS);
-      if (bad.length) console.error(`HUB_ALLOW_IPS: ignored ${bad.join(" ")}`);
+    // IP allow-list (ONLYONE_ALLOW_IPS): checked before anything else, static assets included
+    if (env.ONLYONE_ALLOW_IPS?.trim()) {
+      const { nets, bad } = parseAllowList(env.ONLYONE_ALLOW_IPS);
+      if (bad.length) console.error(`ONLYONE_ALLOW_IPS: ignored ${bad.join(" ")}`);
       const ip = req.headers.get("cf-connecting-ip") ?? "";
       if (!ipAllowed(ip, nets)) return ipBlocked(req, ip);
     }
-    if (env.HUB_MOVED_TO) return fetch(new Request(env.HUB_MOVED_TO.replace(/\/$/, "") + url.pathname + url.search, req));
     const mcp = isMcpPath(url.pathname);
     if (mcp && req.method === "OPTIONS") return new Response(null, { status: 204, headers: CORS });
     if (!mcp && HASHED.test(url.pathname) && req.method === "GET") return hashedAsset(req, env, url);
     if (!mcp && !url.pathname.startsWith("/api/") && !url.pathname.startsWith("/media/")) return env.ASSETS.fetch(req);
-    if (!env.HUB_TOKEN) return json({ error: "HUB_TOKEN secret not set" }, 500);
-    return env.HUB.get(env.HUB.idFromName("hub")).fetch(req);
+    if (!env.ONLYONE_TOKEN || !env.ONLYONE_INSTANCE) return json({ error: "ONLYONE_TOKEN or ONLYONE_INSTANCE secret not set" }, 500);
+    return env.ONLYONE.get(env.ONLYONE.idFromName(env.ONLYONE_INSTANCE)).fetch(req);
   },
 };
 
@@ -137,11 +124,11 @@ async function hashedAsset(req: Request, env: Env, url: URL): Promise<Response> 
   return out;
 }
 
-/** Turned away by HUB_ALLOW_IPS. The visitor sees its own public IP (nothing else), so the owner can add a phone's
+/** Turned away by ONLYONE_ALLOW_IPS. The visitor sees its own public IP (nothing else), so the owner can add a phone's
  *  network from the phone itself: JSON for the app and API clients, a small page for a browser. */
 function ipBlocked(req: Request, ip: string): Response {
   const headers = { "cache-control": "no-store", "x-content-type-options": "nosniff" };
-  const msg = L(`This network's public IP ${ip || "unknown"} is not on the allow-list (HUB_ALLOW_IPS)`, `这个网络的出口 IP ${ip || "未知"} 不在允许名单（HUB_ALLOW_IPS）里`);
+  const msg = L(`This network's public IP ${ip || "unknown"} is not on the allow-list (ONLYONE_ALLOW_IPS)`, `这个网络的出口 IP ${ip || "未知"} 不在允许名单（ONLYONE_ALLOW_IPS）里`);
   if (!(req.headers.get("accept") ?? "").includes("text/html"))
     return Response.json({ error: "ip_blocked", ip, message: msg }, { status: 403, headers });
   const esc = (t: string) => t.replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
@@ -149,7 +136,7 @@ function ipBlocked(req: Request, ip: string): Response {
 <title>${L("OnlyOne: IP not allowed", "OnlyOne：IP 未放行")}</title><style>:root{color-scheme:light dark}body{margin:0;font:16px/1.6 -apple-system,system-ui,sans-serif;background:Canvas;color:CanvasText}
 main{max-width:420px;margin:18vh auto;padding:0 16px}h1{font-size:20px;margin:0 0 12px}.ip{font:600 24px/1.3 ui-monospace,Menlo,monospace;user-select:all;padding:12px 14px;border:1px solid #8884;border-radius:8px;word-break:break-all}
 p{color:GrayText;font-size:14px}</style></head><body><main><h1>${L("This network is not allowed yet", "这个网络还没放行")}</h1><div class="ip">${esc(ip || L("unknown", "未知"))}</div>
-<p>${L("This is your current network's public IP. To use OnlyOne from here, add it to the Worker's HUB_ALLOW_IPS (ranges work, e.g. 1.2.3.0/24; mobile data often uses changing IPv6, so add its /64).", "这是你当前网络的出口 IP。要从这里使用 OnlyOne，把它加到 Worker 的 HUB_ALLOW_IPS 里（可以写网段，如 1.2.3.0/24；手机流量常用 IPv6，地址会变，写它的 /64 网段）。")}</p></main></body></html>`,
+<p>${L("This is your current network's public IP. To use OnlyOne from here, add it to the Worker's ONLYONE_ALLOW_IPS (ranges work, e.g. 1.2.3.0/24; mobile data often uses changing IPv6, so add its /64).", "这是你当前网络的出口 IP。要从这里使用 OnlyOne，把它加到 Worker 的 ONLYONE_ALLOW_IPS 里（可以写网段，如 1.2.3.0/24；手机流量常用 IPv6，地址会变，写它的 /64 网段）。")}</p></main></body></html>`,
     { status: 403, headers: { ...headers, "content-type": "text/html; charset=utf-8", "content-security-policy": "default-src 'none'; style-src 'unsafe-inline'" } });
 }
 
@@ -165,7 +152,7 @@ export const routeKey = (req: Request) => {
 
 type Ev = { id: string; ts: string; from: string; kind: string; text: string; ref?: string; [k: string]: unknown };
 
-export class Hub extends DurableObject<Env> {
+export class OnlyOne extends DurableObject<Env> {
   sql: SqlStorage;
   mcp: Mcp;
   /** Every cursor since the last settle(): their rowsRead / rowsWritten are what Cloudflare bills. */
@@ -176,7 +163,7 @@ export class Hub extends DurableObject<Env> {
   unsaved = 0;
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    setLang(env.HUB_LANG);
+    setLang(env.ONLYONE_LANG);
     const raw = ctx.storage.sql, cursors = this.cursors;
     this.sql = { exec: (q: string, ...b: SqlStorageValue[]) => { const c = raw.exec(q, ...b); cursors.push(c); return c; }, get databaseSize() { return raw.databaseSize; } } as unknown as SqlStorage;
     // a host keeps one hibernating socket open for "inbox has something"; its keepalive never wakes this object
@@ -188,6 +175,9 @@ export class Hub extends DurableObject<Env> {
       CREATE TABLE IF NOT EXISTS media (id TEXT, n INTEGER, type TEXT, data BLOB, PRIMARY KEY (id, n));
       CREATE TABLE IF NOT EXISTS auth_codes (email TEXT PRIMARY KEY, hash TEXT, expires INTEGER, attempts INTEGER);
       CREATE TABLE IF NOT EXISTS auth_sends (email TEXT, ts INTEGER, sent INTEGER);
+      CREATE INDEX IF NOT EXISTS auth_sends_ts ON auth_sends (ts);
+      CREATE INDEX IF NOT EXISTS auth_sends_email_ts ON auth_sends (email, ts);
+      CREATE INDEX IF NOT EXISTS auth_sends_sent ON auth_sends (sent);
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, email TEXT, created INTEGER, last_seen INTEGER, ua TEXT);
       CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);`);
     initFilesSchema(this.sql);
@@ -214,23 +204,33 @@ export class Hub extends DurableObject<Env> {
       say: (text, ref) => this.ownerMessage(text, ref),
       enqueue: (op) => this.toInbox({ type: "op", op }),
       hostOnline: () => this.hostOnline(),
-      startCode: async (email) => { const r = await this.auth("/api/auth/start", new Request("https://hub/api/auth/start", { method: "POST", body: JSON.stringify({ email }) })); return { status: r.status, body: await r.json() }; },
-      checkCode: (email, code, totp, ctx) => this.checkCode(email, code, totp, ctx),
+      startCode: async (email) => { const r = await this.auth("/api/auth/start", new Request("https://onlyone/api/auth/start", { method: "POST", body: JSON.stringify({ email }) })); return { status: r.status, body: await r.json() }; },
+      checkCode: (email, code, ctx) => this.checkCode(email, code, ctx),
       newSession: (email, ua) => this.newSession(email, ua),
       dropSession: async (raw) => { this.sql.exec("DELETE FROM sessions WHERE id = ?", await sha256(raw)); },
     });
   }
 
-  statusView() { return { ...(this.get("status") ?? {}), hub: { online: this.hostOnline(), seen: this.get("host_seen") } }; }
+  statusView() { return { ...(this.get("status") ?? {
+    tasks: { proposed: 0, inbox: 0, active: 0, blocked: 0, failed: 0, done: 0 }, active: [], recent: [], decisions: [], hosts: [],
+  }), onlyone: { online: this.hostOnline(), seen: this.get("host_seen"), primary: this.primary() } }; }
 
-  /** Sign-in check shared by /api/auth/verify and the OAuth sign-in page: the emailed code AND the authenticator's
-   *  TOTP (mandatory; bound only from a machine with `onlyone 2fa setup`). A success is a new sign-in: the owners are told
-   *  by email (and in the feed), so a sign-in they didn't make is noticed at once. */
-  async checkCode(rawEmail: unknown, rawCode: unknown, rawTotp: unknown, ctx?: { req: Request; via: string }): Promise<{ email?: string; error?: string; status?: number }> {
-    const email = normEmail(rawEmail), code = normCode(rawCode), totp = typeof rawTotp === "string" ? rawTotp.replace(/\s/g, "") : "";
-    const tf = this.totp();
-    if (!tf) return { error: TOTP_MISSING(), status: 403 };
-    if (!validEmail(email) || !CODE_RE.test(code) || !/^\d{6}$/.test(totp)) return { error: L("Enter the email code and the 2FA code", "请填写邮箱验证码和两步验证码"), status: 400 };
+  settingsView() { return this.get("settings") ?? {
+    current: {}, effective: { agents: [], routines: [], autonomy: "onboarding", max_parallel: null, media_days: 7 },
+    options: { clis: [["claude"], ["codex", "claude"], ["claude", "codex"], ["codex"]], autonomy: ["onboarding", "assisted", "autonomous"] },
+  }; }
+
+  primary() {
+    const r = this.sql.exec("SELECT content FROM files WHERE path = 'config.toml' AND deleted = 0").toArray()[0];
+    return r ? new TextDecoder().decode(r.content as ArrayBuffer).match(/^primary\s*=\s*"([^"\n]*)"/m)?.[1] ?? "" : "";
+  }
+
+  /** Consume the emailed code before creating a browser or OAuth session. */
+  async checkCode(rawEmail: unknown, rawCode: unknown, ctx?: { req: Request; via: string }): Promise<{ email?: string; error?: string; status?: number }> {
+    const email = normEmail(rawEmail), code = normCode(rawCode);
+    if (!this.ownerOk(email)) return { error: L("This email is not allowed to log in", "这个邮箱不允许登录"), status: 403 };
+    if (!validEmail(email) || !CODE_RE.test(code)) return { error: L("Enter the 8-character email code", "请填写 8 位邮箱验证码"), status: 400 };
+    const hash = await sha256(`${email}:${code}`);
     const r = this.sql.exec("SELECT hash, expires, attempts FROM auth_codes WHERE email = ?", email).toArray()[0];
     if (!r || (r.expires as number) < Date.now()) return { error: L("The code is invalid or expired, request a new one", "验证码无效或已过期，请重新获取"), status: 401 };
     if ((r.attempts as number) >= CODE_TRIES) return { error: L("Too many attempts, request a new code", "尝试次数太多，请重新获取验证码"), status: 401 };
@@ -247,24 +247,13 @@ export class Hub extends DurableObject<Env> {
       }
       return { error, status: 401 };
     };
-    if (!sameStr(await sha256(`${email}:${code}`), r.hash as string)) return fail(L("The email code is wrong", "邮箱验证码不对"));
-    // the email code was right: a wrong TOTP keeps it (within its CODE_TRIES), so the owner can retype just the TOTP
-    const step = await totpMatch(tf.secret, totp, tf.last ?? -1);
-    if (step === null) {
-      if (ctx) this.alert(L("Wrong 2FA code", "两步验证码错误"), [L(`Someone entered the correct email code for ${email}, but the wrong 2FA code.`, `有人输对了 ${email} 的邮箱验证码，但两步验证码不对。`), ...this.origin(ctx.req),
-        "", L("If this was not you, your mailbox may be compromised: change its password now.", "如果不是你本人：你的邮箱可能已经被盗，请立即修改邮箱密码。")]);
-      return fail(L("The 2FA code is wrong (or already used), check the latest number in your authenticator app", "两步验证码不对（或已用过），请看验证器 App 上的最新数字"));
-    }
-    this.set("totp", { ...tf, last: step }); // each code works once
+    if (!sameStr(hash, r.hash as string)) return fail(L("The email code is wrong", "邮箱验证码不对"));
     this.sql.exec("DELETE FROM auth_codes WHERE email = ?", email);
-    this.sql.exec("DELETE FROM kv WHERE k = 'cli_code'");
     if (ctx) this.alert(L("New login", "新登录"), [L(`Account: ${email}`, `账号：${email}`), L(`Method: ${ctx.via}`, `方式：${ctx.via}`), ...this.origin(ctx.req),
       "", L("If this was you, nothing to do.", "如果是你本人，无需处理。"),
       L("If this was not you: run onlyone revoke-sessions on your host to sign out everything at once (phones, browsers, MCP connectors), then check whether this mailbox is compromised.", "如果不是你：在你的主机上运行 onlyone revoke-sessions，立即踢掉所有登录（手机、浏览器、MCP 连接器），再检查这个邮箱是否被盗。")]);
     return { email };
   }
-  /** The bound authenticator, or null (then nobody can sign in). */
-  totp(): { secret: string; last?: number; bound?: number } | null { const t = this.get("totp"); return t?.secret ? t : null; }
   async newSession(email: string, ua: string) {
     if (!this.ownerOk(email)) throw new Error("not an owner");
     const session = hex(crypto.getRandomValues(new Uint8Array(32))), now = Date.now();
@@ -274,12 +263,10 @@ export class Hub extends DurableObject<Env> {
   }
 
   // ---- security alerts
-  /** How to send mail, or null when email isn't set up (codes then go through `onlyone login`). */
+  /** How to send mail, or null when email is not configured. */
   mailer(): ((to: string, subject: string, text: string) => Promise<void>) | null {
-    let smtp: SmtpCfg | null = null;
-    try { smtp = this.env.HUB_SMTP ? JSON.parse(this.env.HUB_SMTP) : null; } catch {}
-    if (smtp?.host) return (to, subject, text) => sendMail(smtp!, to, subject, text);
-    if (this.env.EMAIL && this.env.HUB_MAIL_FROM) return (to, subject, text) => cfMail(this.env.EMAIL!, this.env.HUB_MAIL_FROM!, to, subject, text);
+    if (this.env.ONLYONE_RESEND_API_KEY && this.env.ONLYONE_MAIL_FROM) return (to, subject, text) =>
+      sendResend(this.env.ONLYONE_RESEND_API_KEY!, this.env.ONLYONE_MAIL_FROM!, to, subject, text);
     return null;
   }
   /** Where a request came from, for an alert: time, IP and place (Cloudflare's view), device. */
@@ -290,17 +277,17 @@ export class Hub extends DurableObject<Env> {
       `IP: ${req.headers.get("cf-connecting-ip") ?? L("unknown", "未知")}${place ? ` (${place})` : ""}${cf.asOrganization ? ` · ${cf.asOrganization}` : ""}`,
       `${L("Device", "设备")}: ${(req.headers.get("user-agent") ?? L("unknown", "未知")).slice(0, 200)}`];
   }
-  /** A security event: mailed to every HUB_OWNER_EMAIL address and put in the feed. Never blocks or fails the request. */
+  /** A security event: mailed to every ONLYONE_OWNER_EMAIL address and put in the feed. Never blocks or fails the request. */
   alert(title: string, lines: string[]) {
-    this.append({ from: "hub", kind: "notice", text: `🔐 ${title}\n${lines.filter(Boolean).join("\n")}` });
+    this.append({ from: "onlyone", kind: "notice", text: `🔐 ${title}\n${lines.filter(Boolean).join("\n")}` });
     const send = this.mailer();
     if (!send) return;
     const text = L(`OnlyOne security alert: ${title}\n\n${lines.join("\n")}\n`, `OnlyOne 安全提醒：${title}\n\n${lines.join("\n")}\n`);
     this.ctx.waitUntil(Promise.all(this.owners().map((to) => send(to, L(`OnlyOne security alert: ${title}`, `OnlyOne 安全提醒：${title}`), text)
-      .catch((err) => console.error(`alert mail to ${to}: ${err}`)))));
+      .catch((err) => console.error("security alert email failed")))));
   }
 
-  // ---- free-plan budget. Past the daily allowance every DO operation of that kind errors until 00:00 UTC, so the Hub
+  // ---- free-plan budget. Past the daily allowance every DO operation of that kind errors until 00:00 UTC, so the OnlyOne
   // meters itself (requests, and the rows each query really read and wrote) and gets frugal well before the cap:
   // "lean" persists hot state rarely, "shed" refuses fleet chatter (heartbeats, journals, routine notices).
   mem = new Map<string, string>();
@@ -400,13 +387,13 @@ export class Hub extends DurableObject<Env> {
     }
     const ev = this.append({ from: "owner", kind: "owner", text, ref, ...(clientId ? { client_id: clientId } : {}), ...(attachments?.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) });
     this.toInbox({ type: "message", event: ev });
-    if (!this.hostOnline()) this.append({ from: "hub", kind: "system", text: L("Got it. The team's machines are all offline right now, this will be handled as soon as one is back.", "收到。团队的电脑暂时都不在线，上线后会马上处理。"), ref: ev.id, ...(channel ? { channel } : {}) });
+    if (!this.hostOnline()) this.append({ from: "onlyone", kind: "system", text: this.primary() ? L("Queued. The coordinator is offline; this will be handled when it reconnects.", "已排队。协调主机离线，等待上线后执行。") : L("Queued. No execution computer is connected yet. Connect your first computer to start.", "已排队。尚未接入执行电脑，请接入首台电脑后开始执行。"), ref: ev.id, ...(channel ? { channel } : {}) });
     return ev;
   }
 
   // ---- web push
   vapid(): Vapid | null {
-    const { HUB_VAPID_PUBLIC: pub, HUB_VAPID_PRIVATE: priv, HUB_OWNER_EMAIL: owner } = this.env;
+    const { ONLYONE_VAPID_PUBLIC: pub, ONLYONE_VAPID_PRIVATE: priv, ONLYONE_OWNER_EMAIL: owner } = this.env;
     if (!pub || !priv) return null;
     try { return { publicKey: pub, privateJwk: JSON.parse(priv), subject: `mailto:${(owner ?? "").split(",")[0].trim() || "owner@example.com"}` }; } catch { return null; }
   }
@@ -493,15 +480,15 @@ export class Hub extends DurableObject<Env> {
     const h = req.headers.get("authorization") ?? "";
     return h.startsWith("Bearer ") ? h.slice(7).trim() : url.searchParams.get("token") ?? ""; // WebSocket / <img> can't send headers
   }
-  /** The owner allow-list (HUB_OWNER_EMAIL). Empty only before email is set up, when codes are shown by `onlyone login`. */
-  owners() { return (this.env.HUB_OWNER_EMAIL ?? "").split(",").map(normEmail).filter(Boolean); }
-  ownerOk(email: unknown) { const o = this.owners(); return !o.length || o.includes(normEmail(email)); }
-  /** "machine" for HUB_TOKEN, the session for an owner session, null otherwise. A session whose email left the
+  /** Only configured owner emails can sign in. */
+  owners() { return (this.env.ONLYONE_OWNER_EMAIL ?? "").split(",").map(normEmail).filter(Boolean); }
+  ownerOk(email: unknown) { const o = this.owners(); return o.includes(normEmail(email)); }
+  /** "machine" for ONLYONE_TOKEN, the session for an owner session, null otherwise. A session whose email left the
    *  allow-list, or that went unused for SESSION_IDLE_MS, is deleted on sight. */
   async who(req: Request, url: URL): Promise<"machine" | { session: string; scope: "owner" | "mcp" } | null> {
     const t = this.credential(req, url);
     if (!t) return null;
-    if (sameStr(t, this.env.HUB_TOKEN)) return "machine";
+    if (sameStr(t, this.env.ONLYONE_TOKEN)) return "machine";
     if (!/^[0-9a-f]{64}$/.test(t)) return null;
     const id = await sha256(t); // store only hashes of session ids
     const r = this.sql.exec("SELECT last_seen, email, ua, scope FROM sessions WHERE id = ?", id).toArray()[0];
@@ -526,34 +513,30 @@ export class Hub extends DurableObject<Env> {
       if (!validEmail(email)) return json({ error: "invalid email" }, 400);
       const owners = this.owners();
       // Only the allow-list may sign in: anyone else is told so at once, with no code, no mail and no row written.
-      if (owners.length && !owners.includes(email)) return json({ error: L("This email is not allowed to log in", "这个邮箱不允许登录") }, 403);
-      if (!this.totp()) return json({ error: "totp_not_setup", message: TOTP_MISSING() }, 403); // no mail for a sign-in that can't finish
-      // No email set up yet: the code is shown on the owner's own machine instead (`onlyone login`, needs the machine key).
-      const send = this.mailer(), cli = !send;
+      if (!owners.includes(email)) return json({ error: L("This email is not allowed to log in", "这个邮箱不允许登录") }, 403);
+      const send = this.mailer();
+      if (!send) return json({ error: L("Email is not configured", "尚未配置发信服务") }, 503);
       this.sql.exec("DELETE FROM auth_sends WHERE ts < ?", now - 3600_000);
-            const recent = this.sql.exec("SELECT COUNT(*) AS n FROM auth_sends WHERE email = ? AND ts > ?", email, now - RESEND_MS).one().n as number;
+      const recent = this.sql.exec("SELECT COUNT(*) AS n FROM auth_sends WHERE email = ? AND ts > ?", email, now - RESEND_MS).one().n as number;
       if (recent) return json({ error: L("Wait a minute before requesting another code", "请稍等一分钟再重新获取验证码") }, 429);
       const sent = this.sql.exec("SELECT COUNT(*) AS n FROM auth_sends WHERE sent = 1").one().n as number;
       if (sent >= SENDS_PER_HOUR) return json({ error: L("Too many codes sent, try again in an hour", "验证码发送太频繁，请一小时后再试") }, 429);
-      const isOwner = owners.includes(email) || (cli && !owners.length);
-      this.sql.exec("INSERT INTO auth_sends (email, ts, sent) VALUES (?, ?, ?)", email, now, isOwner ? 1 : 0);
-      if (!isOwner) return json({ error: L("This email is not allowed to log in", "这个邮箱不允许登录") }, 403); // no allow-list and email set up: nobody is the owner
+      this.sql.exec("INSERT INTO auth_sends (email, ts, sent) VALUES (?, ?, 1)", email, now);
       const code = newCode();
       this.sql.exec("INSERT OR REPLACE INTO auth_codes (email, hash, expires, attempts) VALUES (?, ?, ?, 0)", email, await sha256(`${email}:${code}`), now + CODE_TTL);
-      if (cli) { this.set("cli_code", { email, code, expires: now + CODE_TTL }); return json({ ok: true, delivery: "cli" }); }
       try {
         const subject = L(`OnlyOne login code: ${code}`, `OnlyOne 登录验证码：${code}`);
         const text = L(`Your OnlyOne login code is:\n\n    ${code}\n\nValid for 10 minutes.\n\nIf this was not you, ignore this email.\n`, `你的 OnlyOne 登录验证码是：\n\n    ${code}\n\n10 分钟内有效。\n\n如果不是你本人操作，请忽略这封邮件。\n`);
         await send!(email, subject, text);
       } catch (err) {
-        console.error(`auth mail failed: ${err}`);
+        console.error("login email failed");
         this.sql.exec("DELETE FROM auth_codes WHERE email = ?", email);
         return json({ error: L("Sending the code email failed, try again later", "验证码邮件发送失败，请稍后再试") }, 502);
       }
       return json({ ok: true });
     }
     if (p === "/api/auth/verify") {
-      const r = await this.checkCode(body?.email, body?.code, (body as { totp?: unknown } | null)?.totp, { req, via: L("App / browser login", "App / 浏览器登录") });
+      const r = await this.checkCode(body?.email, body?.code, { req, via: L("App / browser login", "App / 浏览器登录") });
       if (!r.email) return json({ error: r.error }, r.status ?? 401);
       return json({ session: await this.newSession(r.email, req.headers.get("user-agent") ?? "") });
     }
@@ -578,12 +561,12 @@ export class Hub extends DurableObject<Env> {
 
     if (p.startsWith("/api/auth/")) return this.auth(p, req);
     // guest workers (guests.ts): a one-time code joins; a guest token reaches /api/guest/* and nothing else
-    if (p === "/api/guest/join" && m === "POST") return guestJoin(this.sql, req, (text) => this.append({ from: "hub", kind: "notice", text }));
+    if (p === "/api/guest/join" && m === "POST") return guestJoin(this.sql, req, (text) => this.append({ from: "onlyone", kind: "notice", text }));
     const gt = this.credential(req, url);
     if (GUEST_TOKEN.test(gt)) {
       const g = await guestWho(this.sql, gt);
       if (!g) return json({ error: "unauthorized" }, 401);
-      return guestApi(this.sql, req, url, g, (id, guest) => this.append({ from: "hub", kind: "notice", ref: id, text: L(`Guest machine ${guest} returned the result of ${id} (not reviewed).`, `访客机器 ${guest} 交回了 ${id} 的结果（未经审查）。`) }));
+      return guestApi(this.sql, req, url, g, (id, guest) => this.append({ from: "onlyone", kind: "notice", ref: id, text: L(`Guest machine ${guest} returned the result of ${id} (not reviewed).`, `访客机器 ${guest} 交回了 ${id} 的结果（未经审查）。`) }));
     }
     if (isMcpPath(p)) return this.mcp.fetch(req, await this.who(req, url));
     const who = await this.who(req, url);
@@ -593,7 +576,7 @@ export class Hub extends DurableObject<Env> {
     if (p.startsWith("/api/push/")) return this.push(p, req, who);
     const ga = await guestsAdmin(this.sql, req, url, who === "machine" ? "machine" : "owner");
     if (ga) return ga;
-    if ((p === "/api/files/list" || p === "/api/files/read") && m === "GET") { // owner (and machine) read of READABLE prefixes
+    if ((p === "/api/files/list" || p === "/api/files/read" || p === "/api/files/avatar") && m === "GET") { // owner (and machine) read of READABLE prefixes
       const r = handleReadFiles(this.sql, url);
       if (r) return r;
     }
@@ -620,46 +603,21 @@ export class Hub extends DurableObject<Env> {
       }
       if (r) return r;
     }
-    // Two-factor binding, from a machine only (the machine key is the root of trust; a stolen mailbox can't bind):
-    //   GET /api/host/2fa → {bound, since} · POST /api/host/2fa/setup → {secret, uri} (pending)
-    //   POST /api/host/2fa/confirm {totp} → binds the pending secret once a code from the app matches it
-    if (p.startsWith("/api/host/2fa")) {
+    if (p === "/api/host/security" && m === "GET") {
       if (who !== "machine") return json({ error: "forbidden" }, 403);
-      const host = req.headers.get("x-onlyone-host") ?? L("a host holding the machine key", "持有机器密钥的主机");
-      if (p === "/api/host/2fa" && m === "GET") { // also what `onlyone security` can't see from config.toml: the live allow-list
-        const t = this.totp(), allow = parseAllowList(this.env.HUB_ALLOW_IPS);
-        return json({ bound: !!t, since: t?.bound ?? null, allow_ips: this.env.HUB_ALLOW_IPS?.trim() ? allow.nets.length : null });
-      }
-      if (p === "/api/host/2fa/setup" && m === "POST") {
-        const secret = newSecret();
-        this.set("totp_pending", { secret, expires: Date.now() + 10 * 60_000 });
-        return json({ secret, uri: otpauthUri(secret, this.owners()[0] ?? "owner") });
-      }
-      if (p === "/api/host/2fa/confirm" && m === "POST") {
-        const { totp } = (await req.json().catch(() => ({}))) as { totp?: unknown };
-        const pend = this.get("totp_pending");
-        if (!pend?.secret || pend.expires < Date.now()) return json({ error: L("No binding waiting for confirmation (valid for 10 minutes), run onlyone 2fa setup again", "没有待确认的绑定（10 分钟内有效），重新运行 onlyone 2fa setup") }, 400);
-        const step = await totpMatch(pend.secret, totp);
-        if (step === null) return json({ error: L("The 2FA code is wrong: check your phone's clock and enter the latest number in the authenticator app", "两步验证码不对：确认手机时间准确，输入验证器 App 上的最新数字") }, 400);
-        const was = !!this.totp();
-        this.set("totp", { secret: pend.secret, last: step, bound: Date.now() });
-        this.sql.exec("DELETE FROM kv WHERE k = 'totp_pending'"); this.mem.delete("totp_pending");
-        this.alert(L(was ? "2FA re-bound" : "2FA turned on", was ? "两步验证已换绑" : "两步验证已开启"), [L(`By: ${host}`, `操作方：${host}`), alertTime(),
-          "", L(was ? "The old authenticator no longer works. If this was not you, someone has your machine key: check your host now." : "From now on, logging in needs the email code and the 2FA code from your authenticator app.", was ? "旧的验证器从现在起失效。如果不是你本人操作：有人拿到了你的机器密钥，立即检查你的主机。" : "从现在起，登录需要邮箱验证码 + 验证器 App 上的两步验证码。")]);
-        return json({ ok: true, replaced: was });
-      }
-      return json({ error: "not found" }, 404);
+      return json({ login: "email", owners: this.owners(), mail: !!this.mailer(), primary: this.primary(),
+        allow_ips: this.env.ONLYONE_ALLOW_IPS?.trim() ? parseAllowList(this.env.ONLYONE_ALLOW_IPS).nets.length : null });
     }
-    if (p === "/api/host/login-code") { // `onlyone login` on the owner's machine, when email isn't configured
-      if (who !== "machine") return json({ error: "forbidden" }, 403);
-      const c = this.get("cli_code");
-      return c && c.expires > Date.now() ? json(c) : json({ error: "no pending code" }, 404);
-    }
-    if (p === "/api/host/join" && m === "POST") { // a new machine, approved by the owner's login, gets the machine key
+    if (p === "/api/host/join" && m === "POST") {
       if (who === "machine") return json({ error: "forbidden" }, 403);
-      const { host } = (await req.json().catch(() => ({}))) as { host?: string };
-      this.append({ from: "hub", kind: "notice", text: L(`New machine ${String(host ?? "?").slice(0, 60)} joined the team.`, `新机器 ${String(host ?? "?").slice(0, 60)} 已加入团队。`) });
-      return json({ token: this.env.HUB_TOKEN });
+      const body = await req.json().catch(() => null) as { host?: unknown } | null;
+      const host = typeof body?.host === "string" ? body.host.trim() : "";
+      if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$/.test(host)) return json({ error: "invalid host name" }, 400);
+      const primary = await claimPrimary(this.sql, host);
+      if (!primary) return json({ error: "Cloud initialization is not complete; rerun deploy:cloud" }, 503);
+      this.append({ from: "onlyone", kind: "notice", text: L(`Machine ${host} joined the team. Coordinator: ${primary}.`, `电脑 ${host} 已加入团队。协调主机：${primary}。`) });
+      this.pushStatus();
+      return json({ token: this.env.ONLYONE_TOKEN, primary });
     }
     if (p === "/api/host/revoke-sessions" && m === "POST") {
       await req.text().catch(() => ""); // drain body
@@ -674,7 +632,7 @@ export class Hub extends DurableObject<Env> {
       this.alert(L("All logins revoked", "所有登录已撤销"), [L(`${n} login(s) (phones, browsers, MCP connectors) were signed out and need to log in again with an email code.`, `${n} 个登录（手机、浏览器、MCP 连接器）已被踢下线，需要重新用邮箱验证码登录。`), L(`By: ${req.headers.get("x-onlyone-host") ?? "a host holding the machine key"}`, `操作方：${req.headers.get("x-onlyone-host") ?? "持有机器密钥的主机"}`)]);
       return json({ ok: true, revoked: n });
     }
-    // Moving the hub to another Cloudflare account, one page at a time (media blobs are large):
+    // Moving the onlyone to another Cloudflare account, one page at a time (media blobs are large):
     //   GET /api/host/export → {tables: {name: rows}} · GET /api/host/export?table=t&offset=0&limit=50 → {rows}
     //   POST /api/host/import {table, rows, reset} (reset empties the table first)
     if (p === "/api/host/export" && m === "GET") {
@@ -683,11 +641,9 @@ export class Hub extends DurableObject<Env> {
       const names = this.sql.exec("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%'").toArray().map((r) => r.name as string);
       if (!t) return json({ tables: Object.fromEntries(names.map((n) => [n, this.sql.exec(`SELECT COUNT(*) AS n FROM "${n}"`).one().n])) });
       if (!names.includes(t)) return json({ error: "no such table" }, 404);
-      // ?after=<rowid of the last row> walks the table by key; ?offset= (old copiers) re-reads every skipped row
-      const limit = Math.min(Number(url.searchParams.get("limit") ?? 100), 1000), after = url.searchParams.get("after");
-      const rows = (after != null
-        ? this.sql.exec(`SELECT rowid AS _rowid, * FROM "${t}" WHERE rowid > ? ORDER BY rowid LIMIT ?`, Number(after), limit)
-        : this.sql.exec(`SELECT rowid AS _rowid, * FROM "${t}" ORDER BY rowid LIMIT ? OFFSET ?`, limit, Number(url.searchParams.get("offset") ?? 0))).toArray().map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) =>
+      const limit = Math.max(1, Math.min(Number(url.searchParams.get("limit")) || 100, 1000));
+      const after = Math.max(0, Number(url.searchParams.get("after")) || 0);
+      const rows = this.sql.exec(`SELECT rowid AS _rowid, * FROM "${t}" WHERE rowid > ? ORDER BY rowid LIMIT ?`, after, limit).toArray().map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) =>
         [k, v instanceof ArrayBuffer ? { $b64: b64enc(new Uint8Array(v)) } : v])));
       return json({ rows });
     }
@@ -752,7 +708,7 @@ export class Hub extends DurableObject<Env> {
 
     if (p === "/api/status") return json(this.statusView());
 
-    if (p === "/api/settings" && m === "GET") return json(this.get("settings") ?? { current: {}, effective: {}, options: {} });
+    if (p === "/api/settings" && m === "GET") return json(this.settingsView());
     if (p === "/api/tasks" && m === "GET") {
       return json(taskHistory(this.mcp.store(), { query: url.searchParams.get("q") ?? "", offset: Number(url.searchParams.get("offset")), limit: Number(url.searchParams.get("limit")) }));
     }
@@ -793,7 +749,7 @@ export class Hub extends DurableObject<Env> {
     if (p === "/api/settings" && m === "PUT") {
       const patch = await req.json();
       this.toInbox({ type: "settings", patch });
-      const view = this.get("settings") ?? { current: {} };
+      const view = this.settingsView();
       const deep = (a: any, b: any): any => { const o = { ...a }; for (const [k, v] of Object.entries(b ?? {})) o[k] = v && typeof v === "object" && !Array.isArray(v) ? deep(o[k] ?? {}, v) : v; return o; };
       view.current = deep(view.current ?? {}, patch);
       this.set("settings", view);
@@ -880,4 +836,3 @@ export class Hub extends DurableObject<Env> {
     this.settle(0, "ws");
   }
 }
-

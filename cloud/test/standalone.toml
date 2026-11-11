@@ -1,0 +1,25 @@
+# Test only: bunx wrangler dev --config cloud/test/standalone.toml --port 8798 --persist-to /tmp/onlyone-standalone-test
+name = "onlyone-standalone-test"
+main = "standalone-worker.ts"
+compatibility_date = "2026-10-01"
+
+[vars]
+ONLYONE_TOKEN = "test-machine"
+ONLYONE_INSTANCE = "standalone-test"
+ONLYONE_OWNER_EMAIL = "owner@example.com"
+ONLYONE_MAIL_FROM = "login@example.com"
+ONLYONE_RESEND_API_KEY = "test-resend"
+
+[assets]
+binding = "ASSETS"
+directory = "../../app/dist/web/onlyone"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*", "/mcp", "/oauth/*", "/.well-known/*"]
+
+[[durable_objects.bindings]]
+name = "ONLYONE"
+class_name = "TestOnlyOne"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TestOnlyOne"]

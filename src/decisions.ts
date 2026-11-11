@@ -212,7 +212,7 @@ export async function routeDecision(id: string, cfg: Cfg, host: string) {
     meta.recommendation ? L(`\nRecommended: *${meta.recommendation}*`, `\n建议：*${meta.recommendation}*`) : "",
   ].filter(Boolean).join("\n");
   const ids = await notify(text, cfg, { kind: menu ? "menu" : "decision", ref: id, options: opts,
-    attachments: (meta.attachments ?? "").split(" | ").filter(Boolean), from: `${agentName(meta.agent)}@${meta.host}` });
+    attachments: (meta.attachments ?? "").split(" | ").filter(Boolean), from: `${meta.agent || "lead"}@${meta.host}` });
   writeDoc(P("decisions", "open", `${id}.md`), { ...meta, held: now(), notified: ids.join(",") }, body);
   journal(host, `📨 ${id} held for owner: ${meta.question}`);
 }

@@ -5,6 +5,8 @@
 // (git-synced data repo, running agents); the cloud store forwards it to the primary daemon over the existing
 // owner→fleet inbox — so a write has exactly one implementation, on the machine that owns the data.
 // Never exposed here: merge, release, settings, machine credentials (policies/autonomy.md hard gates).
+import { MEMBER_ID, ROUTINE_NAME, validSchedule } from "./team";
+import { BUILTIN_ROUTINES } from "../../src/builtin-routines";
 
 export type Ev = { id: string; ts: string; from: string; kind: string; text: string; ref?: string; [k: string]: unknown };
 export type FileRow = { path: string; text: string; updated: string };
@@ -17,6 +19,8 @@ export type WriteOp =
   | { tool: "cancel_task"; id: string }
   | { tool: "set_priority"; id: string; priority: Priority }
   | { tool: "reassign_task"; id: string; agent: string }
+  | { tool: "upsert_member"; id: string; name?: string; role?: string; avatar_path?: string; avatar_prompt?: string; generate_avatar?: boolean }
+  | { tool: "upsert_routine"; name: string; agent?: string; every?: string; prompt?: string; enabled?: boolean; readonly?: boolean }
   | { tool: "remember"; text: string; file: string }
   | { tool: "edit_memory"; file: string; match: string; text: string }
   | { tool: "answer_decision"; id: string; answer: string };
@@ -156,15 +160,17 @@ export function listAgents(st: ToolStore) {
 export function listRoutines(st: ToolStore) {
   const toml = st.read("config.toml")?.text ?? "";
   // changes made from the UI live in settings.json and win over config.toml, as they do for the scheduler (loadConfig)
-  let ui: Record<string, { enabled?: boolean; every?: string }> = {};
+  let ui: Record<string, { enabled?: boolean; every?: string; agent?: string; prompt?: string; desc?: string; readonly?: boolean }> = {};
   try { ui = JSON.parse(st.read("settings.json")?.text ?? "{}").routines ?? {}; } catch {}
-  return toml.split(/^\[\[routine\]\]\s*$/m).slice(1).map((b) => {
+  const configured = toml.split(/^\[\[routine\]\]\s*$/m).slice(1).map((b) => {
     const block = b.split(/^\[/m)[0];
     const v = (k: string) => block.match(new RegExp(`^${k}\\s*=\\s*"""([\\s\\S]*?)"""|^${k}\\s*=\\s*"([^"]*)"|^${k}\\s*=\\s*(\\w+)`, "m"));
     const g = (k: string) => { const m = v(k); return m ? (m[1] ?? m[2] ?? m[3]) : undefined; };
     const change = ui[g("name") ?? ""] ?? {};
-    return { name: g("name"), every: change.every ?? g("every"), at: g("at"), agent: g("agent"), enabled: change.enabled ?? g("enabled") !== "false", about: (g("desc") ?? g("prompt") ?? "").split("\n")[0].slice(0, 200) };
+    return { name: g("name"), every: change.every ?? g("every"), at: g("at"), agent: change.agent ?? g("agent"), enabled: change.enabled ?? g("enabled") !== "false", about: (change.desc ?? change.prompt ?? g("desc") ?? g("prompt") ?? "").split("\n")[0].slice(0, 200) };
   }).filter((r) => r.name);
+  return [...configured, ...Object.entries(ui).filter(([name, r]) => !configured.some((c) => c.name === name) && r.agent && r.prompt)
+    .map(([name, r]) => ({ name, every: r.every, at: undefined, agent: r.agent, enabled: r.enabled !== false, about: (r.desc ?? r.prompt ?? "").split("\n")[0].slice(0, 200) }))];
 }
 /** Lines of the journal (journal/YYYY-MM-DD.md) that contain every word of the query, newest day first. */
 export function searchJournal(st: ToolStore, query: string, days = 14, limit = 40) {
@@ -198,7 +204,7 @@ export function readMemory(st: ToolStore, file?: string, query?: string) {
 /** Fleet status trimmed to what a reader needs. */
 export function statusView(st: ToolStore) {
   const s = st.status() ?? {};
-  return { hub: s.hub, tasks: s.tasks, decisions: s.decisions,
+  return { onlyone: s.onlyone, tasks: s.tasks, decisions: s.decisions,
     hosts: (s.hosts ?? []).map((h: any) => ({ host: h.host, online: h.online, state: h.state, caps: h.caps, running: h.running ?? h.tasks })),
     active: (s.active ?? []).map((t: any) => ({ id: t.id, title: t.title, agent: t.agent, host: t.host, started: t.started, activity: t.activity })),
     open: (s.recent ?? []).filter((t: any) => ["inbox", "nohost", "waiting", "parked", "blocked"].includes(t.state)).map((t: any) => ({ id: t.id, title: t.title, state: t.state, agent: t.agent })) };
@@ -282,6 +288,21 @@ export const TOOLS: Tool[] = [
   { name: "reassign_task", title: "Reassign a task", annotations: RW_IDEM, write: true,
     inputSchema: obj({ id: str("A queued, waiting or blocked task"), agent: str("Agent name from list_agents") }, ["id", "agent"]),
     description: "Give a task that has not started yet (or is parked) to a different agent." },
+  { name: "upsert_member", title: "Save a member", annotations: RW, write: true,
+    inputSchema: obj({ id: str("Stable lowercase id, e.g. content-editor; reuse the existing id when changing a member"),
+      name: str("Display name, required for a new member"), role: str("Responsibilities and working instructions, required for a new member"),
+      avatar_path: str("Absolute path of an image attached by the owner, as listed in the message; takes precedence over generation"),
+      avatar_prompt: str("Avatar appearance requested by the owner; Codex generates a real image"),
+      generate_avatar: { type: "boolean", description: "New members get a Codex-generated avatar by default. False only when the owner explicitly wants no avatar; true to regenerate an existing avatar." } }, ["id"]),
+    description: "Add a team member or change their name, responsibilities or avatar directly. This is team management, needs no project/repository and must not become a code task. Omitted fields keep their values. New members get an avatar generated by the local Codex by default; an attached image can be used instead." },
+  { name: "upsert_routine", title: "Save a routine", annotations: RW_IDEM, write: true,
+    inputSchema: obj({ name: str("Stable unique routine name; reuse it to change or disable a routine"),
+      agent: str("Member id from list_agents (required for a new routine)"),
+      every: str('Schedule in the coordinator host’s local timezone: "15m", "hourly", "daily 09:00", "weekdays 09:00", "weekly MON 09:00"'),
+      prompt: str("What the member should do and report each run (required for a new routine)"),
+      enabled: { type: "boolean", description: "False to disable the routine" },
+      readonly: { type: "boolean", description: "True only for observation/reporting that changes no external state" } }, ["name"]),
+    description: "Add, change or disable a recurring task directly, without a project or code task. Specify the member, schedule and complete instructions for a new routine. When adding a member too, call upsert_member before this tool. Omitted fields keep their values." },
   { name: "remember", title: "Remember", annotations: RW, write: true,
     inputSchema: obj({ text: str("The rule or fact, one or two sentences, phrased so it is useful later (who/what it applies to, and why)"),
       file: str("memory/owner.md (who the owner is), memory/principles.md (how to work), memory/taste.md (UI/code taste), memory/projects.md, or agents/<name>/memory.md for one agent's know-how") }, ["text", "file"]),
@@ -341,6 +362,33 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
       if (!open(id, ["inbox", "waiting", "blocked"])) return `${id} is not queued, waiting or blocked (a running task keeps its agent; amend it instead)`;
       return { tool: name, id, agent };
     }
+    case "upsert_member": {
+      const id = s(a.id);
+      if (!MEMBER_ID.test(id) || ["owner", "onlyone", "system"].includes(id)) return "id must be a non-reserved lowercase member id (letters, digits, - or _)";
+      const member = st.read(`agents/${id}/profile.md`);
+      const display = s(a.name), role = s(a.role), path = s(a.avatar_path), prompt = s(a.avatar_prompt);
+      if (!member && (!display || !role)) return "name and role required for a new member";
+      if ((a.name !== undefined && (!display || display.length > 80 || /[\r\n]/.test(display))) ||
+        (a.role !== undefined && (!role || role.length > 20_000))) return "name must be one line (1–80 characters); role must be 1–20000 characters";
+      if (a.generate_avatar !== undefined && typeof a.generate_avatar !== "boolean") return "generate_avatar must be boolean";
+      if (prompt.length > 2000 || (a.avatar_prompt !== undefined && !prompt)) return "avatar_prompt must be 1–2000 characters";
+      if (a.avatar_path !== undefined && (!/^(\/|[A-Za-z]:[\\/])/.test(path) || path.includes("\0"))) return "avatar_path must be an attached image's absolute path";
+      return { tool: name, id, ...(display ? { name: display } : {}), ...(role ? { role } : {}), ...(path ? { avatar_path: path } : {}),
+        ...(prompt ? { avatar_prompt: prompt } : {}), ...(typeof a.generate_avatar === "boolean" ? { generate_avatar: a.generate_avatar } : {}) };
+    }
+    case "upsert_routine": {
+      const routine = s(a.name);
+      if (!ROUTINE_NAME.test(routine) || ["__proto__", "constructor", "prototype"].includes(routine)) return "invalid routine name";
+      const existing = listRoutines(st).find((r) => r.name === routine) ?? BUILTIN_ROUTINES.find((r) => r.name === routine);
+      const agent = s(a.agent), every = s(a.every), prompt = s(a.prompt);
+      if (!existing && (!agent || !every || !prompt)) return "agent, every and prompt required for a new routine";
+      if (a.agent !== undefined && (!MEMBER_ID.test(agent) || !st.read(`agents/${agent}/profile.md`))) return "unknown agent (see list_agents)";
+      if (a.every !== undefined && !validSchedule(every)) return 'invalid schedule; use "15m", "hourly", "daily 09:00", "weekdays 09:00" or "weekly MON 09:00"';
+      if (a.prompt !== undefined && (!prompt || prompt.length > 20_000)) return "prompt must be 1–20000 characters";
+      for (const field of ["enabled", "readonly"]) if (a[field] !== undefined && typeof a[field] !== "boolean") return `${field} must be boolean`;
+      return { tool: name, name: routine, ...(agent ? { agent } : {}), ...(every ? { every } : {}), ...(prompt ? { prompt } : {}),
+        ...(typeof a.enabled === "boolean" ? { enabled: a.enabled } : {}), ...(typeof a.readonly === "boolean" ? { readonly: a.readonly } : {}) };
+    }
     case "remember": {
       const text = s(a.text), file = s(a.file);
       if (!text) return "text required";
@@ -367,7 +415,7 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
   return `unknown tool: ${name}`;
 }
 
-/** Runs one tool (everything but the transport-bound wait_for_events). `base`: the hub's public URL, for links. */
+/** Runs one tool (everything but the transport-bound wait_for_events). `base`: the onlyone's public URL, for links. */
 export async function runTool(st: ToolStore, name: string, a: any, base = ""): Promise<ToolResult> {
   a ??= {};
   const ok = (data: any): ToolResult => ({ ok: true, data });
@@ -494,9 +542,9 @@ export function channelsView(st: ToolStore, nowMs = Date.now(), limit = 100) {
 }
 
 /** A channel's digest: the main-chat messages about its tasks and cards (results, decisions, the owner's words), newest
- *  last. Task-thread chatter and the hub's own acks are execution detail, so they stay on the task page. */
+ *  last. Task-thread chatter and the onlyone's own acks are execution detail, so they stay on the task page. */
 export function channelDigest<E extends { ref?: string; from: string; thread?: boolean; kind?: string; channel?: string }>(events: readonly E[], refs: readonly string[], slug?: string, limit = 80): E[] {
   const want = new Set(refs);
   // what was said in the channel itself (the owner, the team's replies) plus the main chat's results and cards about its work
-  return events.filter((e) => !e.thread && (e.channel ? e.channel === slug : !!e.ref && want.has(e.ref) && !/^hub/.test(e.from) && e.kind !== "system")).slice(-limit);
+  return events.filter((e) => !e.thread && (e.channel ? e.channel === slug : !!e.ref && want.has(e.ref) && !/^onlyone/.test(e.from) && e.kind !== "system")).slice(-limit);
 }

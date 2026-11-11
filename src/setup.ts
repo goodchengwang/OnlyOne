@@ -1,9 +1,19 @@
 // onlyone init / install / update — out-of-the-box setup and self-update.
 import { $ } from "bun";
-import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { CODE, DATA, HOME_DIR, P } from "./core";
+import { createInterface } from "node:readline/promises";
+import { desktopBinding } from "./desktop";
+import { npmBuild } from "./release";
+
+export async function setupQuestion(label: string) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Setup needs an interactive terminal. Run onlyone in a terminal, or use onlyone init <url> --token <machine-token>.");
+  const input = createInterface({ input: process.stdin, output: process.stdout });
+  try { return (await input.question(label + " ")).trim(); }
+  finally { input.close(); }
+}
 
 const STATE_DIRS = [
   "tasks/proposed", "tasks/rejected", "tasks/waiting", "tasks/inbox", "tasks/active", "tasks/blocked", "tasks/failed", "tasks/done",
@@ -24,68 +34,58 @@ function seedTemplates() {
 }
 
 /** Worker host: owner email login → POST /api/host/join → this machine's token. */
-async function joinViaLogin(url: string, host: string): Promise<string | null> {
+async function joinViaLogin(url: string, host: string, ask = setupQuestion): Promise<string | null> {
   const post = async (path: string, body: unknown, auth?: string) => {
     const r = await fetch(url + path, { method: "POST", body: JSON.stringify(body), signal: AbortSignal.timeout(30_000),
       headers: { "Content-Type": "application/json", ...(auth ? { Authorization: `Bearer ${auth}` } : {}) } }).catch(() => null);
     return { ok: !!r?.ok, status: r?.status ?? 0, json: (await r?.json().catch(() => ({}))) as any };
   };
-  const email = (prompt("owner email:") ?? "").trim();
+  const email = (await ask("owner email:")).trim();
   if (!email) return null;
   const s = await post("/api/auth/start", { email });
   if (!s.ok) { console.error(`login failed (${s.status}): ${s.json?.error ?? ""}`); return null; }
-  const code = (prompt("code from the email:") ?? "").trim();
-  const totp = (prompt("6-digit code from the authenticator app:") ?? "").replace(/\s/g, "");
-  const v = await post("/api/auth/verify", { email, code, totp });
-  if (!v.ok || !v.json?.session) { console.error(`verification failed (${v.status}): ${v.json?.error ?? ""}`); return null; }
+  const code = (await ask("code from the email:")).trim();
+  const v = await post("/api/auth/verify", { email, code });
+  if (!v.ok || typeof v.json?.session !== "string" || !v.json.session) { console.error(`verification failed (${v.status}): ${v.json?.error ?? ""}`); return null; }
   const j = await post("/api/host/join", { host }, v.json.session);
   await post("/api/auth/logout", {}, v.json.session); // the session was only needed to mint the machine token
-  if (!j.ok || !j.json?.token) { console.error(`join failed (${j.status}): ${j.json?.error ?? ""}; or use: onlyone init ${url} --token <machine-token>`); return null; }
+  if (!j.ok || typeof j.json?.token !== "string" || !j.json.token) { console.error(`join failed (${j.status}): ${j.json?.error ?? ""}; or use: onlyone init ${url} --token <machine-token>`); return null; }
   return String(j.json.token);
 }
 
-/** `onlyone init [<hub-url>] [--token <machine-token>]` (the default): join an existing hub as a worker and mirror its data.
- *  `onlyone init --primary`: the fleet's one primary: deploy your own Worker, seed templates, push them.
- *  A host already set up as the primary (or already joined) keeps its role when init runs again. */
-export async function init(opts: { worker?: string; token?: string; primary?: boolean } = {}) {
-  const { commitPush, pull, loadConfig, hostName } = await import("./core");
-  const { readHubToml, syncMode, writeHubToml } = await import("./sync");
+/** Join a deployed cloud. Re-running init keeps the fixed coordinator and existing mirror. */
+export async function init(opts: { worker?: string; token?: string; ask?: typeof setupQuestion } = {}) {
+  const { pull, readOnlyOneToml, writeOnlyOneToml, setSyncData } = await import("./sync");
+  const me = process.env.ONLYONE_HOST || hostname().split(".")[0];
+  const saved = readOnlyOneToml();
+  const url = desktopBinding((opts.worker || saved.cloud?.url || await (opts.ask ?? setupQuestion)("your deployed OnlyOne Worker URL:")).trim()).url;
+  if (saved.server?.token && saved.cloud?.url !== url) throw new Error("This home belongs to a different installation. Use an empty ONLYONE_HOME.");
+  if (opts.token && saved.server?.token && opts.token !== saved.server.token) throw new Error("This home already has a different machine credential. Use an empty ONLYONE_HOME.");
+  let token = opts.token ?? (url === saved.cloud?.url ? saved.server?.token : undefined);
+  if (token) {
+    const response = await fetch(url + "/api/host/security", { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
+    if (!response) { console.error("Could not reach cloud; local data was kept"); process.exitCode = 1; return; }
+    if (!response.ok || !(await response.json() as { primary?: string }).primary) {
+      console.error(`Stored machine credential was rejected (${response.status}); local data was kept. Check this device in your Worker before signing in again.`); process.exitCode = 1; return;
+    }
+  }
+  token ??= await joinViaLogin(url, me, opts.ask);
+  if (!token) { process.exitCode = 1; return; }
+  if (saved.server?.token && (token !== saved.server.token || url !== saved.cloud?.url)) {
+    console.error("This home belongs to a different installation. Use an empty ONLYONE_HOME.");
+    process.exitCode = 1; return;
+  }
+  mkdirSync(HOME_DIR, { recursive: true, mode: 0o700 });
+  chmodSync(HOME_DIR, 0o700);
   mkdirSync(DATA, { recursive: true });
-  const me = hostname().split(".")[0];
-  const joined = readHubToml().cloud?.url;
-  const primaryHere = existsSync(P("config.toml")) && new RegExp(`^\\s*primary\\s*=\\s*"${me}"`, "m").test(readFileSync(P("config.toml"), "utf8"));
-  if (!opts.primary && !primaryHere) {
-    const url = (opts.worker || joined || (prompt("your OnlyOne URL (e.g. https://onlyone.example.com; set up the first machine with --primary):") ?? "")).trim().replace(/\/$/, "");
-    if (!url) { console.error("no OnlyOne URL: run init <onlyone-url>, or init --primary on the machine that hosts it"); process.exitCode = 1; return; }
-    const token = opts.token ?? (url === joined ? readHubToml().server?.token : undefined) ?? await joinViaLogin(url, me);
-    if (!token) { process.exitCode = 1; return; }
-    writeHubToml({ cloud: { url }, server: { token } });
-    if (!(await pull())) { console.error(`could not sync from ${url} (check the URL / token)`); process.exitCode = 1; return; }
-    writeLocalConfig(me);
-    console.log(`✔ joined ${url}; data mirrored to ${DATA}\n  next: onlyone install   (runs the daemon as a service)`);
-    return;
-  }
-  if (await syncMode() === "remote") await pull(); // re-running init: start from what the Worker has
-  seedTemplates();
-  const cfgPath = P("config.toml");
-  let cfg = readFileSync(cfgPath, "utf8");
-  if (cfg.includes('primary = "__PRIMARY__"')) {
-    cfg = cfg.replace('primary = "__PRIMARY__"', `primary = "${me}"`)
-      .replace('# url = "__URL__"', `url = "http://${me}:8787"`);
-    writeFileSync(cfgPath, cfg);
-    console.log(`this host (${me}) is the fleet primary`);
-  }
-  // the machine token is the Worker's HUB_TOKEN; it stays machine-local (onlyone.toml), not in the shared data
-  if (!readHubToml().server?.token && !loadConfig().server?.token) writeHubToml({ server: { token: crypto.randomUUID().replace(/-/g, "") } });
+  writeOnlyOneToml({ cloud: { url }, server: { token } });
+  setSyncData(DATA, HOME_DIR);
+  if (!(await pull())) { console.error(`Could not sync from ${url}`); process.exitCode = 1; return; }
+  if (!existsSync(P("config.toml"))) { console.error("Cloud has no initial config; rerun bun run deploy:cloud"); process.exitCode = 1; return; }
+  for (const d of STATE_DIRS) mkdirSync(P(d), { recursive: true });
   writeLocalConfig(me);
-  const c = loadConfig();
-  if ((c.fleet?.primary ?? "") === hostName(c) && !c.cloud?.url && !process.env.HUB_SYNC && !process.env.HUB_SYNC_FAKE) {
-    const { cloudDeploy } = await import("./cloud"); // the owner's own fixed endpoint on Cloudflare (free)
-    await cloudDeploy(c);
-    if (!readHubToml().cloud?.url) console.log("Worker not deployed yet; data stays local until you run: onlyone cloud deploy");
-  }
-  if (await syncMode() === "remote" && !(await commitPush(`[${me}] init`))) console.error("could not push the initial data; it will sync on the next daemon tick");
-  console.log(`✔ data: ${DATA}\n  next: onlyone install   (runs the daemon as a service)`);
+  console.log(`✔ joined ${url}; data mirrored to ${DATA}\n  next: onlyone install (runs the daemon as a service)`);
+  return true;
 }
 
 function writeLocalConfig(me: string) {
@@ -103,7 +103,8 @@ export function updateRejected(up: string, file = REJECTED()): boolean {
 }
 
 /** Fast-forward framework code if origin has new commits that pass tests. Returns true if updated. */
-export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?: boolean } = {}): Promise<boolean> {
+export async function selfUpdate(opts: { busy?: number; force?: boolean } = {}): Promise<boolean> {
+  if (npmBuild) return opts.force ? (await import("./npm-runtime")).stageNpmUpdate() : false;
   // never swap code (and then restart) under running work: defer until this host is idle
   if ((opts.busy ?? 0) > 0 && !opts.force) return false;
   const g = (...a: string[]) => $`git ${a}`.cwd(CODE).quiet().nothrow();
@@ -138,15 +139,6 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
     return false;
   }
   seedTemplates(); // new template agents/policies appear; existing ones untouched
-  { // primary keeps its own Cloudflare hub in step with the code (Worker or app changed)
-    const { loadConfig, hostName } = await import("./core");
-    const c = loadConfig();
-    const changed = (await g("diff", "--name-only", head, up)).stdout.toString();
-    if (c.cloud?.url && c.fleet?.primary === hostName(c) && (opts.deploy || /^(cloud|app)\//m.test(changed))) {
-      const { cloudDeploy } = await import("./cloud");
-      await cloudDeploy(c);
-    }
-  }
   console.log(`self-updated ${head.slice(0, 7)} → ${up.slice(0, 7)}`);
   return true;
 }
@@ -155,6 +147,7 @@ export async function selfUpdate(opts: { busy?: number; force?: boolean; deploy?
 export const SERVICE = "onlyone";
 const LABEL = "dev.onlyone.daemon";
 export async function install() {
+  if (npmBuild) return (await import("./npm-service")).installNpmService();
   const bun = Bun.which("bun") ?? join(homedir(), ".bun/bin/bun");
   const cli = join(CODE, "src", "cli.ts");
   const path = [join(homedir(), ".bun/bin"), join(homedir(), ".local/bin"), join(homedir(), ".cargo/bin"), join(homedir(), "go/bin"), join(homedir(), ".local/share/mise/shims"),
@@ -177,7 +170,7 @@ RestartSec=10
 KillMode=mixed
 TimeoutStopSec=90min
 Environment=PATH=${path}
-Environment=HUB_DATA=${DATA}
+Environment=ONLYONE_DATA_DIR=${DATA}
 Nice=5
 # keep the box awake while the fleet runs
 ExecStartPre=-/usr/bin/true
@@ -199,7 +192,7 @@ WantedBy=default.target
 <plist version="1.0"><dict>
   <key>Label</key><string>${LABEL}</string>
   <key>ProgramArguments</key><array><string>/usr/bin/caffeinate</string><string>-i</string><string>${bun}</string><string>${cli}</string><string>daemon</string></array>
-  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${path}</string><key>HUB_DATA</key><string>${DATA}</string></dict>
+  <key>EnvironmentVariables</key><dict><key>PATH</key><string>${path}</string><key>ONLYONE_DATA_DIR</key><string>${DATA}</string></dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>

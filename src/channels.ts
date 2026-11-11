@@ -1,4 +1,4 @@
-// Channels on the hub side: the files (channels/<slug>.md), what agents are told, and what their results assign.
+// Channels on the onlyone side: the files (channels/<slug>.md), what agents are told, and what their results assign.
 import { existsSync, readFileSync } from "node:fs";
 import { P, list, now, readDoc, writeDoc } from "./core";
 import { CHANNEL_SLUG, type ChannelRow, parseChannel, slugify } from "../cloud/src/tools";

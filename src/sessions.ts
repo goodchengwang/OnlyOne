@@ -9,19 +9,19 @@ import { type Cfg, P, list, readDoc, HOME_DIR } from "./core";
 import { feed } from "./server";
 
 /** Owner's interactions inside onlyone since `since`: chat instructions + decisions (incl. overrides of the judge). */
-function hubInteractions(since: string): string {
+function onlyoneInteractions(since: string): string {
   const out: string[] = [];
-  for (const e of feed(since, 2000)) if (e.kind === "owner") out.push(`- [${e.ts.slice(0, 16)} hub-chat${e.ref ? " ↳" + e.ref : ""}] ${redact(e.text)}`);
+  for (const e of feed(since, 2000)) if (e.kind === "owner") out.push(`- [${e.ts.slice(0, 16)} onlyone-chat${e.ref ? " ↳" + e.ref : ""}] ${redact(e.text)}`);
   for (const p of list(P("decisions", "closed"))) {
     const m = readDoc(p).meta;
     if (!m.answered || m.answered < since || !/^owner/.test(m.answered_by ?? "")) continue;
     const shadow = m.shadow_verdict ? ` · judge would have: ${m.shadow_verdict} "${m.shadow_answer ?? ""}"` : "";
     const over = m.overridden_judge ? ` · OVERRODE judge's "${m.overridden_judge}"` : "";
-    out.push(`- [${m.answered.slice(0, 16)} hub-decision ${m.id} · ${m.agent ?? m.kind}] Q: ${redact(m.question ?? "")} · options: ${redact(m.options ?? m.items ?? "")} · recommended: ${m.recommendation ?? "-"} → owner: **${redact(m.answer ?? "")}**${shadow}${over}`);
+    out.push(`- [${m.answered.slice(0, 16)} onlyone-decision ${m.id} · ${m.agent ?? m.kind}] Q: ${redact(m.question ?? "")} · options: ${redact(m.options ?? m.items ?? "")} · recommended: ${m.recommendation ?? "-"} → owner: **${redact(m.answer ?? "")}**${shadow}${over}`);
   }
   for (const p of list(P("tasks", "rejected"), /^T-.*\.md$/)) {
     const m = readDoc(p).meta;
-    if ((m.created ?? "") >= since) out.push(`- [hub-rejected] owner declined proposed task: ${redact(m.title ?? "")} (${m.agent})`);
+    if ((m.created ?? "") >= since) out.push(`- [onlyone-rejected] owner declined proposed task: ${redact(m.title ?? "")} (${m.agent})`);
   }
   return out.join("\n");
 }
@@ -139,11 +139,11 @@ export function collect(cfg: Cfg, opts: { full?: boolean; maxChars?: number } = 
     state[f] = m;
     if (t.length) { sessions++; turns.push(...t); }
   }
-  const hubSince = opts.full ? "" : (state.__hub_since as unknown as string) ?? "";
-  const hub = existsSync(P("decisions")) ? hubInteractions(hubSince) : "";
-  (state as any).__hub_since = new Date().toISOString();
+  const onlyoneSince = opts.full ? "" : (state.__onlyone_since as unknown as string) ?? "";
+  const onlyone = existsSync(P("decisions")) ? onlyoneInteractions(onlyoneSince) : "";
+  (state as any).__onlyone_since = new Date().toISOString();
   writeFileSync(STATE, JSON.stringify(state));
-  if (!turns.length && !hub) return { file: null, turns: 0, sessions };
+  if (!turns.length && !onlyone) return { file: null, turns: 0, sessions };
   turns.sort((a, b) => a.ts.localeCompare(b.ts));
   const max = opts.maxChars ?? cfg.learn?.max_digest_chars ?? 400_000;
   const byProject = new Map<string, Turn[]>();
@@ -158,16 +158,16 @@ export function collect(cfg: Cfg, opts: { full?: boolean; maxChars?: number } = 
   }
   if (body.length > max) body = body.slice(-max); // keep the most recent
   const file = join(OUT, `digest-${new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-")}.md`);
-  const hubPart = hub ? `\n\n## OnlyOne (decisions & chat — how the owner judges the fleet's questions)\n${hub}\n` : "";
-  writeFileSync(file, `# Owner's own words from ${sessions} sessions (${turns.length} turns, redacted)\n${hubPart}${body}\n`, { mode: 0o600 });
+  const onlyonePart = onlyone ? `\n\n## OnlyOne (decisions & chat — how the owner judges the fleet's questions)\n${onlyone}\n` : "";
+  writeFileSync(file, `# Owner's own words from ${sessions} sessions (${turns.length} turns, redacted)\n${onlyonePart}${body}\n`, { mode: 0o600 });
   return { file, turns: turns.length, sessions };
 }
 
 export const LEARN_PROMPT = (digest: string) => `Learn the CEO. Read the redacted digest of the owner's own messages to AI coding agents at:
 ${digest}
-(local to this machine; never copy raw text or the file into the hub repo, never quote anything that looks like a secret or a private person's data).
+(local to this machine; never copy raw text or the file into the onlyone repo, never quote anything that looks like a secret or a private person's data).
 
-Distill durable, actionable knowledge — how the owner works, judges and decides — and update the hub's memory:
+Distill durable, actionable knowledge — how the owner works, judges and decides — and update the onlyone's memory:
 1. memory/taste.md — the owner's taste as concrete rules with an example each: UI/UX/visual ("too slow, not delightful"), code
    ("delete this path", naming, API shape), product calls, quality bar, what they reject and why, phrases they use when unhappy.
 2. memory/principles.md — decision principles (what they approve/decline, trade-offs they repeatedly pick, risk appetite, when they

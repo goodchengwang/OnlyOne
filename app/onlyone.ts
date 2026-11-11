@@ -1,9 +1,18 @@
+import { displayRev } from "../src/release";
 // onlyone: the server's shapes and the pure logic of the timeline (no UI, no I/O), shared by App.tsx and the tests.
 import { L } from "./i18n";
+import type { MemberView } from "../cloud/src/team";
+
+/** Show the version actually running; source checkouts are never labelled as npm releases. */
+export function machineVersion(rev?: string): string {
+  if (!rev) return L("Unknown", "未知");
+  if (/^\d+\.\d+\.\d+(?:-|$)/.test(rev)) return `CLI · v${rev}`;
+  return L(`Development${rev === "dev" ? "" : ` · ${displayRev(rev)}`}`, `开发版${rev === "dev" ? "" : ` · ${displayRev(rev)}`}`);
+}
 
 export type Kind = "notice" | "decision" | "menu" | "proposals" | "login" | "owner" | "system";
 
-export type HubEvent = {
+export type OnlyOneEvent = {
   id: string;
   client_id?: string;
   ts: string;
@@ -32,7 +41,7 @@ export type HostInfo = {
   accounts?: { cli: string; name: string; state: "ok" | "cooldown" | "login"; until?: string; model?: string }[];
   running?: { id: string; title: string; agent: string; started?: string; activity?: Activity }[];
   recent?: { id: string; title: string; state?: string; finished?: string }[];
-  /** The code the machine runs: its git commit, and that commit on GitHub. */
+  /** The code the machine runs: its npm version or Git commit, and an optional commit link. */
   rev?: string;
   rev_url?: string;
   /** Its progress on the owner's latest "update every machine". */
@@ -64,7 +73,7 @@ export type TaskInfo = {
 };
 
 /** A task is one chronological conversation, including results missing from the live feed. */
-export function taskConversation(task: TaskInfo, events: HubEvent[]): HubEvent[] {
+export function taskConversation(task: TaskInfo, events: OnlyOneEvent[]): OnlyOneEvent[] {
   const all = [...events];
   const same = (text: string) => all.some((e) => e.text.trim() === text.trim());
   if (task.request && !same(task.request)) all.push({
@@ -80,6 +89,9 @@ export function taskConversation(task: TaskInfo, events: HubEvent[]): HubEvent[]
 }
 
 export type Status = {
+  members?: MemberView[];
+  settings_revision?: string;
+  onlyone?: { online: boolean; seen?: number; primary?: string };
   channels_revision?: string;
   tasks: Record<"proposed" | "inbox" | "active" | "blocked" | "failed" | "done", number>;
   active: TaskInfo[];
@@ -95,12 +107,12 @@ export const ITEM_ID = /^[DLP]-[A-Z]?\d{4}$/;
 const LEADING_ID = /^\s*([DLP]-[A-Z]?\d{4})\b/;
 
 /** Events that ask the owner something, shown as a card with buttons. */
-export function isAsk(e: HubEvent): boolean {
+export function isAsk(e: OnlyOneEvent): boolean {
   return !!e.ref && ITEM_ID.test(e.ref) && ["decision", "menu", "proposals", "login"].includes(e.kind);
 }
 
 /** The one-tap answers of an ask: numbers (and all / none) for menus and proposals, letters for decisions. */
-export function choicesOf(e: HubEvent): string[] {
+export function choicesOf(e: OnlyOneEvent): string[] {
   const o = e.options ?? [];
   if (e.kind === "menu" || e.kind === "proposals") {
     const nums = o.map((x) => (x.match(/^\s*(\d+|all|none)\b/i) ?? [])[1]).filter((x): x is string => !!x);
@@ -111,7 +123,7 @@ export function choicesOf(e: HubEvent): string[] {
 }
 
 /** The option the team recommends ("Recommended: B" or "建议：B" in the text), if any. */
-export function recommended(e: HubEvent): string | null {
+export function recommended(e: OnlyOneEvent): string | null {
   const m = (e.text ?? "").match(/(?:建议：|Recommended: )\*?([^*\s　]+)/);
   return m ? m[1].split(/[,，]/)[0] : null;
 }
@@ -119,7 +131,7 @@ export function recommended(e: HubEvent): string | null {
 export const choiceLabel = (c: string) => (c === "all" ? L("All", "全部") : c === "none" ? L("None", "都不要") : c);
 
 /** The ids the owner has already answered, from the owner's own messages. */
-export function answeredIds(events: HubEvent[]): Set<string> {
+export function answeredIds(events: OnlyOneEvent[]): Set<string> {
   const done = new Set<string>();
   for (const e of events) {
     if (e.kind !== "owner") continue;
@@ -134,7 +146,7 @@ export { answerOf } from "./answers";
 
 export const TAGS = (): Partial<Record<Kind, string>> => ({ decision: L("Decide", "需要决定"), menu: L("Next", "下一步"), proposals: L("Approve", "待批准"), login: L("Login", "登录") });
 
-export const isHub = (from: string) => /^hub/.test(from);
+export const isOnlyOne = (from: string) => /^onlyone/.test(from);
 export const displayName = (from: string) => from.replace(/@.*/, "");
 export const initials = (from: string) => (from || "?").replace(/@.*/, "").slice(0, 2).toUpperCase();
 export const isVideo = (url: string) => /\.(mp4|webm|mov)(\?|$)/i.test(url);
@@ -197,8 +209,8 @@ export function dayRangeLabel(newest: string, oldest: string, now = new Date()):
 }
 
 /** The timeline's rows: the events with a separator before each new day. */
-export type Row = { key: string; day: string } | { key: string; event: HubEvent };
-export function rows(events: HubEvent[]): Row[] {
+export type Row = { key: string; day: string } | { key: string; event: OnlyOneEvent };
+export function rows(events: OnlyOneEvent[]): Row[] {
   const out: Row[] = [];
   let last = "";
   for (const e of events) {
@@ -211,7 +223,7 @@ export function rows(events: HubEvent[]): Row[] {
 }
 
 /** Merge newly fetched or pushed events into the timeline: no duplicates, ordered by time. */
-export function merge(events: HubEvent[], incoming: HubEvent[]): HubEvent[] {
+export function merge(events: OnlyOneEvent[], incoming: OnlyOneEvent[]): OnlyOneEvent[] {
   if (!incoming.length) return events;
   const seen = new Set(events.map((e) => e.id));
   const add = incoming.filter((e) => !seen.has(e.id));
@@ -238,7 +250,7 @@ export function normalizeUrl(url: string): string {
   return u;
 }
 
-/** v=2: the hub also pushes {"$status": …} frames, so a connected client never polls /api/status. */
+/** v=2: the onlyone also pushes {"$status": …} frames, so a connected client never polls /api/status. */
 export const wsUrl = (base: string, token: string) =>
   `${base.replace(/^http/i, "ws")}/api/stream?v=2&token=${encodeURIComponent(token)}`;
 
@@ -321,7 +333,7 @@ export function everyLabel(every: string): string {
 }
 export const intervalsWith = (every: string) => (INTERVALS.includes(every) ? INTERVALS : [...INTERVALS, every]);
 
-/** The PUT bodies the settings screen sends (whitelisted keys of the hub). */
+/** The PUT bodies the settings screen sends (whitelisted keys of the onlyone). */
 /** How long images are kept, in days: the choices and the one in force (7 by default). */
 export const MEDIA_DAYS = [7, 14, 30, 90];
 export const mediaDaysOf = (v: SettingsView | null | undefined): number => {
@@ -347,7 +359,7 @@ export type Command = { name: string; text: string };
 export type CommandItem = { id: string; name: string; detail: string; action?: "update-fleet"; text?: string };
 
 export const BUILTIN_COMMANDS = (): CommandItem[] => [
-  { id: "builtin:update-fleet", name: L("Update all machines", "更新所有机器"), detail: L("Every machine pulls the latest code and restarts", "所有机器拉取最新代码并重启"), action: "update-fleet" },
+  { id: "builtin:update-fleet", name: L("Update all machines", "更新所有机器"), detail: L("Update each machine through its installation channel and restart", "按各台机器的安装方式更新并重启"), action: "update-fleet" },
 ];
 
 /** The owner's saved commands, as settings hold them (anything malformed is left out). */
@@ -400,7 +412,7 @@ export function notifyPrefsOf(view: SettingsView | null, tz: string): NotifyPref
 export const notifyPatch = (prefs: NotifyPrefs) => ({ notify_prefs: prefs });
 
 /** The event to draw "以下为新消息" above: the first one from others after what was last seen. */
-export function firstUnread(events: HubEvent[], seenTs: string | null): string | null {
+export function firstUnread(events: OnlyOneEvent[], seenTs: string | null): string | null {
   if (!seenTs) return null;
   const e = events.find((x) => x.ts > seenTs && x.kind !== "owner");
   return e ? e.id : null;
@@ -470,11 +482,11 @@ export function updateLine(h: HostInfo, request: string | undefined, now = Date.
   const settled = ["done", "current", "failed"].includes(u.state);
   if (settled && now - Date.parse(u.ts) > UPDATE_SHOWN_MS) return null;
   switch (u.state) {
-    case "updating": return { text: L("Pulling and testing the new code…", "正在拉取并测试新代码…"), tone: "busy", busy: true };
+    case "updating": return { text: u.detail ?? L("Downloading and checking the new version…", "正在下载并检查新版本…"), tone: "busy", busy: true };
     case "waiting": return { text: `${u.detail ?? L("Restarting once running tasks finish", "等运行中的任务跑完后重启")}…`, tone: "busy", busy: true };
     case "restarting": return { text: L("Restarting…", "正在重启…"), tone: "busy", busy: true };
     case "deploying": return { text: L("Redeploying…", "正在重新发布线上…"), tone: "busy", busy: true };
-    case "done": return { text: L(`Updated to ${u.detail ?? h.rev?.slice(0, 7) ?? "latest"}`, `已更新到 ${u.detail ?? h.rev?.slice(0, 7) ?? "最新"}`), tone: "ok", busy: false };
+    case "done": return { text: L(`Updated to ${u.detail ?? displayRev(h.rev) ?? "latest"}`, `已更新到 ${u.detail ?? displayRev(h.rev) ?? "最新"}`), tone: "ok", busy: false };
     case "current": return { text: u.detail ? L(`Up to date · ${u.detail}`, `已是最新 · ${u.detail}`) : L("Up to date", "已是最新"), tone: "ok", busy: false };
     case "failed": return { text: L(`Update failed: ${u.detail ?? "unknown reason"}`, `更新失败：${u.detail ?? "原因未知"}`), tone: "bad", busy: false };
     default: return { text: u.state, tone: "muted", busy: false };

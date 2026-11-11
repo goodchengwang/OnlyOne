@@ -1,11 +1,12 @@
-// onlyone chat client: one TSX app for the web (served by the hub), macOS, Linux and phones.
+import { displayRev } from "../src/release";
+// onlyone chat client: one TSX app for the web (served by the onlyone), macOS, Linux and phones.
 // Design: the NSH gallery's (~/work/nsh/examples/gallery): its theme tokens (theme.json is the
 // gallery's), its shared UI layer (nsh-gallery-ui: palette, icons, tooltips, scroll bars), its
 // sidebar + toolbar layout; sized up for reading a chat all day (16 pt text, 40 pt controls).
 import { L, lang, LANG_KEY, LANGS } from "./i18n";
 
 /** A sender's name in the current language (agents localized, others without the @host). */
-const displayName = (from: string): string => agentDisplayName(from, lang() === "zh");
+const displayName = (from: string): string => agentDisplayName(from, lang() === "zh", memberProfiles());
 import {
   cleanup,
   createAnimatedValue,
@@ -44,11 +45,15 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
+import { executor } from "./executor";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
-import { agentDisplayName, avatarOf } from "./avatars";
+import { agentDisplayName, avatarOf as memberAvatar } from "./avatars";
+import type { MemberView } from "../cloud/src/team";
+const memberProfiles = signal<MemberView[]>([]);
+const avatarOf = (from: string) => memberAvatar(from, memberProfiles());
 import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc } from "./files";
-import { hubMarkdown } from "./markdown";
+import { onlyoneMarkdown } from "./markdown";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
 import { setupTray, type TrayChat } from "./tray";
@@ -115,10 +120,10 @@ import {
   groupByDay,
   dayRangeLabel,
   greeting,
-  type HubEvent,
+  type OnlyOneEvent,
   initials,
   isAsk,
-  isHub,
+  isOnlyOne,
   isVideo,
   loadOf,
   mediaUrl,
@@ -169,18 +174,19 @@ import {
   needsLabel,
   updateLine,
   updateSummary,
+  machineVersion,
   type UpdateLine,
   isQueued,
   taskConversation,
   type TaskInfo,
-} from "./hub";
+} from "./onlyone";
 import { notificationFor, type NotifyRules } from "./notify";
 // Email sign-in code length (cloud/src/index.ts CODE_LEN): letters and digits, case-insensitive.
 const CODE_LEN = 8;
 
 type Config = { url: string; token: string };
 /** `token` holds the login session (sent as `Bearer`, and `?token=` on the WebSocket and media URLs). */
-const KEYS = { url: "hub.url", token: "hub.token", email: "hub.email", theme: "hub.theme", seen: "hub.lastSeen", notifyOff: "hub.notifyOff", draft: "hub.draft" };
+const KEYS = { url: "onlyone.url", token: "onlyone.token", email: "onlyone.email", theme: "onlyone.theme", notifyOff: "onlyone.notifyOff", draft: "onlyone.draft" };
 /** iOS and Android draw the pages' headers (title, back, swipe back); the desktops and the web show the app's. */
 const systemHeader = platform.os === "ios" || platform.os === "android";
 const MONO = "monospace";
@@ -230,15 +236,15 @@ async function loadConfig(): Promise<Boot> {
 }
 
 type Conn = "connecting" | "live" | "offline" | "unauthorized" | "blocked";
-/** The Worker's IP allow-list (HUB_ALLOW_IPS) turned this device away; `ip` is its address as the Worker saw it. */
+/** The Worker's IP allow-list (ONLYONE_ALLOW_IPS) turned this device away; `ip` is its address as the Worker saw it. */
 const ipBlocked = (status: number, data: unknown): string | null =>
   status === 403 && (data as { error?: unknown })?.error === "ip_blocked" ? String((data as { ip?: unknown }).ip ?? "?") : null;
 
 /** Failed reconnects in a row before the owner hears about it; anything shorter recovers silently. */
 const OFFLINE_AFTER = 5;
 
-function createHub(cfg: Config) {
-  const events = signal<HubEvent[]>([]);
+function createOnlyOne(cfg: Config) {
+  const events = signal<OnlyOneEvent[]>([]);
   const status = signal<Status | null>(null);
   const conn = signal<Conn>("connecting");
   const blockedIp = signal("");
@@ -248,6 +254,13 @@ function createHub(cfg: Config) {
   let socket: WebSocket | null = null;
   let retry: ReturnType<typeof setTimeout> | undefined;
   let failures = 0;
+  const acceptStatus = (value: Status) => {
+    if (disposed) return;
+    memberProfiles.set((value.members ?? []).map((m) => ({ ...m, ...(m.avatar ? {
+      avatar: `${cfg.url}/api/files/avatar?agent=${encodeURIComponent(m.id)}&v=${encodeURIComponent(m.avatar)}&token=${encodeURIComponent(cfg.token)}`,
+    } : {}) })));
+    status.set(value);
+  };
 
   const last = () => {
     const evs = untracked(events);
@@ -259,7 +272,7 @@ function createHub(cfg: Config) {
     try {
       const r = await fetch(`${cfg.url}/api/feed${since ? `?since=${encodeURIComponent(since)}` : ""}`, { headers });
       if (r.status === 401) return conn.set("unauthorized");
-      const body = (await r.json()) as { events: HubEvent[] };
+      const body = (await r.json()) as { events: OnlyOneEvent[] };
       const ip = ipBlocked(r.status, body);
       if (ip) { blockedIp.set(ip); return conn.set("blocked"); } // retried with the socket: the device may change networks
       if (untracked(conn) === "blocked") conn.set("connecting");
@@ -274,7 +287,7 @@ function createHub(cfg: Config) {
   async function loadStatus() {
     try {
       const r = await fetch(`${cfg.url}/api/status`, { headers });
-      if (r.ok) status.set((await r.json()) as Status);
+      if (r.ok) acceptStatus((await r.json()) as Status);
     } catch {
       /* the feed reports the connection */
     }
@@ -287,12 +300,12 @@ function createHub(cfg: Config) {
     ws.onopen = () => {
       failures = 0;
       conn.set("live");
-      loadStatus(); // whatever changed while disconnected; from here on the hub pushes it
+      loadStatus(); // whatever changed while disconnected; from here on the onlyone pushes it
     };
     ws.onmessage = (m: { data: unknown }) => {
       try {
-        const d = JSON.parse(String(m.data)) as HubEvent & { $status?: Status };
-        if (d.$status) status.set(d.$status);
+        const d = JSON.parse(String(m.data)) as OnlyOneEvent & { $status?: Status };
+        if (d.$status) acceptStatus(d.$status);
         else events.update((evs) => merge(evs, [d]));
       } catch {
         /* not JSON */
@@ -328,7 +341,7 @@ function createHub(cfg: Config) {
     });
     if (r.status === 401) conn.set("unauthorized");
     if (!r.ok) throw new Error(L(`Send failed (${r.status})`, `发送失败（${r.status}）`));
-    const ev = (await r.json()) as HubEvent;
+    const ev = (await r.json()) as OnlyOneEvent;
     if (ev?.id) events.update((evs) => merge(evs, [ev]));
     return ev?.id;
   }
@@ -340,7 +353,7 @@ function createHub(cfg: Config) {
     return (await r.json()) as SettingsView;
   }
 
-  /** A JSON call of the hub's API: never throws (status 0 when unreachable); a 401 ends the session. */
+  /** A JSON call of the onlyone's API: never throws (status 0 when unreachable); a 401 ends the session. */
   async function api(method: string, path: string, body?: unknown): Promise<{ ok: boolean; status: number; data: Record<string, unknown> }> {
     try {
       const r = await fetch(`${cfg.url}${path}`, method === "GET" ? { headers } : { method, headers, body: JSON.stringify(body ?? {}) });
@@ -371,13 +384,14 @@ function createHub(cfg: Config) {
   const timer = setInterval(() => untracked(conn) !== "live" && loadStatus(), 120_000);
   const dispose = () => {
     disposed = true;
+    memberProfiles.set([]);
     clearInterval(timer);
     clearTimeout(retry);
     socket?.close();
   };
   return { events, status, conn, blockedIp, loaded, send, settings, api, logout, dispose, cfg };
 }
-type Hub = ReturnType<typeof createHub>;
+type OnlyOne = ReturnType<typeof createOnlyOne>;
 
 function pickLang(id: string) {
   if (id !== "en" && id !== "zh") return;
@@ -411,7 +425,7 @@ const surfaceEdge = () => colors.line;
 /** Links use a quiet, underlined accent shared by the app's themes. */
 const linkColor = () => token("link");
 
-/** The app's mark: a dark square with a live dot (the hub). */
+/** The app's mark: a dark square with a live dot (the onlyone). */
 function Mark(props: { size?: number }) {
   const s = props.size ?? 24;
   return (
@@ -424,7 +438,7 @@ function Mark(props: { size?: number }) {
 /** Opens a task's page from a T-0000 in any text (set by the channel). */
 let taskLink: (id: string) => void = () => {};
 
-/** A task's state from the hub's status (set by the channel), for the chips' dots. */
+/** A task's state from the onlyone's status (set by the channel), for the chips' dots. */
 let taskState: (id: string) => string | undefined = () => undefined;
 
 /** The app's syntax in messages (`extensions`, `pattern`): task ids and decision / proposal ids, shown by `renderCustom`. */
@@ -609,7 +623,7 @@ function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?:
   const fontSize = () => (props.quiet ? 13 : props.muted ? size.small : size.text) * k();
   const lineHeight = () => (props.quiet ? 19 : small ? 21 : size.line) * k();
   const doc = () => {
-    const d = TextView.parse(hubMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, EXTENSIONS);
+    const d = TextView.parse(onlyoneMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, EXTENSIONS);
     return { ...d, blocks: ghBlocks(d.blocks) };
   };
   return (
@@ -645,8 +659,8 @@ async function copyImage(src: string): Promise<void> {
   }
 }
 
-function Media(props: { hub: Hub; path: string; /** Every attachment of its message, to page through when zoomed. */ siblings?: string[] }) {
-  const src = mediaUrl(props.hub.cfg.url, props.hub.cfg.token, props.path);
+function Media(props: { onlyone: OnlyOne; path: string; /** Every attachment of its message, to page through when zoomed. */ siblings?: string[] }) {
+  const src = mediaUrl(props.onlyone.cfg.url, props.onlyone.cfg.token, props.path);
   const ratio = signal(16 / 10);
   const zoomed = signal(false);
   const frame: ViewStyle = { borderRadius: radius.inset, backgroundColor: colors.inset };
@@ -691,7 +705,7 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
         backdropClass="bg-scrim"
         style={{ flex: 1, padding: 24, pointerEvents: "box-none" }}
       >
-        <ImagePager hub={props.hub} paths={images()} start={Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
+        <ImagePager onlyone={props.onlyone} paths={images()} start={Math.max(0, images().indexOf(props.path))} onClose={() => zoomed.set(false)} />
       </Dialog>
     </If>
   );
@@ -701,7 +715,7 @@ function Media(props: { hub: Hub; path: string; /** Every attachment of its mess
  * A message's images full size, paged in a loop (NSH's `Carousel`): swipe, the arrow keys or the side buttons move
  * on, past the last back to the first; a press on the image closes it.
  */
-function ImagePager(props: { hub: Hub; paths: string[]; start: number; onClose: () => void }) {
+function ImagePager(props: { onlyone: OnlyOne; paths: string[]; start: number; onClose: () => void }) {
   const index = signal(props.start);
   const many = props.paths.length > 1;
   const side = (left: boolean): ViewStyle => ({
@@ -715,7 +729,7 @@ function ImagePager(props: { hub: Hub; paths: string[]; start: number; onClose: 
           {(p, i) => (
             <CarouselItem accessibilityLabel={`${i() + 1} / ${props.paths.length}`} style={{ width: "100%", height: "100%" }}>
               <View accessibilityLabel={L("Close image", "关闭大图")} onPress={props.onClose} style={{ flex: 1, alignItems: "center", justifyContent: "center", cursor: "zoom-out" }}>
-                <Image src={mediaUrl(props.hub.cfg.url, props.hub.cfg.token, p())} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
+                <Image src={mediaUrl(props.onlyone.cfg.url, props.onlyone.cfg.token, p())} style={{ width: "100%", height: "100%", objectFit: "contain" }} />
               </View>
             </CarouselItem>
           )}
@@ -863,7 +877,7 @@ function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpan
 
 // ---------------------------------------------------------------- timeline
 
-/** Messages the hub just confirmed: a quiet check beside their timestamp fades away. */
+/** Messages the onlyone just confirmed: a quiet check beside their timestamp fades away. */
 const justSent = signal<Set<string>>(new Set());
 const SENT_CHECK_MS = 1600;
 function markSent(id: string | undefined) {
@@ -890,7 +904,7 @@ function SentCheck() {
   );
 }
 
-/** A message the owner sent that the hub has not confirmed yet: it reads as sent unless delivery fails. */
+/** A message the owner sent that the onlyone has not confirmed yet: it reads as sent unless delivery fails. */
 type Outgoing = { id: string; ts: string; text: string; ref: string | null; files: Attachment[]; state: "held" | "sending" | "failed"; channel?: string };
 
 /** Each agent's own color and mark, the same everywhere it appears (stable by its id). */
@@ -906,8 +920,8 @@ function persona(from: string): { tint: string; mark: string } {
 }
 
 function Avatar(props: { from: string; small?: boolean; testID?: string }) {
-  // The hub speaks as 顺风耳 (avatars.ts); the grey dot only if a hub sender ever has no avatar.
-  const hubbed = isHub(props.from) && avatarOf(props.from) === null;
+  // The onlyone speaks as 顺风耳 (avatars.ts); the grey dot only if a onlyone sender ever has no avatar.
+  const systemSender = isOnlyOne(props.from) && avatarOf(props.from) === null;
   const p = persona(props.from);
   const box = props.small ? 22 : 36;
   return (
@@ -921,10 +935,10 @@ function Avatar(props: { from: string; small?: boolean; testID?: string }) {
         flexShrink: 0,
         alignItems: "center",
         justifyContent: "center",
-        backgroundColor: hubbed ? colors.raised : alpha(p.tint, 0.16),
+        backgroundColor: systemSender ? colors.raised : alpha(p.tint, 0.16),
       }}
     >
-      <If when={hubbed} else={
+      <If when={systemSender} else={
         <If when={avatarOf(props.from) !== null} else={<>
           <Text style={{ fontSize: props.small ? 12 : 16, fontWeight: "700", color: p.tint }}>{displayName(props.from).slice(0, 1).toUpperCase()}</Text>
           <If when={!props.small}>
@@ -942,8 +956,8 @@ function Avatar(props: { from: string; small?: boolean; testID?: string }) {
   );
 }
 
-/** The label of an option button: the option's own text when the hub gives one ("B: 升级"). */
-function optionText(e: HubEvent, c: string): string {
+/** The label of an option button: the option's own text when the onlyone gives one ("B: 升级"). */
+function optionText(e: OnlyOneEvent, c: string): string {
   if (c === "all" || c === "none") return choiceLabel(c);
   const full = (e.options ?? []).find((o) => new RegExp(`^\\s*${c}\\s*([:：.、)]|\\s)`).test(o));
   // a button can't hold a link: a GitHub PR / issue URL reads as "nsh#747"
@@ -981,12 +995,12 @@ function proposalsOf(text: string): Proposal[] {
 }
 
 /** The checklist items of a card: an approval batch from its text, a next-steps menu from its options. */
-function menuItems(e: HubEvent): Proposal[] {
+function menuItems(e: OnlyOneEvent): Proposal[] {
   return proposalsOf(e.kind === "menu" ? (e.options ?? []).join("\n") : e.text);
 }
 
 /** An approval batch as a checklist: tick what may start, then approve. */
-function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Set<string>>>; done: boolean; onAnswer: (ref: string, choice: string) => void; onReply: (ref: string) => void }) {
+function ProposalList(props: { event: OnlyOneEvent; selection: Map<string, Signal<Set<string>>>; done: boolean; onAnswer: (ref: string, choice: string) => void; onReply: (ref: string) => void }) {
   const e = props.event;
   // a next-steps menu is the same checklist: several items may start at once (D-0215 was answered by typing "1,2")
   const menu = e.kind === "menu";
@@ -1042,7 +1056,7 @@ function ProposalList(props: { event: HubEvent; selection: Map<string, Signal<Se
 }
 
 /** An answer to a card, as plain words: "P-0002 6,7,8" → "批准 6、7、8". */
-/** The answer that sets a question aside (the hub's decisions.IGNORE). */
+/** The answer that sets a question aside (the onlyone's decisions.IGNORE). */
 const IGNORE = "忽略";
 
 function answerText(t: string): string {
@@ -1094,18 +1108,18 @@ function MsgActions(props: { text: string; show: () => boolean; onReply?: () => 
   );
 }
 
-function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry?: () => void; onRecall?: () => void; onRef?: (ref: string) => void }) {
+function OwnerBubble(props: { onlyone: OnlyOne; event: OnlyOneEvent; out?: Outgoing; onRetry?: () => void; onRecall?: () => void; onRef?: (ref: string) => void }) {
   const e = props.event;
   // an answer sent from the sidebar or a card ("D-0015 忽略") names its card in the text, not in `ref`
   const ref = e.ref ?? e.text.match(/^([DLP]-[A-Z]?\d{4}) \S/)?.[1];
   const over = signal(false);
   // a reply to an agent's message about a task quotes that message (the last one about it before this)
-  const said = () => [...props.hub.events()].reverse().find((x) => x.ref === ref && x.ts <= e.ts && x.kind !== "owner" && !isHub(x.from));
-  const asked = () => (ref ? askLine(props.hub.events().find((x) => x.ref === ref && isAsk(x))?.text ?? "") || (props.hub.status()?.decisions.find((d) => d.id === ref)?.question ?? "")
+  const said = () => [...props.onlyone.events()].reverse().find((x) => x.ref === ref && x.ts <= e.ts && x.kind !== "owner" && !isOnlyOne(x.from));
+  const asked = () => (ref ? askLine(props.onlyone.events().find((x) => x.ref === ref && isAsk(x))?.text ?? "") || (props.onlyone.status()?.decisions.find((d) => d.id === ref)?.question ?? "")
     || (/^T-/.test(ref) && said() ? `${displayName(said()!.from)}${L(": ", "：")}${firstLine(said()!.text)}` : "") : "");
   // "选 A" alone says little: the option's own words go under it, without the "A:" it already shows
   const chosen = () => {
-    const card = ref && props.hub.events().find((x) => x.ref === ref && isAsk(x));
+    const card = ref && props.onlyone.events().find((x) => x.ref === ref && isAsk(x));
     const a = e.text.match(/^[DLP]-[A-Z]?\d{4} (\S+)$/)?.[1];
     if (!card || !a || !(card.options ?? []).length) return "";
     const t = optionText(card, a);
@@ -1158,7 +1172,7 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
         </If>
         <If when={e.attachments?.length}>
           <View testID="owner-images" style={{ flexDirection: "row", flexWrap: "wrap", justifyContent: "flex-end", alignItems: "flex-end", gap: 6, opacity: props.out ? 0.65 : 1 }}>
-            <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
+            <Each of={e.attachments ?? []}>{(a) => <Media onlyone={props.onlyone} path={a()} siblings={e.attachments} />}</Each>
           </View>
         </If>
         <If when={e.text.trim() || e.ref}>
@@ -1192,8 +1206,8 @@ function OwnerBubble(props: { hub: Hub; event: HubEvent; out?: Outgoing; onRetry
 }
 
 function Message(props: {
-  hub: Hub;
-  event: HubEvent;
+  onlyone: OnlyOne;
+  event: OnlyOneEvent;
   answered: () => Set<string>;
   /** The pending ask the keyboard acts on. */
   target: () => string | null;
@@ -1208,33 +1222,33 @@ function Message(props: {
   const selection = props.selection ?? new Map<string, Signal<Set<string>>>();
   const ask = isAsk(e);
   // an agent's message about a task can be replied to: the reply goes to that task
-  const replyable = !ask && !isHub(e.from) && !!e.ref && /^T-\d{4,}$/.test(e.ref);
+  const replyable = !ask && !isOnlyOne(e.from) && !!e.ref && /^T-\d{4,}$/.test(e.ref);
   const over = signal(false);
   const tag = TAGS()[e.kind];
   // what the message is about, for its bare "#746": the card's options, the task's title, the thread it belongs to
   const about = () => {
     if (!e.ref) return (e.options ?? []).join("\n");
-    const s = props.hub.status();
+    const s = props.onlyone.status();
     const task = [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === e.ref);
-    return [...(e.options ?? []), task?.title ?? "", ...props.hub.events().filter((x) => x.ref === e.ref && x.id !== e.id).map((x) => x.text)].join("\n");
+    return [...(e.options ?? []), task?.title ?? "", ...props.onlyone.events().filter((x) => x.ref === e.ref && x.id !== e.id).map((x) => x.text)].join("\n");
   };
   const body = (
     <View style={{ gap: 10 }}>
-      <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isHub(e.from)} context={about()} />
+      <Rich text={ask ? e.text.replace(/\n*^(?:建议：|Recommended: ).*$/m, "").trimEnd() : e.text} muted={e.kind === "system" && isOnlyOne(e.from)} context={about()} />
       <If when={e.attachments?.length}>
         <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "flex-start", gap: 10 }}>
-          <Each of={e.attachments ?? []}>{(a) => <Media hub={props.hub} path={a()} siblings={e.attachments} />}</Each>
+          <Each of={e.attachments ?? []}>{(a) => <Media onlyone={props.onlyone} path={a()} siblings={e.attachments} />}</Each>
         </View>
       </If>
     </View>
   );
   const done = () => !!e.ref && props.answered().has(e.ref);
-  const picked = () => (e.ref && done() ? answerOf(props.hub.events(), e.ref) : null);
+  const picked = () => (e.ref && done() ? answerOf(props.onlyone.events(), e.ref) : null);
   const targeted = () => ask && !done() && props.target() === e.ref;
   const rec = recommended(e);
   // a phone has no width to spare: the avatar sits in the name's row, and the message takes the whole column
   const wide = () => windowSize().width >= WIDE;
-  if (isHub(e.from) && !ask && e.kind === "system" && !e.attachments?.length)
+  if (isOnlyOne(e.from) && !ask && e.kind === "system" && !e.attachments?.length)
     // top-aligned on one shared line height: baseline alignment drifts once the text carries an inline chip
     return (
       <View style={{ flexDirection: "row", alignItems: "flex-start", gap: 8, paddingVertical: 4, paddingLeft: wide() ? 50 : 0 }}>
@@ -1361,20 +1375,25 @@ function since(iso?: string, end?: string): string {
 
 const HISTORY_PAGE = 50;
 
-/** One event read record, shared by all views on this device. The old chat watermark migrates once. */
-function createMessageReads(hub: Hub) {
+/** One event read record, shared by all views on this device. */
+function createMessageReads(onlyone: OnlyOne) {
   const state = signal<ReadState>({ through: "", ids: [], marked: [] });
   const loaded = signal(false);
-  const key = `hub.read:${hub.cfg.url}`;
+  const key = `onlyone.read:${onlyone.cfg.url}`;
   let saving = Promise.resolve();
-  Promise.all([Storage.getItem(key), Storage.getItem(KEYS.seen), Storage.getItem("hub.markedUnread")]).then(([raw, old, marked]) => {
-    let next: ReadState = { through: old ?? "", ids: [], marked: [] };
-    try { const marks = JSON.parse(marked ?? "[]"); if (Array.isArray(marks)) next.marked = marks.filter((v: unknown) => typeof v === "string"); } catch {}
-    try { const j = JSON.parse(raw ?? "null"); if (j && typeof j.through === "string" && Array.isArray(j.ids)) next = { through: j.through, ids: j.ids.filter((id: unknown) => typeof id === "string"), marked: Array.isArray(j.marked) ? j.marked.filter((v: unknown) => typeof v === "string") : next.marked }; } catch {}
+  Storage.getItem(key).then((raw) => {
+    let next: ReadState = { through: "", ids: [], marked: [] };
+    try {
+      const value = JSON.parse(raw ?? "null");
+      if (value && typeof value.through === "string" && Array.isArray(value.ids)) next = {
+        through: value.through, ids: value.ids.filter((id: unknown) => typeof id === "string"),
+        marked: Array.isArray(value.marked) ? value.marked.filter((id: unknown) => typeof id === "string") : [],
+      };
+    } catch {}
     state.set(next); loaded.set(true);
   });
-  const persist = (next: ReadState) => { state.set(next); saving = saving.then(async () => { await Storage.setItem(key, JSON.stringify(next)); await Storage.setItem("hub.markedUnread", JSON.stringify(next.marked ?? [])); }).catch(() => {}); };
-  const read = (events: HubEvent[], explicit = false) => {
+  const persist = (next: ReadState) => { state.set(next); saving = saving.then(() => Storage.setItem(key, JSON.stringify(next))).catch(() => {}); };
+  const read = (events: OnlyOneEvent[], explicit = false) => {
     if (!untracked(loaded)) return;
     const old = untracked(state);
     const marks = explicit ? (old.marked ?? []).filter((id) => !events.some((e) => e.id === id)) : old.marked;
@@ -1382,30 +1401,30 @@ function createMessageReads(hub: Hub) {
     const next = markRead(base, events);
     if (next !== old) persist(next);
   };
-  const unread = computed(() => loaded() ? unreadEvents(hub.events(), state()) : []);
+  const unread = computed(() => loaded() ? unreadEvents(onlyone.events(), state()) : []);
   // the main chat's own: what was said inside a channel is counted on that channel only
   const main = computed(() => unread().filter((e) => !e.channel));
   return { loaded, state, read, unread, main,
-    ref: (id: string) => read(untracked(hub.events).filter((e) => e.ref === id), true),
-    toggle: (e: HubEvent) => persist(toggleMessageRead(untracked(state), e)),
-    all: () => persist({ through: untracked(hub.events).reduce((ts, e) => e.ts > ts ? e.ts : ts, untracked(state).through), ids: [], marked: [] }),
+    ref: (id: string) => read(untracked(onlyone.events).filter((e) => e.ref === id), true),
+    toggle: (e: OnlyOneEvent) => persist(toggleMessageRead(untracked(state), e)),
+    all: () => persist({ through: untracked(onlyone.events).reduce((ts, e) => e.ts > ts ? e.ts : ts, untracked(state).through), ids: [], marked: [] }),
   };
 }
 type MessageReads = ReturnType<typeof createMessageReads>;
 
 /** Channel snapshots refresh from pushed task/channel revisions, never on a timer. */
-function createChannels(hub: Hub, reads: MessageReads) {
+function createChannels(onlyone: OnlyOne, reads: MessageReads) {
   const list = signal<Channel[]>([]);
   let generation = 0;
   const load = async () => {
     const mine = ++generation;
-    const r = await hub.api("GET", "/api/channels").catch(() => null);
+    const r = await onlyone.api("GET", "/api/channels").catch(() => null);
     if (mine === generation && r?.ok && Array.isArray(r.data.channels)) list.set(sortChannels(r.data.channels as Channel[]));
   };
   let timer: ReturnType<typeof setTimeout> | undefined;
   let revision = "";
   effect(() => {
-    const st = hub.status();
+    const st = onlyone.status();
     const next = JSON.stringify([st?.channels_revision, st?.tasks, st?.decisions, st?.recent?.map((t) => [t.id, t.updated])]);
     if (next === revision) return;
     revision = next;
@@ -1421,7 +1440,7 @@ function createChannels(hub: Hub, reads: MessageReads) {
     },
     async save(slug: string, patch: { name?: string; goal?: string; archived?: boolean }) {
       generation++;
-      const r = await hub.api("POST", "/api/channels", { slug, ...patch });
+      const r = await onlyone.api("POST", "/api/channels", { slug, ...patch });
       if (r.ok) list.set(sortChannels(untracked(list).map((c) => (c.slug === slug ? { ...c, ...(patch.name ? { name: patch.name } : {}), ...(patch.goal !== undefined ? { goal: patch.goal } : {}), ...(patch.archived !== undefined ? { status: patch.archived ? "archived" : "active" } : {}) } : c))));
       return r.ok;
     },
@@ -1503,7 +1522,7 @@ function ChannelHeader(props: { channels: Channels; slug: string }) {
 }
 
 /** 全部任务: every task the team has, newest first, a page at a time. */
-function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => void }) {
+function TaskHistory(props: { onlyone: OnlyOne; wide: boolean; onTask: (id: string) => void }) {
   const tasks = signal<TaskInfo[]>([]);
   const total = signal<number | null>(null);
   const error = signal("");
@@ -1514,7 +1533,7 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
     const mine = ++asked;
     loading.set(true);
     const offset = reset ? 0 : untracked(tasks).length;
-    const r = await props.hub.api("GET", `/api/tasks?limit=${HISTORY_PAGE}&offset=${offset}&q=${encodeURIComponent(untracked(query).trim())}`);
+    const r = await props.onlyone.api("GET", `/api/tasks?limit=${HISTORY_PAGE}&offset=${offset}&q=${encodeURIComponent(untracked(query).trim())}`);
     if (mine !== asked) return;
     loading.set(false);
     if (!r.ok) { error.set(r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器")); return; }
@@ -1574,16 +1593,16 @@ function TaskHistory(props: { hub: Hub; wide: boolean; onTask: (id: string) => v
   );
 }
 
-function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (folded: Folded | null) => void }) {
+function TaskDetail(props: { onlyone: OnlyOne; id: string; wide: boolean; onFold?: (folded: Folded | null) => void }) {
   // a task past the status snapshot's newest few is read on its own
-  const older = signal<(TaskInfo & { decisions?: string[]; events?: HubEvent[] }) | null>(null);
+  const older = signal<(TaskInfo & { decisions?: string[]; events?: OnlyOneEvent[] }) | null>(null);
   const missing = signal(false);
   const t = () => {
-    const s = props.hub.status();
+    const s = props.onlyone.status();
     return [...(s?.active ?? []), ...(s?.recent ?? [])].find((x) => x.id === props.id) ?? older() ?? undefined;
   };
   // always read: the page shows the task's whole conversation, and the app only holds the newest events
-  void props.hub.api("GET", `/api/tasks/get?id=${encodeURIComponent(props.id)}`).then((r) => {
+  void props.onlyone.api("GET", `/api/tasks/get?id=${encodeURIComponent(props.id)}`).then((r) => {
     if (r.ok) older.set(r.data as TaskInfo); else missing.set(true);
   });
   const cancellable = () => ["active", "inbox", "nohost", "waiting", "parked", "blocked", "proposed"].includes(t()?.state ?? "");
@@ -1591,25 +1610,25 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
   async function cancel() {
     if (!(await confirmEndTask(props.id, false, t()?.state === "active"))) return;
     cancelling.set(true);
-    try { await props.hub.api("POST", "/api/tasks/cancel", { id: props.id }); }
+    try { await props.onlyone.api("POST", "/api/tasks/cancel", { id: props.id }); }
     catch { cancelling.set(false); }
   }
   // the owner already finished it himself (merged by hand, …): end it as done, not cancelled
   async function finish() {
     if (!(await confirmEndTask(props.id, true, t()?.state === "active"))) return;
     cancelling.set(true);
-    try { await props.hub.api("POST", "/api/tasks/cancel", { id: props.id, done: true }); }
+    try { await props.onlyone.api("POST", "/api/tasks/cancel", { id: props.id, done: true }); }
     catch { cancelling.set(false); }
   }
   // the task is its own conversation: what the owner and the team said about it, and a box to keep talking
-  const saying = signal<HubEvent[]>([]);
+  const saying = signal<OnlyOneEvent[]>([]);
   const talk = computed(() => {
     const refs = new Set([props.id, ...(older()?.decisions ?? []), ...(t()?.decision ? [t()!.decision!] : [])]);
-    return merge(merge(older()?.events ?? [], props.hub.events()), saying()).filter((e) => !!e.ref && refs.has(e.ref) && (e.thread || !(isHub(e.from) && e.kind === "system")));
+    return merge(merge(older()?.events ?? [], props.onlyone.events()), saying()).filter((e) => !!e.ref && refs.has(e.ref) && (e.thread || !(isOnlyOne(e.from) && e.kind === "system")));
   });
   const conversation = computed(() => taskConversation({ ...older(), ...t(), id: props.id, title: t()?.title ?? "", agent: t()?.agent ?? "", request: older()?.request ?? t()?.request, runs: older()?.runs ?? t()?.runs }, talk()));
   const timeline = computed(() => rows(conversation()));
-  const settled = computed(() => answeredIds(merge(props.hub.events(), talk())));
+  const settled = computed(() => answeredIds(merge(props.onlyone.events(), talk())));
   const text = signal("");
   let taskComposer: InputRef | undefined;
   let taskCaret: { start: number; end: number } | null = null;
@@ -1625,7 +1644,7 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
     text.set("");
     note.set("");
     try {
-      await props.hub.send(v, props.id, [], true);
+      await props.onlyone.send(v, props.id, [], true);
     } catch (e) {
       text.update((now) => (now.trim() ? `${v}\n${now}` : v));
       note.set(String((e as Error)?.message ?? e));
@@ -1696,9 +1715,9 @@ function TaskDetail(props: { hub: Hub; id: string; wide: boolean; onFold?: (fold
                 const row = item();
                 if ("day" in row) return <Text style={{ alignSelf: "center", fontSize: 13, color: colors.faint, marginVertical: 8 }}>{dayLabel(row.day)}</Text>;
                 const e = row.event;
-                if (e.from === "owner") return <OwnerBubble hub={props.hub} event={e} />;
-                return <Message hub={props.hub} event={e} answered={settled} target={() => null}
-                  onAnswer={(ref, choice) => void props.hub.send(`${ref} ${choice}`, ref, [], true).catch((err) => note.set(String((err as Error)?.message ?? err)))}
+                if (e.from === "owner") return <OwnerBubble onlyone={props.onlyone} event={e} />;
+                return <Message onlyone={props.onlyone} event={e} answered={settled} target={() => null}
+                  onAnswer={(ref, choice) => void props.onlyone.send(`${ref} ${choice}`, ref, [], true).catch((err) => note.set(String((err as Error)?.message ?? err)))}
                   onReply={() => hint.set(L("Write your instructions in the box below.", "在下面的输入框继续说。"))} />;
               }}
             </Each>
@@ -1759,8 +1778,8 @@ const ACCOUNT_STATE = (): Record<string, [string, "neutral" | "warn" | "danger"]
 
 const ago = (iso?: string) => { const s = since(iso); return s === L("just now", "刚刚") || !s ? s : L(`${s} ago`, `${s}前`); };
 
-function MachineDetail(props: { hub: Hub; host: string; wide: boolean; onTask: (id: string) => void }) {
-  const h = () => props.hub.status()?.hosts.find((x) => x.host === props.host);
+function MachineDetail(props: { onlyone: OnlyOne; host: string; wide: boolean; onTask: (id: string) => void }) {
+  const h = () => props.onlyone.status()?.hosts.find((x) => x.host === props.host);
   const section = (title: string) => (
     <Text role="header" style={{ fontSize: 13, fontWeight: "600", color: colors.muted, marginTop: 24, marginBottom: 8 }}>{title}</Text>
   );
@@ -1901,7 +1920,7 @@ async function confirmEndTask(id: string, done: boolean, running: boolean): Prom
 const sidebarInset = 8;
 
 function Sidebar(props: {
-  hub: Hub;
+  onlyone: OnlyOne;
   target: () => string | null;
   onPick: (ref: string) => void;
   /** Set a question aside: it leaves 待你决定 and is not asked again. */
@@ -1932,18 +1951,18 @@ function Sidebar(props: {
   /** Archived channels stay folded under one row; the open one stays in place so the selection doesn't vanish. */
   const showArchived = signal(false);
   const archivedChannels = () => props.channels.list().filter((c) => c.status === "archived" && c.slug !== props.channel());
-  const s = () => props.hub.status();
-  // the hub closes a decision on its next tick: one the channel already shows answered leaves the list now
+  const s = () => props.onlyone.status();
+  // the onlyone closes a decision on its next tick: one the channel already shows answered leaves the list now
   // 排队 starts open and 最近 collapsed; the heading toggles each (owner, T-0987; 排队 open by default, T-1097).
   const queuedOpen = signal(true);
   const recentOpen = signal(false);
   // Channels fold like Slack sections: folded, only the open channel and ones with unread stay (owner, T-9158).
   const channelsOpen = signal(true);
-  const waits = computed(() => { const done = answeredIds(props.hub.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
+  const waits = computed(() => { const done = answeredIds(props.onlyone.events()); return waiting(s()).filter((d) => !done.has(d.id)); });
   // the sidebar's right-click menu: end a task that can't go on without opening it
   const endTask = async (id: string, done: boolean) => {
     const running = (s()?.active ?? []).some((a) => a.id === id);
-    if (await confirmEndTask(id, done, running)) await props.hub.api("POST", "/api/tasks/cancel", done ? { id, done: true } : { id }).catch(() => {});
+    if (await confirmEndTask(id, done, running)) await props.onlyone.api("POST", "/api/tasks/cancel", done ? { id, done: true } : { id }).catch(() => {});
   };
   const taskItems = (id: string) => [
     <MenuRow testID={`side-done-${id}`} icon="check" label={L("Mark as done", "标记完成")} onSelect={() => void endTask(id, true)} />,
@@ -2135,7 +2154,7 @@ function Sidebar(props: {
         }}
       >
         <View style={{ flex: 1, minWidth: 0 }}>
-          <UserMenu hub={props.hub} onSettings={props.onSettings} reads={props.channels.reads} />
+          <UserMenu onlyone={props.onlyone} onSettings={props.onSettings} reads={props.channels.reads} />
         </View>
       </View>
     </View>
@@ -2143,7 +2162,7 @@ function Sidebar(props: {
 }
 
 /** The sidebar account, opening the user menu (settings, appearance, language). */
-function UserMenu(props: { hub: Hub; onSettings: () => void; reads: MessageReads }) {
+function UserMenu(props: { onlyone: OnlyOne; onSettings: () => void; reads: MessageReads }) {
   /** The signed-in account: its email, shown as the local part; the server address stays out of the UI. */
   const email = signal("");
   void Storage.getItem(KEYS.email).then((e) => email.set(e ?? ""));
@@ -2475,7 +2494,7 @@ async function systemInfo(): Promise<PushInfo | null> {
 }
 
 /** This device's push state and the steps that change it (the permission prompt needs the press that calls `enable`). */
-function createPush(hub: Hub, success: (message: string) => void) {
+function createPush(onlyone: OnlyOne, success: (message: string) => void) {
   const info = signal<PushInfo | null>(null);
   const busy = signal(false);
   const note = signal<string | null>(null);
@@ -2504,14 +2523,14 @@ function createPush(hub: Hub, success: (message: string) => void) {
         return L("On. Decisions that need you appear as system notifications.", "已开启：需要你决定的事会发到系统通知");
       }
       // Ask the browser first, while the press still counts as the user's gesture.
-      const v = hub.api("GET", "/api/push/vapid");
+      const v = onlyone.api("GET", "/api/push/vapid");
       const key = (await v).data.publicKey;
       if (typeof key !== "string" || !key) throw new Error(L("The server hasn’t set up push yet, so it can’t be turned on", "服务器还没有配置推送，暂时无法开启"));
       const r = await hostCall<{ permission: string; subscription: unknown; device?: string }>("pushEnable", { publicKey: key });
       if (!r) throw new Error(L("Web push isn’t supported here", "这个环境不支持网页推送"));
       if (r.permission === "denied") throw new Error(L("Notifications are blocked. Allow OnlyOne in your browser or system settings, then come back and turn them on.", "通知被拦截了：请在浏览器或系统设置里允许 OnlyOne 发通知，再回来开启"));
       if (r.permission !== "granted" || !r.subscription) throw new Error(L("Notifications aren’t on", "没有开启通知"));
-      const s = await hub.api("POST", "/api/push/subscribe", { subscription: r.subscription, device_label: r.device ?? untracked(info)?.device ?? L("Device", "设备") });
+      const s = await onlyone.api("POST", "/api/push/subscribe", { subscription: r.subscription, device_label: r.device ?? untracked(info)?.device ?? L("Device", "设备") });
       if (!s.ok) throw new Error(L(`Subscription failed (${s.status || "can’t reach the server"})`, `订阅失败（${s.status || "连不上服务器"}）`));
       return L("On. Decisions that need you are pushed to this device.", "已开启：需要你决定的事会推送到这台设备");
     });
@@ -2523,7 +2542,7 @@ function createPush(hub: Hub, success: (message: string) => void) {
         return L("Notifications are off on this device", "已关闭这台设备的通知");
       }
       const r = await hostCall<{ endpoint: string | null }>("pushDisable");
-      if (r?.endpoint) await hub.api("POST", "/api/push/unsubscribe", { endpoint: r.endpoint });
+      if (r?.endpoint) await onlyone.api("POST", "/api/push/unsubscribe", { endpoint: r.endpoint });
       return L("Notifications are off on this device", "已关闭这台设备的通知");
     });
   const test = () =>
@@ -2533,7 +2552,7 @@ function createPush(hub: Hub, success: (message: string) => void) {
         if (!(await Notifications.show({ id: "onlyone:test", title: "OnlyOne", body: L("Test notification: system notifications are working.", "测试通知：系统通知已开通。"), silent: true }))) throw new Error(L("The system didn’t accept the notification", "系统没有接收这条通知"));
         return L("Test notification sent", "测试通知已发出");
       }
-      const r = await hub.api("POST", "/api/push/test");
+      const r = await onlyone.api("POST", "/api/push/test");
       if (!r.ok) throw new Error(L(`Couldn’t send the test notification (${r.status || "can’t reach the server"})`, `测试通知发送失败（${r.status || "连不上服务器"}）`));
       return L("Test notification sent. It should arrive in a few seconds.", "测试通知已发出，几秒内会到");
     });
@@ -2638,7 +2657,7 @@ function NotifySettings(props: { push: Push; view: SettingsView | null; save: (p
 }
 
 /** The team's settings, shared by the settings page and the pages it pushes on phones. */
-function createSettings(hub: Hub) {
+function createSettings(onlyone: OnlyOne) {
   const view = signal<SettingsView | null>(null);
   const error = signal("");
   const toast = createSettingsToast();
@@ -2673,8 +2692,17 @@ function createSettings(hub: Hub) {
   const load = () => {
     error.set("");
     const started = revision;
-    hub.settings().then((v) => { if (started === revision && !saving()) { confirmed = v; refresh(); } }, (e) => { if (started === revision && !saving()) error.set(String(e?.message ?? e)); });
+    onlyone.settings().then((v) => { if (started === revision && !saving()) { confirmed = v; refresh(); } }, (e) => { if (started === revision && !saving()) error.set(String(e?.message ?? e)); });
   };
+  let serverRevision: string | undefined;
+  effect(() => {
+    const s = onlyone.status();
+    if (!s) return;
+    const next = JSON.stringify([s.settings_revision, s.members]);
+    const changed = serverRevision !== undefined && next !== serverRevision;
+    serverRevision = next;
+    if (changed && untracked(view) && !untracked(saving)) load();
+  });
   async function save(patch: Record<string, unknown>) {
     revision++;
     error.set("");
@@ -2684,7 +2712,7 @@ function createSettings(hub: Hub) {
     pending.push(item);
     refresh();
     try {
-      const request = writes.then(() => hub.settings(patch));
+      const request = writes.then(() => onlyone.settings(patch));
       writes = request.then(() => {}, () => {});
       confirmed = await request;
     } catch (e) {
@@ -2722,7 +2750,7 @@ const SETTINGS_TABS = () => [
 type SettingsTab = ReturnType<typeof SETTINGS_TABS>[number][0];
 
 /** The wide (desktop, tablet, wide browser) settings page. */
-function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: boolean; onRules: () => void; onConnection: () => void; onDisconnect: () => void }) {
+function TeamSettings(props: { onlyone: OnlyOne; push: Push; settings: Settings; wide: boolean; onRules: () => void; onConnection: () => void; onDisconnect: () => void }) {
   const { view, error, save } = props.settings;
   props.settings.load();
   const eff = () => view()?.effective;
@@ -2865,8 +2893,8 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
         </Group>
         </If>
         <If when={on("version")}>
-        <Group title={L("Version", "版本")} hint={L("The code each machine runs. Updating makes every machine pull the latest code, and the primary also redeploys the server.", "每台机器运行的代码。更新会让所有机器拉取最新代码，主控机同时重新发布线上。")}>
-          <VersionRows hub={props.hub} />
+        <Group title={L("Version", "版本")} hint={L("CLI versions are reported by each machine; development builds show their Git commit. App and cloud updates are separate.", "CLI 版本以各台机器实际运行为准，开发版显示 Git 提交号。客户端与云端分别更新。")}>
+          <VersionRows onlyone={props.onlyone} />
         </Group>
         </If>
         <If when={on("rules")}>
@@ -2881,8 +2909,8 @@ function TeamSettings(props: { hub: Hub; push: Push; settings: Settings; wide: b
         <Group title={L("Account", "账号与连接")} hint={L("You stay signed in on this device and reconnect automatically next time.", "登录状态保存在这台设备上，下次打开自动连接。")}>
           <View style={{ flexDirection: props.wide ? "row" : "column", alignItems: props.wide ? "center" : "stretch", gap: 10, paddingHorizontal: 16, paddingVertical: 14 }}>
             <View style={{ flex: props.wide ? 1 : undefined, flexDirection: "row", alignItems: "center", gap: 8 }}>
-              <Indicator status={props.hub.conn() === "live" ? "online" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "error" : "waiting"} />
-              <Text style={{ flex: 1, fontSize: 15, color: colors.text, numberOfLines: 1 }}>{props.hub.cfg.url}</Text>
+              <Indicator status={props.onlyone.conn() === "live" ? "online" : props.onlyone.conn() === "unauthorized" || props.onlyone.conn() === "blocked" ? "error" : "waiting"} />
+              <Text style={{ flex: 1, fontSize: 15, color: colors.text, numberOfLines: 1 }}>{props.onlyone.cfg.url}</Text>
             </View>
             <View style={{ flexDirection: "row", gap: 8 }}>
               <Button label={L("Sign out", "退出登录")} variant="danger" onPress={props.onDisconnect} testID="logout" />
@@ -2905,7 +2933,7 @@ function notifyModel(push: Push, view: () => SettingsView | null, save: (patch: 
   const setPrefs = (change: Partial<NotifyPrefs>) => save(notifyPatch({ ...prefs(), ...change }));
   const state = () => {
     const i = push.info();
-    if (!i) return systemNotifications() ? L("System notifications aren’t available here (open the hub’s web page in a phone browser to get push)", "这个环境还不能发系统通知（可以在手机浏览器打开 hub 的网页接收推送）") : L("Web push isn’t supported here (open the hub’s web page in a phone browser)", "这个环境不支持网页推送（请用手机浏览器打开 hub 的网页）");
+    if (!i) return systemNotifications() ? L("System notifications aren’t available here (open the onlyone’s web page in a phone browser to get push)", "这个环境还不能发系统通知（可以在手机浏览器打开 onlyone 的网页接收推送）") : L("Web push isn’t supported here (open the onlyone’s web page in a phone browser)", "这个环境不支持网页推送（请用手机浏览器打开 onlyone 的网页）");
     if (push.needsHomeScreen()) return L("On iPhone, add OnlyOne to the Home Screen first", "iPhone 需要先把 OnlyOne 添加到主屏幕");
     if (!i.supported) return L("This browser doesn’t support web push", "这个浏览器不支持网页推送");
     if (i.permission === "denied") return systemNotifications() ? L("Blocked by the system", "通知被系统拦截了") : L("Blocked by the browser", "通知被浏览器拦截了");
@@ -2939,7 +2967,7 @@ function Section(props: { title?: string; hint?: string; testID?: string; childr
 /** A row of a section, at least 48 pt tall: a label (and a line under it), then a value, a control or a chevron. */
 /** The code a machine runs: the short commit, a link to it on GitHub. */
 function RevLink(props: { host: HostInfo }) {
-  const short = () => (props.host.rev ?? "").slice(0, 7);
+  const short = () => displayRev(props.host.rev) ?? "";
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
       <Text style={{ fontSize: 14, color: colors.muted }}>{L("Version", "版本")}</Text>
@@ -2956,17 +2984,17 @@ function RevLink(props: { host: HostInfo }) {
   );
 }
 
-/** Ask every machine to update to the latest code; the primary also redeploys the web app and the Worker. */
-async function updateAllMachines(hub: Hub) {
+/** Ask every machine to update to the latest code; cloud deployment is separate; the primary no longer redeploys the web app and the Worker. */
+async function updateAllMachines(onlyone: OnlyOne) {
   const r = await AlertDialog.show({
     title: L("Update all machines?", "更新所有机器？"),
-    description: L("Each machine pulls the latest code and restarts. Idle machines update now; busy ones restart when their tasks finish. The primary also redeploys the server.", "每台机器拉取最新代码后重启：空闲的马上更新，有任务在跑的等跑完再重启。主控机同时重新发布线上。"),
+    description: L("npm installations update to the latest stable onlyonecli release; source installations pull the latest code. Idle machines update now; busy ones restart when their tasks finish. App and cloud updates are separate.", "npm 安装的机器更新到 onlyonecli 最新稳定版，源码安装的机器拉取最新代码。空闲的马上更新，有任务在跑的等跑完再重启。客户端与云端分别更新。"),
     actions: [
       { id: "cancel", label: L("Cancel", "取消"), role: "cancel" },
       { id: "update", label: L("Update", "更新") },
     ],
   });
-  if (r.action === "update") await hub.api("POST", "/api/fleet/update").catch(() => {});
+  if (r.action === "update") await onlyone.api("POST", "/api/fleet/update").catch(() => {});
 }
 
 /** One row per online machine with the commit it runs, then the button that updates them all. */
@@ -3101,18 +3129,18 @@ function CommandEditor(props: { settings: Settings }) {
   );
 }
 
-function VersionRows(props: { hub: Hub }) {
-  const hosts = () => props.hub.status()?.hosts ?? [];
+function VersionRows(props: { onlyone: OnlyOne }) {
+  const hosts = () => props.onlyone.status()?.hosts ?? [];
   // the lines age (waiting → not responding, finished → hidden): re-read the clock every few seconds
   const clock = signal(Date.now());
   const timer = setInterval(() => clock.set(Date.now()), 5000);
   cleanup(() => clearInterval(timer));
-  const request = () => props.hub.status()?.update?.at;
-  const summary = () => updateSummary(props.hub.status(), clock());
+  const request = () => props.onlyone.status()?.update?.at;
+  const summary = () => updateSummary(props.onlyone.status(), clock());
   const toneColor = (t: UpdateLine["tone"]) => (t === "ok" ? colors.up : t === "bad" ? colors.danger : colors.muted);
   // This app's own code: the release it was built for, or the OTA package it runs (nsh/updater).
   const ota = runningPackage();
-  const client = ota ? L(`${ota.version} · OTA build ${ota.build}`, `${ota.version} · OTA 构建 ${ota.build}`) : CLIENT_VERSION;
+  const client = ota ? L(`${ota.version} · OTA build ${ota.build}`, `${ota.version} · OTA 构建 ${ota.build}`) : CLIENT_VERSION === "dev" ? L("Development", "开发版") : `v${CLIENT_VERSION}`;
   // The installed app around that code (on iOS its CFBundleShortVersionString / CFBundleVersion) and its NSH runtime.
   const info = (nshUpdater as { shellInfo?: () => ShellInfo }).shellInfo?.();
   const shell = shellLine(info, platform.os);
@@ -3122,7 +3150,7 @@ function VersionRows(props: { hub: Hub }) {
     <>
       <SetRow first label={L("This app", "本机客户端")} value={client} testID="version-client" />
       <If when={shell}>
-        <SetRow label={L("App shell", "外壳")} value={shell?.tone === "ok" ? shellText : undefined} detail={shell?.tone === "bad" ? shellText : undefined} tone={shell?.tone === "bad" ? "danger" : undefined} testID="version-shell" />
+        <SetRow label={L("App runtime", "App 运行环境")} value={shell?.tone === "ok" ? shellText : undefined} detail={shell?.tone === "bad" ? shellText : undefined} tone={shell?.tone === "bad" ? "danger" : undefined} testID="version-shell" />
       </If>
       <Each of={hosts()} key={(h) => h.host}>
         {(h) => {
@@ -3130,7 +3158,7 @@ function VersionRows(props: { hub: Hub }) {
           return (
             <SetRow
               label={h().host}
-              value={h().rev?.slice(0, 7) ?? L("Unknown", "未知")}
+              value={machineVersion(h().rev)}
               chevron={!!h().rev_url}
               onPress={h().rev_url ? () => void openUrl(h().rev_url!).catch(() => {}) : undefined}
               testID={`version-${h().host}`}
@@ -3154,7 +3182,7 @@ function VersionRows(props: { hub: Hub }) {
         detail={summary()?.text}
         tone="accent"
         disabled={!!summary()?.busy}
-        onPress={() => void updateAllMachines(props.hub)}
+        onPress={() => void updateAllMachines(props.onlyone)}
         testID="update-fleet"
       />
     </>
@@ -3264,7 +3292,7 @@ function SaveNote(props: { settings: Settings }) {
 const routineValue = (r: { enabled: boolean; every: string }) => (r.enabled ? everyLabel(r.every) : L("Off", "已关闭"));
 
 /** 设置 on a phone: a list of sections; 通知, each member and each routine push pages of their own. */
-function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen: (r: Route) => void; onDisconnect: () => void }) {
+function PhoneSettings(props: { onlyone: OnlyOne; push: Push; settings: Settings; onOpen: (r: Route) => void; onDisconnect: () => void }) {
   const { view, error, save } = props.settings;
   props.settings.load();
   const notify = notifyModel(props.push, view, save);
@@ -3343,14 +3371,14 @@ function PhoneSettings(props: { hub: Hub; push: Push; settings: Settings; onOpen
       <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />
       </Section>
-      <Section title={L("Version", "版本")} hint={L("The code each machine runs. Updating makes every machine pull the latest code, and the primary also redeploys the server.", "每台机器运行的代码。更新会让所有机器拉取最新代码，主控机同时重新发布线上。")}>
-        <VersionRows hub={props.hub} />
+      <Section title={L("Version", "版本")} hint={L("CLI versions are reported by each machine; development builds show their Git commit. App and cloud updates are separate.", "CLI 版本以各台机器实际运行为准，开发版显示 Git 提交号。客户端与云端分别更新。")}>
+        <VersionRows onlyone={props.onlyone} />
       </Section>
       <Section title={L("Account", "账号与连接")} hint={L("You stay signed in on this device and reconnect automatically next time.", "登录状态保存在这台设备上，下次打开自动连接。")}>
         <SetRow
           first
-          leading={<Indicator status={props.hub.conn() === "live" ? "online" : props.hub.conn() === "unauthorized" || props.hub.conn() === "blocked" ? "error" : "waiting"} />}
-          label={props.hub.cfg.url.replace(/^https?:\/\//, "")}
+          leading={<Indicator status={props.onlyone.conn() === "live" ? "online" : props.onlyone.conn() === "unauthorized" || props.onlyone.conn() === "blocked" ? "error" : "waiting"} />}
+          label={props.onlyone.cfg.url.replace(/^https?:\/\//, "")}
         />
         <SetRow label={L("Sign out", "退出登录")} tone="danger" onPress={() => void logout()} testID="logout" inset={0} />
       </Section>
@@ -3486,13 +3514,13 @@ function PhoneRoutine(props: { name: string; settings: Settings }) {
 // ---------------------------------------------------------------- the team's rules and memory (read-only)
 
 /** 记忆: policies, the owner's memory, each agent's profile and memory, closed decisions. */
-function RulesList(props: { hub: Hub; onOpen: (path: string) => void }) {
+function RulesList(props: { onlyone: OnlyOne; onOpen: (path: string) => void }) {
   const groups = signal<RuleGroup[] | null>(null);
   const error = signal("");
   void (async () => {
     const lists: Record<string, DataFile[]> = {};
     for (const pre of RULE_PREFIXES) {
-      const r = await props.hub.api("GET", `/api/files/list?prefix=${encodeURIComponent(pre)}`);
+      const r = await props.onlyone.api("GET", `/api/files/list?prefix=${encodeURIComponent(pre)}`);
       if (!r.ok) { error.set(r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器")); return; }
       lists[pre] = (r.data.files as DataFile[] | undefined) ?? [];
     }
@@ -3523,10 +3551,10 @@ function RulesList(props: { hub: Hub; onOpen: (path: string) => void }) {
 }
 
 /** One rules or memory file, rendered as markdown. Read-only. */
-function RuleDoc(props: { hub: Hub; path: string; wide: boolean }) {
+function RuleDoc(props: { onlyone: OnlyOne; path: string; wide: boolean }) {
   const text = signal<string | null>(null);
   const error = signal("");
-  void props.hub.api("GET", `/api/files/read?path=${encodeURIComponent(props.path)}`).then((r) => {
+  void props.onlyone.api("GET", `/api/files/read?path=${encodeURIComponent(props.path)}`).then((r) => {
     if (r.ok && typeof r.data.content === "string") text.set(stripFrontMatter(r.data.content));
     else error.set(r.status === 404 ? L("This file no longer exists.", "这个文件已经不在了。") : r.status ? L(`Couldn’t load (${r.status})`, `读取失败（${r.status}）`) : L("Can’t reach the server", "连不上服务器"));
   });
@@ -3687,12 +3715,12 @@ type Route =
   | { name: "doc"; path: string };
 const CHANNEL: Route = { name: "channel" };
 
-function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => void; onDisconnect: () => void; onTray?: (chat: TrayChat | null) => void }) {
-  const hub = props.hub;
-  const settings = createSettings(hub);
-  const push = createPush(hub, settings.toast.show);
-  const reads = createMessageReads(hub);
-  const channels = createChannels(hub, reads);
+function Chat(props: { onlyone: OnlyOne; openRef?: string | null; onConnection: () => void; onDisconnect: () => void; onTray?: (chat: TrayChat | null) => void }) {
+  const onlyone = props.onlyone;
+  const settings = createSettings(onlyone);
+  const push = createPush(onlyone, settings.toast.show);
+  const reads = createMessageReads(onlyone);
+  const channels = createChannels(onlyone, reads);
   const wide = () => windowSize().width >= WIDE;
   const drawer = signal(false);
   const drawerDragging = signal(false);
@@ -3742,13 +3770,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const scoped = () => { const slug = scope(); return slug ? channels.list().find((c) => c.slug === slug) : undefined; };
   const openScope = (slug: string | null) => { drawer.set(false); nav.popToRoot(); scope.set(slug); };
   // a channel's history beyond what this device holds; what is said there arrives live like the main chat's
-  const channelFeed = signal<HubEvent[]>([]);
+  const channelFeed = signal<OnlyOneEvent[]>([]);
   effect(() => {
     const slug = scope();
     scoped()?.last_activity;
     if (!slug) { channelFeed.set([]); return; }
-    void hub.api("GET", `/api/channels/feed?slug=${encodeURIComponent(slug)}`).then((r) => {
-      if (untracked(scope) === slug && r?.ok && Array.isArray(r.data.events)) channelFeed.set(r.data.events as HubEvent[]);
+    void onlyone.api("GET", `/api/channels/feed?slug=${encodeURIComponent(slug)}`).then((r) => {
+      if (untracked(scope) === slug && r?.ok && Array.isArray(r.data.events)) channelFeed.set(r.data.events as OnlyOneEvent[]);
     }).catch(() => {});
   });
   /** Shows a page over the channel, in place of the one shown (the sidebar's pages are siblings). */
@@ -3761,9 +3789,9 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     else show({ name: "task", id });
   };
   taskLink = openTask;
-  const repos = computed(() => { const m = new Map<string, string>(); for (const e of props.hub.events()) reposIn(`${e.text}\n${(e.options ?? []).join("\n")}`, m); return m; });
+  const repos = computed(() => { const m = new Map<string, string>(); for (const e of props.onlyone.events()) reposIn(`${e.text}\n${(e.options ?? []).join("\n")}`, m); return m; });
   knownRepos = repos;
-  taskState = (id) => { const s = props.hub.status(); return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === id)?.state ?? (s?.active.some((t) => t.id === id) ? "active" : undefined); };
+  taskState = (id) => { const s = props.onlyone.status(); return [...(s?.active ?? []), ...(s?.recent ?? [])].find((t) => t.id === id)?.state ?? (s?.active.some((t) => t.id === id) ? "active" : undefined); };
   /** A card being scrolled to (picked from the sidebar, a notification): entering the channel leaves the scroll to it. */
   let jumping: string | null = null;
   // Entering the channel (first load, back from a task or settings) shows the latest messages.
@@ -3784,13 +3812,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // The server can accept a message even when the POST response is lost (e.g. iOS
   // suspends the app). A streamed/replayed event is also a delivery receipt.
   effect(() => {
-    const receipts = new Set(hub.events().filter((e) => e.kind === "owner").map((e) => e.client_id));
+    const receipts = new Set(onlyone.events().filter((e) => e.kind === "owner").map((e) => e.client_id));
     const pending = untracked(outbox);
     const remaining = pending.filter((o) => !receipts.has(o.id));
     if (remaining.length !== pending.length) outbox.set(remaining);
   });
 
-  /** The timeline: the hub's events and the messages on their way. */
+  /** The timeline: the onlyone's events and the messages on their way. */
   const shown = computed(() => {
     const slug = scope();
     const outgoing = outbox().filter((o) => (o.channel ?? null) === slug).map((o) => ({
@@ -3800,18 +3828,18 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (slug) {
       const ch = untracked(scoped);
       const refs = scoped()?.refs ?? ch?.items.filter((i) => i.kind !== "report").map((i) => i.id) ?? [];
-      return merge(channelDigest(merge(channelFeed(), hub.events()), refs, slug, Infinity), outgoing);
+      return merge(channelDigest(merge(channelFeed(), onlyone.events()), refs, slug, Infinity), outgoing);
     }
-    return merge(hub.events().filter((e) => !e.thread && !e.channel && !(e.kind === "system" && e.text.startsWith("⚙️ 设置已更新"))), outgoing);
+    return merge(onlyone.events().filter((e) => !e.thread && !e.channel && !(e.kind === "system" && e.text.startsWith("⚙️ 设置已更新"))), outgoing);
   });
   // one answer state for every view: the owner may answer a card in the main chat that a channel also shows
-  const answered = computed(() => answeredIds(merge(hub.events(), shown())));
+  const answered = computed(() => answeredIds(merge(onlyone.events(), shown())));
   /** The newest Markdown report in this conversation: the reader opens it by itself when it arrives. */
   const latestDoc = computed((): DocRef | null => {
     const list = shown();
     for (let i = list.length - 1; i >= 0; i--) {
       const path = [...(list[i].attachments ?? [])].reverse().find(isDoc);
-      if (path) return { src: mediaUrl(hub.cfg.url, hub.cfg.token, path), name: attachmentName(path) };
+      if (path) return { src: mediaUrl(onlyone.cfg.url, onlyone.cfg.token, path), name: attachmentName(path) };
     }
     return null;
   });
@@ -3822,7 +3850,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     autoDoc = d?.src;
     untracked(() => reading.set(d && { ...d, at: `channel:${scope() ?? ""}` }));
   });
-  // a different hub or a sign-out starts with no reports kept from the last one
+  // a different onlyone or a sign-out starts with no reports kept from the last one
   cleanup(clearDocCache);
   const readerWide = signal(false);
   /** Room for the chat beside the reader; below it the reader covers the chat like a sheet. */
@@ -3837,18 +3865,17 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     if (!d) return null;
     return <DocPane doc={d} wide={readerSide()} expanded={readerWide()} onExpand={() => { if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut")); readerWide.set(!readerWide()); }} onClose={() => reading.set(null)} />;
   };
-  const visibleMessages = signal<HubEvent[]>([]);
+  const visibleMessages = signal<OnlyOneEvent[]>([]);
   effect(() => {
     if (!reads.loaded() || lifecycle() !== "active") return;
     const route = top();
     if (onChannel()) {
-      // Reading is top-down: everything at or above the newest row on screen counts as read, so rows the
-      // reader scrolled past (or jumped over to the bottom) don't pop back as unread later.
+      // Hidden history stays unread until it is loaded into the timeline.
       const seen = visibleMessages();
       const newest = seen.reduce((ts, e) => (e.ts > ts ? e.ts : ts), "");
-      reads.read(newest ? untracked(shown).filter((e) => e.ts <= newest) as HubEvent[] : seen);
+      reads.read(newest ? untracked(timeline).flatMap((row) => "event" in row && row.event.ts <= newest ? [row.event] : []) : seen);
     }
-    else if (route.name === "task") { hub.events(); reads.ref(route.id); }
+    else if (route.name === "task") { onlyone.events(); reads.ref(route.id); }
   });
   // "以下为新消息": above the first unread message when entering a view, from the one read record the
   // main chat and every channel share; fixed for the visit so reading on doesn't move it.
@@ -3856,7 +3883,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   let dividerScope: string | null | undefined;
   effect(() => {
     const slug = scope();
-    if (!hub.loaded() || !reads.loaded()) return;
+    if (!onlyone.loaded() || !reads.loaded()) return;
     if (slug && !scoped()) return;
     if (dividerScope === slug && untracked(divider) !== undefined) return;
     dividerScope = slug;
@@ -3876,7 +3903,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     const next = new Map<string, TimelineRow>();
     const out: TimelineRow[] = [];
     const all = shown();
-    const hidden = timelineWindow.update(all, hub.loaded(), limit(), untracked(atEnd) && untracked(onChannel));
+    const hidden = timelineWindow.update(all, onlyone.loaded(), limit(), untracked(atEnd) && untracked(onChannel));
     // a channel's head stays the first row, above any older history still to load, so its name, goal and actions are always at the top
     const slug = scope();
     if (slug) {
@@ -3902,7 +3929,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     built = next;
     return out;
   });
-  const pending = computed(() => hub.events().filter((e) => isAsk(e) && !answered().has(e.ref!)));
+  const pending = computed(() => onlyone.events().filter((e) => isAsk(e) && !answered().has(e.ref!)));
   /** The pending ask the keys act on: the one picked (J / K, the sidebar), else the newest. */
   const target = computed(() => {
     const p = pending();
@@ -4045,7 +4072,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     const { text, ref, files, channel } = o;
     outbox.update((l) => l.map((x) => (x.id === id ? { ...x, state: "sending" } : x)));
     try {
-      markSent(await hub.send(text, ref, files, false, id, channel));
+      markSent(await onlyone.send(text, ref, files, false, id, channel));
       outbox.update((o) => o.filter((x) => x.id !== id));
     } catch {
       outbox.update((o) => o.map((x) => (x.id === id ? { ...x, state: "failed" } : x)));
@@ -4062,7 +4089,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   function runCommand(c: CommandItem) {
     draft.set("");
     inputHeight.set(28);
-    if (c.action === "update-fleet") void updateAllMachines(hub);
+    if (c.action === "update-fleet") void updateAllMachines(onlyone);
     else if (c.text) void send(c.text, null);
   }
 
@@ -4265,7 +4292,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   // Opened from a notification (`?ref=`), or one clicked while the app is open: show that event.
   let openRef = props.openRef ?? null;
   effect(() => {
-    const loaded = hub.loaded();
+    const loaded = onlyone.loaded();
     if (!openRef || !loaded) return;
     const ref = openRef;
     openRef = null;
@@ -4281,13 +4308,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   effect(() => {
     const n = pending().length;
     push.info();
-    if (hub.loaded()) setBadge(n);
+    if (onlyone.loaded()) setBadge(n);
   });
   if (systemNotifications()) {
     // A press can start the app; before the timeline loads the effect above opens it.
     cleanup(Notifications.on("press", ({ id }) => {
       if (id.startsWith("onlyone:")) return;
-      if (untracked(hub.loaded)) setTimeout(() => pick(id), 50);
+      if (untracked(onlyone.loaded)) setTimeout(() => pick(id), 50);
       else openRef = id;
     }));
     // Back in the app: the owner may have changed the permission in the system's settings.
@@ -4297,8 +4324,8 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
     // While the app is not in front, what would reach a browser as Web Push shows as a system notification.
     let latest: string | null = null;
     effect(() => {
-      const evs = hub.events();
-      if (!hub.loaded()) return;
+      const evs = onlyone.events();
+      if (!onlyone.loaded()) return;
       const last = evs[evs.length - 1]?.ts ?? "";
       if (latest === null) {
         latest = last;
@@ -4309,7 +4336,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
       if (!fresh.length) return;
       latest = last;
       if (untracked(lifecycle) === "active" || !untracked(push.info)?.subscribed) return;
-      void hub.api("GET", "/api/settings").then((r) => {
+      void onlyone.api("GET", "/api/settings").then((r) => {
         const prefs = (r.data.current as { notify_prefs?: NotifyRules } | undefined)?.notify_prefs ?? {};
         // Waking from sleep can bring many: the latest few say enough, the badge counts the rest.
         for (const e of fresh.slice(-5)) {
@@ -4334,7 +4361,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   cleanup(() => clearTimeout(toastTimer));
   effect(() => {
     const asks = pending();
-    if (!hub.loaded()) return;
+    if (!onlyone.loaded()) return;
     if (!known) {
       known = new Set(asks.map((e) => e.ref!));
       return;
@@ -4418,7 +4445,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const sidebar = (inDrawer: boolean) => (
     <Sidebar
       onRestart={() => void restartToUpdate()}
-      hub={hub}
+      onlyone={onlyone}
       target={target}
       onPick={pick}
       onIgnore={(ref) => void answer(ref, IGNORE)}
@@ -4486,13 +4513,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                 if (passed !== untracked(headPassed)) headPassed.set(passed);
               }}
               empty={() => <View style={{ width: "100%", maxWidth: size.column + gutter() * 2, alignSelf: "center", paddingHorizontal: gutter(), paddingTop: wide() ? 24 : 12, paddingBottom: composerHeight() + 16 }}>
-                <If when={!hub.loaded()}>
+                <If when={!onlyone.loaded()}>
                   <View style={{ alignItems: "center", paddingTop: 120, gap: 14 }}>
                     <Spinner size={22} tint={colors.muted} />
                     <Text style={{ fontSize: 15, color: colors.muted }}>{L("Loading channel…", "正在载入频道…")}</Text>
                   </View>
                 </If>
-                <If when={hub.loaded() && shown().length === 0}>
+                <If when={onlyone.loaded() && shown().length === 0}>
                   <View style={{ alignItems: "center", paddingTop: wide() ? 120 : 64, paddingBottom: 32, gap: 12 }}>
                     <Mark size={44} />
                     <Text style={{ fontSize: 30, fontWeight: "600", color: colors.text, letterSpacing: -0.4 }}>{greeting()}</Text>
@@ -4563,7 +4590,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                           ? { keyframes: { opacity: [0, 1], translateY: [Math.min(composerHeight(), 120), 0], scale: [0.92, 1] }, duration: 260, easing: "easeOut" }
                           : { keyframes: { opacity: [0, 1], translateY: [8, 0] }, duration: 180, easing: "easeOut" },
                       }) : undefined;
-                      return <View testID={sent ? "sent-entrance" : undefined} style={[entrance?.style ?? null, { transformOrigin: "right bottom" }]}><OwnerBubble hub={hub} event={row.event} out={out()} onRetry={() => void deliver(row.event.id)} onRecall={() => undo(row.event.id)} onRef={pick} /></View>;
+                      return <View testID={sent ? "sent-entrance" : undefined} style={[entrance?.style ?? null, { transformOrigin: "right bottom" }]}><OwnerBubble onlyone={onlyone} event={row.event} out={out()} onRetry={() => void deliver(row.event.id)} onRecall={() => undo(row.event.id)} onRef={pick} /></View>;
                     }
                     const entrance = arriving ? createMotion({
                       enter: { keyframes: { opacity: [0, 1], translateY: [8, 0] }, duration: 180, easing: "easeOut" },
@@ -4571,7 +4598,7 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     return (
                       <View style={entrance?.style}>
                         <Message
-                          hub={hub}
+                          onlyone={onlyone}
                           event={row.event}
                           answered={answered}
                           target={target}
@@ -4627,18 +4654,18 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
             style={{ position: "absolute", left: 0, right: 0, bottom: 0, paddingHorizontal: wide() ? 32 : 10, paddingTop: 4, paddingBottom: keyboardFrame().height > 0 ? 8 : Math.max(12, safeArea().bottom + 8), pointerEvents: "box-none" }}
           >
             <View style={{ width: "100%", maxWidth: size.column, alignSelf: "center", gap: 8, pointerEvents: "box-none" }}>
-              <If when={hub.conn() === "blocked"}>
+              <If when={onlyone.conn() === "blocked"}>
                 <View style={{ gap: 6, paddingHorizontal: 14, paddingVertical: 10, borderRadius: radius.inset, backgroundColor: colors.surface, backgroundImage: `linear-gradient(${tints.danger}, ${tints.danger})` }}>
                   <Text style={{ fontSize: 14, color: colors.danger }}>
-                    {L(`This device's public IP ${hub.blockedIp()} isn't on the Worker's allow-list (HUB_ALLOW_IPS). Add it on the host; OnlyOne reconnects by itself.`,
-                      `这台设备的出口 IP ${hub.blockedIp()} 不在允许名单（HUB_ALLOW_IPS）里。在主机上把它加进去，OnlyOne 会自动重连。`)}
+                    {L(`This device's public IP ${onlyone.blockedIp()} isn't on the Worker's allow-list (ONLYONE_ALLOW_IPS). Add it on the host; OnlyOne reconnects by itself.`,
+                      `这台设备的出口 IP ${onlyone.blockedIp()} 不在允许名单（ONLYONE_ALLOW_IPS）里。在主机上把它加进去，OnlyOne 会自动重连。`)}
                   </Text>
                   <View style={{ flexDirection: "row" }}>
-                    <Button label={L("Copy IP", "复制 IP")} onPress={() => void Clipboard.writeText(hub.blockedIp())} />
+                    <Button label={L("Copy IP", "复制 IP")} onPress={() => void Clipboard.writeText(onlyone.blockedIp())} />
                   </View>
                 </View>
               </If>
-              <If when={hub.conn() === "offline" || hub.conn() === "unauthorized"}>
+              <If when={onlyone.conn() === "offline" || onlyone.conn() === "unauthorized"}>
                 <View
                   style={{
                     flexDirection: "row",
@@ -4649,13 +4676,13 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                     borderRadius: radius.inset,
                     // over the timeline: the tint needs a solid base, or the messages show through
                     backgroundColor: colors.surface,
-                    backgroundImage: `linear-gradient(${hub.conn() === "unauthorized" ? tints.danger : tints.warn}, ${hub.conn() === "unauthorized" ? tints.danger : tints.warn})`,
+                    backgroundImage: `linear-gradient(${onlyone.conn() === "unauthorized" ? tints.danger : tints.warn}, ${onlyone.conn() === "unauthorized" ? tints.danger : tints.warn})`,
                   }}
                 >
-                  <Text style={{ flex: 1, fontSize: 14, color: hub.conn() === "unauthorized" ? colors.danger : colors.warn }}>
-                    {hub.conn() === "unauthorized" ? L("Your session expired. Please sign in again.", "登录已过期，请重新登录。") : L("Lost connection to OnlyOne. Reconnecting…", "与 OnlyOne 的连接断开了，正在自动重连…")}
+                  <Text style={{ flex: 1, fontSize: 14, color: onlyone.conn() === "unauthorized" ? colors.danger : colors.warn }}>
+                    {onlyone.conn() === "unauthorized" ? L("Your session expired. Please sign in again.", "登录已过期，请重新登录。") : L("Lost connection to OnlyOne. Reconnecting…", "与 OnlyOne 的连接断开了，正在自动重连…")}
                   </Text>
-                  <If when={hub.conn() === "unauthorized"}>
+                  <If when={onlyone.conn() === "unauthorized"}>
                     <Button label={L("Sign in again", "重新登录")} variant="danger" onPress={props.onConnection} />
                   </If>
                 </View>
@@ -4734,6 +4761,11 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
                 </If>
                 <If when={attachNote()}>
                   {(note) => <Text testID="attach-note" style={{ fontSize: 13, color: colors.danger }}>{note()}</Text>}
+                </If>
+                <If when={onlyone.status()?.onlyone && !onlyone.status()?.onlyone?.online}>
+                  <Text testID="execution-waiting" style={{ fontSize: 13, lineHeight: 19, color: colors.muted }}>
+                    {onlyone.status()?.onlyone?.primary ? L("Coordinator offline. Requests will wait until it reconnects.", "协调主机离线，等待上线后执行。") : L("No execution computer connected. Connect your first computer; requests will wait here.", "尚未接入执行电脑。接入首台电脑后执行，请求会在此排队。")}
+                  </Text>
                 </If>
                 <Input
                   testID="composer"
@@ -4928,23 +4960,23 @@ function Chat(props: { hub: Hub; openRef?: string | null; onConnection: () => vo
   const content = (r: Route) => {
     switch (r.name) {
       case "channel": return withReader(channelPage());
-      case "task": return withReader(<TaskDetail hub={hub} id={r.id} wide={wide()} onFold={(f) => taskFolds.update((m) => ({ ...m, [r.id]: f }))} />);
-      case "tasks": return <TaskHistory hub={hub} wide={wide()} onTask={openTask} />;
-      case "host": return <MachineDetail hub={hub} host={r.host} wide={wide()} onTask={openTask} />;
+      case "task": return withReader(<TaskDetail onlyone={onlyone} id={r.id} wide={wide()} onFold={(f) => taskFolds.update((m) => ({ ...m, [r.id]: f }))} />);
+      case "tasks": return <TaskHistory onlyone={onlyone} wide={wide()} onTask={openTask} />;
+      case "host": return <MachineDetail onlyone={onlyone} host={r.host} wide={wide()} onTask={openTask} />;
       case "team":
         return (
           <If
             when={wide()}
-            else={<PhoneSettings hub={hub} push={push} settings={settings} onOpen={(x) => nav.push(x)} onDisconnect={props.onDisconnect} />}
+            else={<PhoneSettings onlyone={onlyone} push={push} settings={settings} onOpen={(x) => nav.push(x)} onDisconnect={props.onDisconnect} />}
           >
-            <TeamSettings hub={hub} push={push} settings={settings} wide={wide()} onRules={() => openRules(true)} onConnection={props.onConnection} onDisconnect={props.onDisconnect} />
+            <TeamSettings onlyone={onlyone} push={push} settings={settings} wide={wide()} onRules={() => openRules(true)} onConnection={props.onConnection} onDisconnect={props.onDisconnect} />
           </If>
         );
       case "notify": return <PhoneNotify push={push} settings={settings} />;
       case "member": return <PhoneMember id={r.id} settings={settings} />;
       case "routine": return <PhoneRoutine name={r.routine} settings={settings} />;
-      case "rules": return <RulesList hub={hub} onOpen={(path) => nav.push({ name: "doc", path })} />;
-      case "doc": return <RuleDoc hub={hub} path={r.path} wide={wide()} />;
+      case "rules": return <RulesList onlyone={onlyone} onOpen={(path) => nav.push({ name: "doc", path })} />;
+      case "doc": return <RuleDoc onlyone={onlyone} path={r.path} wide={wide()} />;
     }
   };
 
@@ -5150,13 +5182,12 @@ async function postJson(url: string, body: unknown): Promise<{ status: number; d
   return { status: r.status, data };
 }
 
-/** Login: the email gets a one-time code. On the web served by the hub the server is the page's own origin. */
+/** Login: the email gets a one-time code. On the web served by the onlyone the server is the page's own origin. */
 function Login(props: { url: string; served: boolean; email: string; notice?: string; onLogin: (c: Config) => void }) {
   const url = signal(props.url);
   const editUrl = signal(!props.served);
   const email = signal(props.email);
   const code = signal("");
-  const totp = signal(""); // the authenticator app's 6 digits: every sign-in needs it (bound on the host: onlyone 2fa setup)
   const step = signal<"email" | "code">("email");
   const error = signal(props.notice ?? "");
   const busy = signal(false);
@@ -5166,7 +5197,6 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
   const server = () => normalizeUrl(url());
   const unreachable = () => L(`Can’t reach ${server()}. Check the address and your network.`, `连不上服务器 ${server()}，请检查地址和网络`);
 
-  const viaCli = signal(false); // email not set up yet: the code is shown by `onlyone login` on the owner's machine
   async function sendCode() {
     const e = email().trim();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) return error.set(L("Enter a valid email address", "请填写有效的邮箱地址"));
@@ -5177,13 +5207,11 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
       const r = await postJson(`${server()}/api/auth/start`, { email: e });
       if (r.status === 429) throw new Error(String(r.data.error ?? L("Too many requests. Try again later.", "请求太频繁，请稍后再试")));
       const ip = ipBlocked(r.status, r.data);
-      if (ip) throw new Error(L(`This device's public IP ${ip} isn't on the allow-list (HUB_ALLOW_IPS). Add it on the host, then try again.`, `这台设备的出口 IP ${ip} 不在允许名单（HUB_ALLOW_IPS）里，在主机上加进去后再试。`));
-      if (r.data.error === "totp_not_setup") throw new Error(L("Two-step verification isn’t set up yet, so nobody can sign in. Run onlyone 2fa setup on your host first.", "还没有绑定两步验证，任何人都无法登录：先在你的主机上运行 onlyone 2fa setup"));
+      if (ip) throw new Error(L(`This device's public IP ${ip} isn't on the allow-list (ONLYONE_ALLOW_IPS). Add it on the host, then try again.`, `这台设备的出口 IP ${ip} 不在允许名单（ONLYONE_ALLOW_IPS）里，在主机上加进去后再试。`));
       if (r.status === 403) throw new Error(L("This email isn’t allowed to sign in", "这个邮箱不允许登录"));
       if (r.status === 503) throw new Error(L("The server can’t send email yet, so email sign-in isn’t available", "服务器还没有配置发信，暂时无法用邮箱登录"));
       if (r.status >= 400) throw new Error(L(`The server returned ${r.status}. This address may not be an OnlyOne server.`, `服务器返回 ${r.status}，这个地址可能不是 OnlyOne`));
       await Storage.setItem(KEYS.email, e);
-      viaCli.set(r.data.delivery === "cli");
       code.set("");
       step.set("code");
       wait.set(RESEND);
@@ -5200,12 +5228,12 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
   }
 
   async function verify() {
-    const c = code().toUpperCase().replace(/[^A-Z0-9]/g, ""), t = totp().replace(/\D/g, "");
-    if (c.length !== CODE_LEN || t.length !== 6 || busy()) return;
+    const c = code().toUpperCase().replace(/[^A-Z0-9]/g, "");
+    if (c.length !== CODE_LEN || busy()) return;
     busy.set(true);
     error.set("");
     try {
-      const r = await postJson(`${server()}/api/auth/verify`, { email: email().trim(), code: c, totp: t });
+      const r = await postJson(`${server()}/api/auth/verify`, { email: email().trim(), code: c });
       if (r.status === 401) throw new Error(typeof r.data.error === "string" ? r.data.error : L("The code is wrong or expired. Enter it again.", "验证码不对或已过期，请重新输入"));
       if (r.status === 403 && typeof r.data.error === "string") throw new Error(r.data.error);
       if (r.status === 429) throw new Error(String(r.data.error ?? L("Too many attempts. Try again later.", "尝试太频繁，请稍后再试")));
@@ -5214,7 +5242,6 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
       await Storage.setItem(KEYS.token, r.data.session);
       props.onLogin({ url: server(), token: r.data.session });
     } catch (err) {
-      totp.set(""); // a TOTP is good for 30 s: retype it; the email code stays (it survives a wrong TOTP)
       error.set(err instanceof Error && err.message !== "unreachable" ? err.message : unreachable());
     } finally {
       busy.set(false);
@@ -5223,13 +5250,9 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
   const onCode = (v: string) => {
     const c = v.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, CODE_LEN);
     code.set(c);
-    if (c.length === CODE_LEN && totp().length === 6) verify();
+    if (c.length === CODE_LEN) verify();
   };
-  const onTotp = (v: string) => {
-    const t = v.replace(/\D/g, "").slice(0, 6);
-    totp.set(t);
-    if (t.length === 6 && code().length === CODE_LEN) verify();
-  };
+
 
   return (
     <Scroll style={{ flex: 1, backgroundColor: colors.background }} keyboardShouldPersistTaps="handled">
@@ -5239,7 +5262,7 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
             <Mark size={48} />
             <Text style={{ fontSize: 28, fontWeight: "600", color: colors.text, letterSpacing: -0.3 }}>{L("Sign in to OnlyOne", "登录 OnlyOne")}</Text>
             <Text style={{ fontSize: 15.5, lineHeight: 23, color: colors.muted, textAlign: "center" }}>
-              {step() === "email" ? L("Sign in with email. We’ll send you an 8-character code.", "用邮箱登录：我们会发一个 8 位验证码给你（字母和数字）。") : viaCli() ? L("Email isn’t set up yet. Run onlyone login in your host’s terminal to see the code.", "还没配置发信邮箱：在你的主机终端运行 onlyone login 查看验证码。") : L(`We sent a code to ${email().trim()}. Check your email.`, `验证码已发到 ${email().trim()}，请查收邮件。`)}
+              {step() === "email" ? L("Sign in with email. We’ll send you an 8-character code.", "用邮箱登录：我们会发一个 8 位验证码给你（字母和数字）。") : L(`We sent a code to ${email().trim()}. Check your email.`, `验证码已发到 ${email().trim()}，请查收邮件。`)}
             </Text>
           </View>
           <View style={{ gap: 18, padding: 22, borderRadius: 16, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }}>
@@ -5286,16 +5309,6 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
                 big
                 testID="code"
               />
-              <Field
-                label={L("Authenticator code", "两步验证码（验证器 App）")}
-                value={totp()}
-                onChange={onTotp}
-                onSubmit={verify}
-                placeholder="······"
-                keyboardType="number-pad"
-                big
-                testID="totp"
-              />
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
                 <View role="button" accessibilityLabel={L("Use another email", "换个邮箱")} onPress={() => { step.set("email"); error.set(""); }} hoverStyle={hovered()} style={{ height: 30, justifyContent: "center", paddingHorizontal: 8, borderRadius: 6 }}>
                   <Text style={{ fontSize: 14, color: colors.muted }}>{L("‹ Use another email", "‹ 换个邮箱")}</Text>
@@ -5325,7 +5338,7 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
               when={step() === "code"}
               else={<Button testID="send-code" label={busy() ? L("Sending…", "发送中…") : L("Send code", "发送验证码")} variant="primary" loading={busy()} grow onPress={sendCode} />}
             >
-              <Button testID="verify" label={busy() ? L("Signing in…", "登录中…") : L("Sign in", "登录")} variant="primary" loading={busy()} disabled={code().length !== CODE_LEN || totp().length !== 6} grow onPress={verify} />
+              <Button testID="verify" label={busy() ? L("Signing in…", "登录中…") : L("Sign in", "登录")} variant="primary" loading={busy()} disabled={code().length !== CODE_LEN} grow onPress={verify} />
             </If>
           </View>
         </View>
@@ -5337,31 +5350,47 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
 // ---------------------------------------------------------------- app
 
 function Connected(props: { config: Config; openRef: string | null; onExpired: () => void; onLogout: () => void; onTray: (chat: TrayChat | null) => void }) {
-  const hub = createHub(props.config);
-  cleanup(hub.dispose);
+  const onlyone = createOnlyOne(props.config);
+  const executorError = signal("");
+  const startExecutor = () => {
+    executorError.set("");
+    executor("start", props.config).catch(() => executorError.set(L("This Mac could not start executing tasks. Try again.", "这台 Mac 的执行服务未能启动，请重试")));
+  };
+  startExecutor();
+  cleanup(onlyone.dispose);
   // The service worker answers decisions from notifications with the session.
   hostCall("setSession", { session: props.config.token, origin: props.config.url });
   // A 401 on any call: the session is gone, back to the login.
   effect(() => {
-    if (hub.conn() === "unauthorized") props.onExpired();
+    if (onlyone.conn() === "unauthorized") props.onExpired();
   });
   return (
+    <View style={{ flex: 1 }}>
+    <If when={executorError()}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: tints.danger }}>
+        <Text style={{ flex: 1, color: colors.danger }}>{executorError()}</Text>
+        <Button label={L("Retry", "重试")} onPress={startExecutor} />
+      </View>
+    </If>
     <Chat
-      hub={hub}
+      onlyone={onlyone}
       openRef={props.openRef}
       onConnection={props.onExpired}
       onTray={props.onTray}
       onDisconnect={async () => {
+        try { await executor("stop", props.config); }
+        catch { executorError.set(L("The local executor could not stop. Try signing out again.", "本机执行服务未能停止，请重试退出登录")); return; }
         const off = await hostCall<{ endpoint: string | null }>("pushDisable");
-        if (off?.endpoint) await hub.api("POST", "/api/push/unsubscribe", { endpoint: off.endpoint });
+        if (off?.endpoint) await onlyone.api("POST", "/api/push/unsubscribe", { endpoint: off.endpoint });
         await hostCall("setSession", { session: null });
         for (const id of [...showing]) closeNotification(id);
         setBadge(0);
-        await hub.logout();
+        await onlyone.logout();
         clearDocCache();
         props.onLogout();
       }}
     />
+    </View>
   );
 }
 

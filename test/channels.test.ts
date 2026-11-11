@@ -77,10 +77,10 @@ import { channelDigest as digest2 } from "../cloud/src/tools";
 test("channelDigest: the channel's own talk (incl. the team's replies) plus main-chat results about its work; other rooms never", () => {
   const evs = [
     { id: "1", from: "owner", kind: "owner", text: "q", channel: "a" },
-    { id: "2", from: "hub", kind: "system", text: "reply", channel: "a" },
+    { id: "2", from: "onlyone", kind: "system", text: "reply", channel: "a" },
     { id: "3", from: "lead@x", kind: "notice", text: "result", ref: "T-0001" },
     { id: "4", from: "owner", kind: "owner", text: "other room", channel: "b", ref: "T-0001" },
-    { id: "5", from: "hub", kind: "system", text: "ack", ref: "T-0001" },
+    { id: "5", from: "onlyone", kind: "system", text: "ack", ref: "T-0001" },
   ];
   expect(digest2(evs, ["T-0001"], "a").map((e) => e.id)).toEqual(["1", "2", "3"]);
   expect(digest2(evs, ["T-0001"], "b").map((e) => e.id)).toEqual(["3", "4"]);

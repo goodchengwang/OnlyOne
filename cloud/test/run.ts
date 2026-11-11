@@ -44,7 +44,7 @@ r = await api("/api/files/commit", { msg: "bad", changes: [{ path: "../etc/passw
 check("400 on traversal", r.status === 400);
 
 // ---- hosts racing to claim the same task (real host code: core.claim over HTTP)
-const W = mkdtempSync(join(tmpdir(), "hub-race-"));
+const W = mkdtempSync(join(tmpdir(), "onlyone-race-"));
 const HOSTS = ["h1", "h2", "h3"];
 for (const h of HOSTS) { mkdirSync(join(W, h, "data"), { recursive: true }); writeFileSync(join(W, h, "onlyone.toml"), `[cloud]\nurl = "${BASE}"\n[server]\ntoken = "test"\n`); }
 for (let round = 1; round <= 5; round++) {
@@ -52,7 +52,7 @@ for (let round = 1; round <= 5; round++) {
   await api("/api/files/commit", { msg: "task", changes: [{ path: `tasks/inbox/${id}.md`, base_version: 0, content: b64(`---\nid: ${id}\ntitle: race ${round}\n---\nbody\n`) }] });
   const startAt = Date.now() + 1500;
   const procs = HOSTS.map((h) => Bun.spawn(["bun", join(import.meta.dir, "claim-host.ts"), id, String(startAt)], {
-    env: { ...process.env, HUB_DATA: join(W, h, "data"), HUB_HOST: h, HUB_SYNC: "", HUB_SYNC_FAKE: "" }, stdout: "pipe", stderr: "pipe" }));
+    env: { ...process.env, ONLYONE_DATA_DIR: join(W, h, "data"), ONLYONE_HOST: h, ONLYONE_SYNC: "", ONLYONE_SYNC_FAKE: "" }, stdout: "pipe", stderr: "pipe" }));
   const out = await Promise.all(procs.map(async (p) => { await p.exited; return JSON.parse((await new Response(p.stdout).text()).trim().split("\n").pop() || "{}"); }));
   const winners = out.filter((o) => o.won).map((o) => o.host);
   const active = (await api(`/api/files/history?path=tasks/active/${id}.md&content=1`)).json.history;

@@ -11,7 +11,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Fraunces:opsz,wght,SOFT@9..144,300..600,100&display=swap">
 <script>
   // theme: ?theme= → saved → system (same order as allsum)
-  (() => { let t = new URLSearchParams(location.search).get("theme"); try { t = t || localStorage.getItem("hubTheme"); } catch {}
+  (() => { let t = new URLSearchParams(location.search).get("theme"); try { t = t || localStorage.getItem("onlyoneTheme"); } catch {}
     if (t === "light" || t === "dark") document.documentElement.dataset.theme = t; })();
 </script>
 <style>
@@ -103,7 +103,7 @@ main { display: flex; flex-direction: column; min-width: 0; min-height: 0; backg
 .day { text-align: center; color: var(--text-faint); font-size: var(--fs-xs); margin: var(--space-5) 0 var(--space-3); }
 .msg { display: flex; gap: var(--space-3); padding: var(--space-2) 0; animation: m-in var(--dur-2) var(--ease-out); }
 .av { width: 28px; height: 28px; border-radius: 50%; flex: none; display: grid; place-items: center; font-size: var(--fs-xs); font-weight: 600; background: var(--bg-active); color: var(--text-soft); }
-.av.hub { background: var(--text); color: var(--bg); }
+.av.onlyone { background: var(--text); color: var(--bg); }
 .bd { flex: 1; min-width: 0; }
 .hd { display: flex; align-items: baseline; gap: var(--space-2); margin-bottom: 2px; }
 .who { font-weight: 600; font-size: var(--fs-sm); }
@@ -199,9 +199,9 @@ textarea::placeholder { color: var(--text-faint); }
 <script>
 const qs = new URLSearchParams(location.search);
 let token = qs.get("token");
-try { token = token || localStorage.getItem("hubToken"); } catch {}
-if (qs.get("token")) { try { localStorage.setItem("hubToken", token); } catch {} history.replaceState(null, "", "/"); }
-if (!token) { token = prompt("Hub token") || ""; try { localStorage.setItem("hubToken", token); } catch {} }
+try { token = token || localStorage.getItem("onlyoneToken"); } catch {}
+if (qs.get("token")) { try { localStorage.setItem("onlyoneToken", token); } catch {} history.replaceState(null, "", "/"); }
+if (!token) { token = prompt("OnlyOne token") || ""; try { localStorage.setItem("onlyoneToken", token); } catch {} }
 const H = { Authorization: "Bearer " + token, "Content-Type": "application/json" };
 const $ = (id) => document.getElementById(id);
 const log = $("log"), t = $("t"), feedEl = $("feed");
@@ -242,7 +242,7 @@ function render(e) {
     return;
   }
   const isAsk = e.ref && /^[DLP]-[A-Z]?\d{4}$/.test(e.ref) && ["decision", "menu", "proposals", "login"].includes(e.kind);
-  const isHub = /^hub/.test(e.from);
+  const isOnlyOne = /^onlyone/.test(e.from);
   const el = document.createElement("div");
   el.className = "msg" + (e.kind === "system" ? " sys" : "");
   const label = { decision: "需要决定", menu: "下一步", proposals: "待批准", login: "登录", notice: "", system: "" }[e.kind] || "";
@@ -251,7 +251,7 @@ function render(e) {
     return /\.(mp4|webm|mov)$/i.test(a) ? `<video controls playsinline preload="metadata" src="${u}"></video>` : `<a href="${u}" target="_blank" rel="noopener"><img loading="lazy" src="${u}" alt=""></a>`;
   }).join("");
   const body = `<div class="tx">${fmt(e.text)}</div>${media ? `<div class="media">${media}</div>` : ""}`;
-  el.innerHTML = `<div class="av ${isHub ? "hub" : ""}">${isHub ? "◆" : initials(e.from)}</div>
+  el.innerHTML = `<div class="av ${isOnlyOne ? "onlyone" : ""}">${isOnlyOne ? "◆" : initials(e.from)}</div>
     <div class="bd"><div class="hd"><span class="who">${esc(e.from.replace(/@.*/, ""))}</span><span class="when">${time}</span>${label ? `<span class="tag">${label}</span>` : ""}</div>
     ${isAsk ? `<div class="card ask" data-ref="${esc(e.ref)}">${body}<div class="opts"></div></div>` : body}</div>`;
   if (isAsk) {
@@ -326,7 +326,7 @@ $("scrim").onclick = () => $("app").classList.remove("drawer");
 $("themeBtn").onclick = () => {
   const cur = document.documentElement.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
   const next = cur === "dark" ? "light" : "dark";
-  document.documentElement.dataset.theme = next; try { localStorage.setItem("hubTheme", next); } catch {}
+  document.documentElement.dataset.theme = next; try { localStorage.setItem("onlyoneTheme", next); } catch {}
 };
 fetch("/api/status", { headers: H }).then(() => {});
 load().then(stream); status(); setInterval(status, 15000);

@@ -25,7 +25,7 @@ const SECURITY_ROUTINE = {
 4. Result summary for the owner: one verdict line (e.g. "This machine: 2 high-risk") plus the high-risk items and the report path. If anything is high risk, use needs_decision with options to fix now (as a gated follow-up) or accept; otherwise done.`,
 };
 
-/** Weekly usage report: computed from the hub files by code (src/usage-report.ts, no AI run), saved under
+/** Weekly usage report: computed from the onlyone files by code (src/usage-report.ts, no AI run), saved under
  *  reports/usage/ and posted to the main chat so everyone using this OnlyOne can follow how it is used. */
 const USAGE_ROUTINE = {
   name: "usage-report",

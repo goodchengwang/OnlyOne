@@ -10,15 +10,32 @@
             email OTP login · Web Push
                 ▲                                  ▲
                 │ outbound HTTPS                   │
-       primary (always-on Linux)            workers (macOS, Windows)
+       primary (first joined Mac/Linux)            workers (macOS, Windows)
        routines, triage, judge, agents      claim tasks when online
 ```
 
 - Machines never accept inbound connections; they call the Worker.
+- The Mac app uses its email login session once to register a local executor. Credentials cross the native process
+  boundary on stdin; only the machine credential is stored in the executor's 0600 bootstrap file. An origin hash
+  selects a private 0700 home under `~/.onlyone/app/`, so changing servers cannot sync a previous team's data.
+  launchd owns the executor, survives app exit and restarts, and uses a separate label for each origin. A data-directory
+  lock prevents duplicate executors. Sign-out disables the service and sends SIGTERM: the bridge finishes its current
+  message, leaves later messages queued, and running tasks drain. Mobile and web clients never spawn processes.
+  Only first enrollment adds cloud traffic: email start/verify plus join, credential validation and initial pull are
+  five requests (at most the existing six-request / 100-written-row allowance per machine, 18 / 300 for three).
+  Reopening an already bound app adds no enrollment requests or rows; idle execution uses the existing budgeted
+  WebSocket, lazy-heartbeat and sync pacing. No new cloud timers are introduced.
+  In source development, filesystem events are debounced and validated locally; only a changed, valid bundle asks
+  the existing daemon drain to restart. No files changed means zero extra requests or writes, even with the app closed.
+  Development startup/reload messages stay in the local log, and a source reload does not force lazy heartbeat/journal
+  uploads. The last-push timestamp persists in sync.json so restarting cannot bypass lazy pacing. Task results still
+  commit normally, and the next process retains unsent lazy changes in its mirror.
+  Budget tests reserve eight requests / 16 indexed rows per reload: ten reloads/hour for eight hours on three Macs
+  reserve 1,920 requests / 3,840 rows in the simulated day without increasing TARGET.
 - Shared state is a set of files. Each machine keeps a local mirror (`DATA`) so agents read and write plain Markdown; `src/sync.ts` syncs it with the Worker (`cloud/src/files.ts`).
 - Commits are compare-and-swap per path (`base_version`). A 409 means another host won; task claims rely on this, so exactly one host claims a task.
 - Every file version is kept in `history` (90 days / 20k rows, latest per path always kept) and can be reverted — this is how self-evolution edits are audited and undone.
-- The primary mirrors chat events to the Worker and long-polls its inbox (`GET /api/host/inbox?wait=25`: the Worker holds the request until something arrives) for the owner's messages, settings and MCP writes (`src/cloud.ts`).
+- The primary mirrors chat events to the Worker and receives inbox nudges over the hibernating `/api/host/stream` WebSocket (slow polling only while disconnected) for the owner's messages, settings and MCP writes (`src/cloud.ts`).
 - Chat brain (`src/brain.ts`): every owner message that isn't a bare `D-0012 A` goes to a fast model (Claude Haiku via the local `claude` CLI, a pre-spawned warm process) that runs a short agent loop over OnlyOne's tools (`cloud/src/tools.ts`, shared with the MCP server): answer, look up, create/amend/cancel/reprioritise/reassign tasks, answer decisions, remember, edit or delete memories. The owner's model login stays on the primary; only the message and the reply cross the Worker. Latency per message: `~/.onlyone/brain.jsonl`.
 
 ## Layout
@@ -37,7 +54,7 @@
 | `src/medic.ts` | AI self-repair for install/update/daemon failures |
 | `src/sessions.ts` | learning the owner from local Claude/Codex history (redacted, never uploaded raw) |
 | `src/setup.ts` | init, join, install as a service, self-update with rollback |
-| `cloud/` | the Worker: `index.ts` (routes, auth, feed), `files.ts`, `smtp.ts`, `push.ts` |
+| `cloud/` | the Worker: `index.ts` (routes, auth, feed), `files.ts`, `resend.ts`, `push.ts`; `deploy.ts` independently builds and deploys it |
 | `app/` | the NSH client; `app/build-web.sh` builds its web package locally; `src/webclient.ts` downloads only from an explicitly configured source |
 | `templates/` | default config, agents, policies and memory seeded into a new install |
 

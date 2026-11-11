@@ -1,4 +1,4 @@
-// Hub server: runs inside the primary daemon. Chat API (for the NSH client), built-in web chat (PWA), media.
+// OnlyOne server: runs inside the primary daemon. Chat API (for the NSH client), built-in web chat (PWA), media.
 // Reach it from phone / Mac over Tailscale (`tailscale serve --bg 8787` gives HTTPS on your tailnet). No cloud.
 //
 // API (Bearer token = [server].token in config.local.toml):
@@ -25,6 +25,8 @@ import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } fro
 import { channels, originChannel, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
+import { members } from "./team";
+import { MEMBER_ID, avatarResponse } from "../cloud/src/team";
 
 export type Event = {
   id: string; ts: string; from: string; kind: "notice" | "decision" | "menu" | "proposals" | "login" | "owner" | "system";
@@ -49,7 +51,7 @@ let ownerTask: OwnerTask | null = null;
 
 const today = () => new Date().toLocaleDateString("sv-SE");
 
-let mirror: ((e: Event) => void) | null = null; // cloud bridge: copies primary events to the Cloudflare hub
+let mirror: ((e: Event) => void) | null = null; // cloud bridge: copies primary events to the Cloudflare onlyone
 export const setMirror = (fn: (e: Event) => void) => { mirror = fn; };
 
 export function appendEvent(e: Omit<Event, "id" | "ts"> & Partial<Pick<Event, "id" | "ts">>, opts: { mirror?: boolean } = {}): Event {
@@ -188,6 +190,8 @@ export function status() {
   const others = ["done", "failed", "blocked", "waiting", "inbox"].flatMap((f) => list(P("tasks", f), /^T-.*\.md$/).map((p) => taskView(p, f, log)))
     .sort((a, b) => (b.updated ?? "").localeCompare(a.updated ?? ""));
   return {
+    members: members(),
+    settings_revision: existsSync(P("settings.json")) ? Bun.hash(readFileSync(P("settings.json"))).toString() : "",
     tasks: Object.fromEntries(["proposed", "inbox", "active", "waiting", "blocked", "failed", "done"].map((f) => [f, count(f)])),
     active,
     // every open task (queued, waiting on sub-tasks or something slow, blocked) and the newest finished ones; a task copied in two folders mid-sync shows once, as running
@@ -202,6 +206,12 @@ export function status() {
     /** The owner's latest "update every machine" (each host reports its progress on it in `hosts[].update`). */
     update: (() => { try { return { at: String(JSON.parse(readFileSync(UPDATE_REQUEST(), "utf8")).at ?? "") }; } catch { return undefined; } })(),
   };
+}
+
+/** Owner-visible configuration changes use the existing status stream, including a local connection. */
+export function publishStatus() {
+  const frame = JSON.stringify({ $status: status() });
+  for (const ws of sockets) try { ws.send(frame); } catch {}
 }
 
 // ---------------------------------------------------------------- settings (UI-adjustable, shared via data repo)
@@ -310,7 +320,7 @@ export const setUpdateFleet = (fn: () => Promise<number>) => { updateHook = fn; 
 export async function updateFleet(): Promise<string> {
   if (!updateHook) return "not available";
   const n = await updateHook();
-  appendEvent({ from: "hub", kind: "system", text: L(`Told ${n} machine(s) to update to the latest code: idle ones update now, busy ones restart after their tasks finish; the primary also redeploys.`, `已通知 ${n} 台机器更新到最新代码：空闲的马上更新，有任务在跑的等跑完再重启；主控机同时重新发布线上。`) });
+  appendEvent({ from: "onlyone", kind: "system", text: L(`Told ${n} machine(s) to update to the latest code: idle ones update now, busy ones restart after their tasks finish; the primary also redeploys.`, `已通知 ${n} 台机器更新到最新代码：空闲的马上更新，有任务在跑的等跑完再重启；主控机同时重新发布线上。`) });
   return "ok";
 }
 const AMEND_MS = 5 * 60_000;
@@ -419,11 +429,11 @@ export function readDataFile(path: string, root = DATA) {
 }
 
 export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
+  ownerTask = onOwnerTask;
+  if (cfg.server?.enabled === false) return;
   if (process.env.NODE_ENV !== "test") void ensureWebClient(); // served as soon as it lands
   const s = cfg.server ?? {};
-  if (s.enabled === false) return;
   if (!s.token) { console.error("server: set [server].token in config.local.toml to enable the chat API"); return; }
-  ownerTask = onOwnerTask;
   const auth = (req: Request) => {
     const h = req.headers.get("authorization") ?? "";
     const q = new URL(req.url).searchParams.get("token");
@@ -458,6 +468,12 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       }
       if (url.pathname === "/api/feed") return json({ events: feed(url.searchParams.get("since") ?? undefined) });
       if (url.pathname === "/api/status") return json(status());
+      if (url.pathname === "/api/files/avatar" && req.method === "GET") {
+        const id = url.searchParams.get("agent") ?? "";
+        if (!MEMBER_ID.test(id)) return json({ error: "invalid member id" }, 400);
+        const path = P("agents", id, "avatar.image");
+        return avatarResponse(existsSync(path) ? new Uint8Array(readFileSync(path)) : null);
+      }
       if (url.pathname === "/api/files/list" && req.method === "GET") {
         const files = listDataFiles(url.searchParams.get("prefix") ?? "");
         return files ? json({ files }) : json({ error: "prefix not readable" }, 403);
@@ -541,7 +557,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       message() {},
     },
   });
-  console.log(`hub server on http://${server.hostname}:${server.port}  (phone: tailscale serve --bg ${server.port})`);
+  console.log(`onlyone server on http://${server.hostname}:${server.port}  (phone: tailscale serve --bg ${server.port})`);
   return server;
 }
 

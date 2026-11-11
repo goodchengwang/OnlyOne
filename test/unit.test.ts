@@ -36,7 +36,7 @@ test("result parsing", () => {
   expect(parseResult("no block").status).toBe("failed");
 });
 
-test("owner image uploads: images only, 10 MB, attachments are the hub's own media", async () => {
+test("owner image uploads: images only, 10 MB, attachments are the onlyone's own media", async () => {
   const { uploadProblem, ownerAttachments, MAX_UPLOAD } = await import("../cloud/src/uploads");
   expect(uploadProblem("image/png", 1000)).toBeNull();
   expect(uploadProblem("image/svg+xml", 1000)?.status).toBe(415);
@@ -210,10 +210,10 @@ test("recentChat: the channel before an owner message, without the message itsel
   const { appendEvent, recentChat } = await import("../src/server");
   appendEvent({ from: "Kai", kind: "notice", text: "已补写 gpui-kit v0.9.0 的更新日志", ref: "T-0115" });
   appendEvent({ from: "owner", kind: "owner", text: "不行，得留下贡献者名单" });
-  appendEvent({ from: "hub", kind: "system", text: "收到，接着 T-0115 处理（T-0116）", ref: "T-0116" });
+  appendEvent({ from: "onlyone", kind: "system", text: "收到，接着 T-0115 处理（T-0116）", ref: "T-0116" });
   appendEvent({ from: "owner", kind: "owner", text: "这个细节记录下来，以后都这样" });
   const lines = recentChat("这个细节记录下来，以后都这样");
-  expect(lines.slice(-3).map((l) => l.slice(8))).toEqual(["Kai (T-0115): 已补写 gpui-kit v0.9.0 的更新日志", "owner: 不行，得留下贡献者名单", "hub (T-0116): 收到，接着 T-0115 处理（T-0116）"]);
+  expect(lines.slice(-3).map((l) => l.slice(8))).toEqual(["Kai (T-0115): 已补写 gpui-kit v0.9.0 的更新日志", "owner: 不行，得留下贡献者名单", "onlyone (T-0116): 收到，接着 T-0115 处理（T-0116）"]);
   expect(recentChat("x", { limit: 1 }).length).toBe(1);
 });
 

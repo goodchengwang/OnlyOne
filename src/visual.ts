@@ -33,7 +33,7 @@ async function start(name: string, size = "1600x1000") {
     const rt = join(dir(name), "rt"); mkdirSync(rt, { recursive: true, mode: 0o700 });
     const conf = join(dir(name), "sway.conf");
     writeFileSync(conf, `output HEADLESS-1 resolution ${size}\ndefault_border none\nfocus_follows_mouse no\n`);
-    const env = { WLR_BACKENDS: "headless", WLR_LIBINPUT_NO_DEVICES: "1", XDG_RUNTIME_DIR: rt, WAYLAND_DISPLAY: `wayland-hub-${name}` };
+    const env = { WLR_BACKENDS: "headless", WLR_LIBINPUT_NO_DEVICES: "1", XDG_RUNTIME_DIR: rt, WAYLAND_DISPLAY: `wayland-onlyone-${name}` };
     s.pids.push(spawnBg(["sway", "-c", conf], { ...env, WAYLAND_DISPLAY: "" }, join(dir(name), "sway.log")));
     await Bun.sleep(1500);
     const sock = (await $`ls ${rt}`.quiet().nothrow()).stdout.toString().split("\n").find((f) => f.startsWith("wayland-") && !f.endsWith(".lock"));

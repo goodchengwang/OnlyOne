@@ -5,9 +5,10 @@ import { homedir, hostname } from "node:os";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import * as sync from "./sync";
 import { BUILTIN_ROUTINES } from "./builtin-routines";
+import { CLI_VERSION, npmBuild } from "./release";
 
 /** Framework code (this repo, self-updating). */
-export const CODE = resolve(import.meta.dir, "..");
+export const CODE = npmBuild ? dirname(process.execPath) : resolve(import.meta.dir, "..");
 /** Machine-local home: $ONLYONE_HOME, else ~/.onlyone. */
 export function homeDir(): string {
   if (process.env.ONLYONE_HOME) return resolve(process.env.ONLYONE_HOME.replace(/^~/, homedir()));
@@ -15,11 +16,11 @@ export function homeDir(): string {
 }
 export const HOME_DIR = homeDir();
 /** Fleet state: local mirror of the files shared by all machines through the owner's Worker (tasks, journal, decisions, agents, memory, config). */
-export const DATA = resolve((process.env.HUB_DATA || join(HOME_DIR, "data")).replace(/^~/, homedir()));
+export const DATA = resolve((process.env.ONLYONE_DATA_DIR || join(HOME_DIR, "data")).replace(/^~/, homedir()));
 export const ROOT = DATA;
 export const P = (...p: string[]) => join(DATA, ...p);
-// sync state (onlyone.toml, sync.json) lives in HOME_DIR; a custom HUB_DATA (tests, extra mirrors) keeps its own next to it
-sync.setSyncData(DATA, process.env.HUB_DATA && !process.env.ONLYONE_HOME ? dirname(DATA) : HOME_DIR);
+// sync state (onlyone.toml, sync.json) lives in HOME_DIR; a custom ONLYONE_DATA_DIR (tests, extra mirrors) keeps its own next to it
+sync.setSyncData(DATA, process.env.ONLYONE_DATA_DIR && !process.env.ONLYONE_HOME ? dirname(DATA) : HOME_DIR);
 
 // ------------------------------------------------------------------ config
 export type Cfg = Record<string, any>;
@@ -40,7 +41,7 @@ export function loadConfig(): Cfg {
   // onlyone.toml = machine-local bootstrap (Worker url + machine token), outside DATA because DATA itself comes from the Worker
   // settings.json = changes made from the UI (shared via the data repo), applied over config.toml; config.local.toml wins last
   const ui = existsSync(P("settings.json")) ? JSON.parse(readFileSync(P("settings.json"), "utf8")) : {};
-  const cfg: Cfg = merge(merge(merge(sync.readHubToml(), read("config.toml")), ui), read("config.local.toml"));
+  const cfg: Cfg = merge(merge(merge(sync.readOnlyOneToml(), read("config.toml")), ui), read("config.local.toml"));
   // built-in routines (src/builtin-routines.ts) unless config.toml defines one of the same name
   cfg.routine = Array.isArray(cfg.routine) ? cfg.routine : [];
   for (const b of BUILTIN_ROUTINES) if (!cfg.routine.some((r: any) => r.name === b.name)) {
@@ -50,26 +51,29 @@ export function loadConfig(): Cfg {
   }
   // routine tweaks from the UI: { routines: { <name>: { enabled, every } } }
   for (const r of cfg.routine ?? []) Object.assign(r, ui.routines?.[r.name] ?? {});
+  for (const [name, r] of Object.entries(ui.routines ?? {}) as [string, any][]) {
+    if (!cfg.routine.some((item: any) => item.name === name) && r.agent && r.every && r.prompt) cfg.routine.push({ ...r, name });
+  }
   cfg.notify ??= {};
-  // the owner's own Cloudflare hub (onlyone cloud deploy) is the fixed address for clients and workers
+  // the owner's own Cloudflare onlyone (onlyone cloud deploy) is the fixed address for clients and workers
   if (cfg.cloud?.url) { cfg.server ??= {}; cfg.server.url ??= cfg.cloud.url; cfg.server.public_url ??= cfg.cloud.url; }
-  // public hub URL published by the primary's tunnel (fleet/hub.json) → workers and push links use it unless pinned locally
-  if (existsSync(P("fleet", "hub.json"))) try {
-    const { url } = JSON.parse(readFileSync(P("fleet", "hub.json"), "utf8"));
+  // public onlyone URL published by the primary's tunnel (fleet/onlyone.json) → workers and push links use it unless pinned locally
+  if (existsSync(P("fleet", "onlyone.json"))) try {
+    const { url } = JSON.parse(readFileSync(P("fleet", "onlyone.json"), "utf8"));
     cfg.server ??= {};
     if (url && !cfg.server.url) cfg.server.url = url;
     if (url && !cfg.server.public_url) cfg.server.public_url = url;
   } catch {}
   const envMap: Record<string, string> = {
-    slack_bot_token: "HUB_SLACK_BOT_TOKEN", slack_channel: "HUB_SLACK_CHANNEL", slack_webhook: "HUB_SLACK_WEBHOOK",
-    discord_bot_token: "HUB_DISCORD_BOT_TOKEN", discord_channel: "HUB_DISCORD_CHANNEL", discord_webhook: "HUB_DISCORD_WEBHOOK",
+    slack_bot_token: "ONLYONE_SLACK_BOT_TOKEN", slack_channel: "ONLYONE_SLACK_CHANNEL", slack_webhook: "ONLYONE_SLACK_WEBHOOK",
+    discord_bot_token: "ONLYONE_DISCORD_BOT_TOKEN", discord_channel: "ONLYONE_DISCORD_CHANNEL", discord_webhook: "ONLYONE_DISCORD_WEBHOOK",
   };
   for (const [k, env] of Object.entries(envMap)) if (process.env[env]) cfg.notify[k] = process.env[env];
   return cfg;
 }
 
 export const hostName = (cfg: Cfg): string =>
-  process.env.HUB_HOST || cfg.host?.name || hostname().split(".")[0];
+  process.env.ONLYONE_HOST || cfg.host?.name || hostname().split(".")[0];
 
 export const now = () => new Date().toISOString().replace(/\.\d+Z$/, "Z");
 export const today = () => new Date().toLocaleDateString("sv-SE"); // YYYY-MM-DD local
@@ -262,7 +266,7 @@ export function updateState(): UpdateState | undefined {
   // written by the process before this one: the restart it waited for has happened
   if ((u.state === "restarting" || u.state === "waiting") && Date.parse(u.ts) < STARTED) {
     const rev = runningRev().rev;
-    if (rev && rev !== u.from) setUpdateState({ at: u.at, state: "done", detail: rev.slice(0, 7), from: u.from });
+    if (rev && rev !== u.from) setUpdateState({ at: u.at, state: "done", detail: npmBuild ? rev : rev.slice(0, 7), from: u.from });
     else setUpdateState({ at: u.at, state: "failed", detail: L("Still on the old code after restart", "重启后仍是旧代码"), from: u.from });
     return updateState();
   }
@@ -273,6 +277,7 @@ export function updateState(): UpdateState | undefined {
 let codeRev: { rev?: string; rev_url?: string } | undefined;
 export function runningRev(): { rev?: string; rev_url?: string } {
   if (codeRev) return codeRev;
+  if (npmBuild) return (codeRev = { rev: CLI_VERSION });
   const git = (...a: string[]) => { try { return Bun.spawnSync(["git", "-C", CODE, ...a], { stdout: "pipe", stderr: "ignore" }).stdout.toString().trim(); } catch { return ""; } };
   const rev = git("rev-parse", "HEAD") || undefined;
   const repo = git("remote", "get-url", "origin").match(/github\.com[:/]([\w.-]+\/[\w.-]+?)(\.git)?$/)?.[1];

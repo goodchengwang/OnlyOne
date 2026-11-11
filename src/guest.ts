@@ -1,5 +1,5 @@
 // Guest worker client: a low-trust machine (a shared Windows test box, a public device) that runs one task at a time.
-// It stores only its own guest token (no HUB_TOKEN, no DATA mirror, no memory, no GitHub credentials of ours) in
+// It stores only its own guest token (no ONLYONE_TOKEN, no DATA mirror, no memory, no GitHub credentials of ours) in
 // ONLYONE_GUEST_HOME (default ~/.onlyone-guest). Each OS account / person on a shared machine uses its own home, so several
 // people's guests on one device never see each other. Tasks run in a fresh scratch folder with this machine's own
 // claude/codex login; the answer (text + `git diff`) goes back as an untrusted result the primary reviews.
@@ -9,6 +9,7 @@ import { $ } from "bun";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { join } from "node:path";
+import { npmBuild } from "./release";
 import { GUEST_IDLE_MS } from "../cloud/src/budget";
 
 const HOME = () => process.env.ONLYONE_GUEST_HOME || join(homedir(), ".onlyone-guest");
@@ -83,15 +84,13 @@ async function admin(cfg: any, path: string, init: RequestInit = {}) {
   return b as any;
 }
 
-/** What `onlyone guest invite` prints: one line per OS that installs OnlyOne and joins as this guest, no login. */
+/** What `onlyone guest invite` prints: npm installation and guest enrollment, no owner login. */
 export function guestInvite(url: string, code: string): string {
   return [
-    "", "  in the local OnlyOne source directory on the guest machine (valid 10 minutes, once):", "",
-    "  Windows (PowerShell):",
-    `  $env:ONLYONE_GUEST = "${url} ${code}"; .\\install.ps1`, "",
-    "  macOS / Linux:",
-    `  bash install.sh --guest ${url} ${code}`, "",
-    `  already has OnlyOne:  onlyone guest join ${url} ${code}`, "",
+    "", "  on the guest machine (valid 10 minutes, once):", "",
+    "  npm install -g onlyonecli",
+    `  onlyone guest join ${url} ${code}`,
+    "  onlyone guest install", "",
   ].join("\n");
 }
 
@@ -181,7 +180,7 @@ export async function installGuestService(cliFlag?: string) {
   const cli = cliFlag ?? defaultCli();
   if (!Bun.which(cli)) console.log(`! ${cli} is not installed: install it and log in, or the guest cannot run tasks`);
   const bun = process.execPath, entry = join(import.meta.dir, "cli.ts"), home = HOME(), log = join(home, "guest.log");
-  const args = [bun, entry, "guest", "run", "--cli", cli];
+  const args = [...(npmBuild ? [bun] : [bun, entry]), "guest", "run", "--cli", cli];
   const path = [join(homedir(), ".bun/bin"), join(homedir(), ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"].join(":");
   mkdirSync(home, { recursive: true });
   if (process.platform === "linux") {
@@ -217,7 +216,7 @@ export async function installGuestService(cliFlag?: string) {
     // A hidden window started from the account's Run key: no admin rights, no task name shared with other accounts.
     const vbs = join(home, "guest.vbs"), vb = (v: string) => `"${v.replace(/"/g, '""')}"`;
     // cmd /c strips one outer pair of quotes, so the whole command line gets its own pair
-    const cmd = `cmd /c ""${bun}" "${entry}" guest run --cli ${cli} >> "${log}" 2>&1"`;
+    const cmd = `cmd /c "${args.map(arg => `"${arg}"`).join(" ")} >> "${log}" 2>&1"`;
     writeFileSync(vbs, `Set sh = CreateObject("WScript.Shell")\r\nsh.Environment("Process")("ONLYONE_GUEST_HOME") = ${vb(home)}\r\nsh.Run ${vb(cmd)}, 0, False\r\n`);
     await $`reg add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v OnlyOneGuest /t REG_SZ /d ${`wscript.exe "${vbs}"`} /f`.quiet().nothrow();
     await stopWindowsGuest();

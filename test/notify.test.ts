@@ -30,10 +30,10 @@ test("the settings' switches reach their kinds, notices being the results", () =
   expect(notificationFor({ kind: "notice", from: "lead@mac", text: "done" }, off("decision"))?.body).toBe("done");
 });
 
-test("the owner's own words and the hub's housekeeping never notify", () => {
+test("the owner's own words and the onlyone's housekeeping never notify", () => {
   expect(notificationFor({ kind: "owner", text: "hi" }, {})).toBe(null);
   expect(notificationFor({ kind: "system", text: "x" }, {})).toBe(null);
-  expect(notificationFor({ kind: "notice", from: "hub@mac", text: "x" }, {})).toBe(null);
+  expect(notificationFor({ kind: "notice", from: "onlyone@mac", text: "x" }, {})).toBe(null);
 });
 
 test("the body is plain and short", () => {

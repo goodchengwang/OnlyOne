@@ -14,24 +14,24 @@ export async function securityReport(cfg: Cfg, host: string, primary: boolean): 
   const add = (level: Finding["level"], area: Finding["area"], text: string) => out.push({ level, area, text });
   const url = String(cfg.cloud?.url ?? "").replace(/\/$/, "");
   const token = String(cfg.server?.token ?? "");
-  let live: number | null | undefined; // entries in the Worker's HUB_ALLOW_IPS (null: off; undefined: Worker didn't say)
+  let live: number | null | undefined; // entries in the Worker's ONLYONE_ALLOW_IPS (null: off; undefined: Worker didn't say)
 
   // ---- the Worker (the owner's own Cloudflare deployment)
   if (!url) add("warn", "Worker", L("[cloud] url is not configured: no cloud deployment to check", "没有配置 [cloud] url：没有云端部署可查"));
   else {
     const call = (path: string) => fetch(`${url}${path}`, { headers: { Authorization: `Bearer ${token}`, "x-onlyone-host": host } });
-    const tf = await call("/api/host/2fa").catch((e) => e as Error);
+    const tf = await call("/api/host/security").catch((e) => e as Error);
     if (tf instanceof Error) add("bad", "Worker", L(`Cannot reach ${url}: ${tf.message}`, `连不上 ${url}：${tf.message}`));
     else if (tf.status === 403 && (await tf.clone().json().catch(() => ({})) as { error?: string }).error === "ip_blocked") {
       const { ip } = await tf.json().catch(() => ({})) as { ip?: string };
-      add("bad", "Worker", L(`This machine's public IP is blocked by HUB_ALLOW_IPS: ${ip}`, `本机出口 IP 被 HUB_ALLOW_IPS 挡住了：${ip}`));
-    } else if (tf.status === 404) add("bad", "Worker", L("The Worker runs old code (no 2FA): run onlyone cloud deploy", "Worker 运行的是旧代码（没有两步验证）：运行 onlyone cloud deploy"));
-    else if (tf.status === 401) add("bad", "Worker", L("The Worker rejected the machine key (401): this machine's [server] token does not match the Worker's HUB_TOKEN", "机器密钥被 Worker 拒绝（401）：本机的 [server] token 和 Worker 的 HUB_TOKEN 不一致"));
-    else if (!tf.ok) add("bad", "Worker", L(`Checking 2FA failed: HTTP ${tf.status}`, `查询两步验证失败：HTTP ${tf.status}`));
+      add("bad", "Worker", L(`This machine's public IP is blocked by ONLYONE_ALLOW_IPS: ${ip}`, `本机出口 IP 被 ONLYONE_ALLOW_IPS 挡住了：${ip}`));
+    } else if (tf.status === 404) add("bad", "Worker", L("The Worker runs old code (no email login status): run onlyone cloud deploy", "Worker 运行的是旧代码（没有邮箱登录状态）：运行 onlyone cloud deploy"));
+    else if (tf.status === 401) add("bad", "Worker", L("The Worker rejected the machine key (401): this machine's [server] token does not match the Worker's ONLYONE_TOKEN", "机器密钥被 Worker 拒绝（401）：本机的 [server] token 和 Worker 的 ONLYONE_TOKEN 不一致"));
+    else if (!tf.ok) add("bad", "Worker", L(`Checking email login failed: HTTP ${tf.status}`, `查询邮箱登录失败：HTTP ${tf.status}`));
     else {
-      const d = (await tf.json()) as { bound: boolean; since: number | null; allow_ips?: number | null };
+      const d = (await tf.json()) as { login: string; mail: boolean; owners: string[]; allow_ips?: number | null };
       live = d.allow_ips;
-      add(d.bound ? "ok" : "bad", "Worker", d.bound ? L(`2FA is bound (${new Date(d.since ?? 0).toISOString().slice(0, 10)})`, `两步验证已绑定（${new Date(d.since ?? 0).toISOString().slice(0, 10)}）`) : L("2FA is not bound: nobody can log in. Run onlyone 2fa setup", "两步验证还没绑定：任何人都无法登录。运行 onlyone 2fa setup"));
+      add(d.mail && d.owners.length > 0 ? "ok" : "bad", "Worker", d.mail && d.owners.length > 0 ? L("Owner email-code login is configured", "已配置所有者邮箱验证码登录") : L("Owner email or mail delivery is missing", "未配置所有者邮箱或发信服务"));
       const rows = async (table: string) => {
         const r = await call(`/api/host/export?table=${table}&after=0&limit=200`).catch(() => null);
         return r?.ok ? ((await r.json()) as { rows: Record<string, any>[] }).rows : null;

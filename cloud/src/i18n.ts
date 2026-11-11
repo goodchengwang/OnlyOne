@@ -1,4 +1,4 @@
-// The Worker's text language: HUB_LANG (copied from [owner] language by `onlyone cloud deploy`); "en" gives English,
+// The Worker's text language: ONLYONE_LANG (copied from [owner] language by `onlyone cloud deploy`); "en" gives English,
 // anything else Simplified Chinese. The env never changes within an isolate, so setting it per entry point is safe.
 let en = false;
 export const setLang = (lang?: string) => { en = /^en/i.test(lang ?? ""); };

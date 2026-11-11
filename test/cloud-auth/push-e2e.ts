@@ -1,8 +1,8 @@
-// Local Web Push e2e against `wrangler dev` (needs HUB_VAPID_* vars + fake-smtp.ts running; see scenario.ts).
+// Local Web Push e2e against standalone.toml with ONLYONE_VAPID_* test vars.
 // Starts a fake push service on 127.0.0.1:2626 that checks the VAPID JWT and decrypts the aes128gcm body like a browser.
-import { readdirSync, readFileSync } from "node:fs";
+import { capturedCode } from "./mail";
 import { b64u, unb64u } from "../../cloud/src/push";
-const BASE = process.env.BASE ?? "http://localhost:8799", TOKEN = process.env.TOKEN ?? "machinetok", OUT = process.env.OUT!, VAPID_PUB = process.env.VAPID_PUB!;
+const BASE = process.env.BASE ?? "http://localhost:8799", TOKEN = process.env.TOKEN ?? "machinetok", VAPID_PUB = process.env.VAPID_PUB!;
 let fail = 0;
 const ok = (c: boolean, m: string) => { console.log(`${c ? "✓" : "✗"} ${m}`); if (!c) fail++; };
 const te = new TextEncoder(), cat = (...a: Uint8Array[]) => { const o = new Uint8Array(a.reduce((n, x) => n + x.length, 0)); let i = 0; for (const x of a) { o.set(x, i); i += x.length; } return o; };
@@ -39,8 +39,7 @@ const M = { authorization: `Bearer ${TOKEN}` };
 
 // login as owner (email code)
 await post("/api/auth/start", { email: "owner@example.com" }, {}); await wait();
-const mail = readFileSync(`${OUT}/${readdirSync(OUT).sort((a, b) => parseInt(a) - parseInt(b)).at(-1)}`, "utf8");
-const code = Buffer.from(mail.match(/Subject: =\?UTF-8\?B\?(\S+)\?=/)![1], "base64").toString().match(/\d{6}/)![0];
+const code = await capturedCode(BASE, TOKEN);
 const { session } = (await (await post("/api/auth/verify", { email: "owner@example.com", code }, {})).json()) as any;
 const S = { authorization: `Bearer ${session}` };
 ok(!!session, "owner session");
@@ -66,10 +65,10 @@ ok(d?.payload.kind === "decision" && d.payload.ref === "D-1" && d.payload.url ==
 ok(d?.payload.options.length === 3 && d.payload.body.length <= 140 && !d.payload.body.includes("**"), `options ≤3, plain body ≤140 (${d?.payload.body.length})`);
 
 got.length = 0;
-for (const e of [{ kind: "system", from: "hub", text: "s" }, { kind: "owner", from: "owner", text: "o" }, { kind: "notice", from: "hub@box", text: "n" }])
+for (const e of [{ kind: "system", from: "onlyone", text: "s" }, { kind: "owner", from: "owner", text: "o" }, { kind: "notice", from: "onlyone@box", text: "n" }])
   await post("/api/events", e, M);
 await wait();
-ok(got.length === 0, "system / owner / hub notice → no push");
+ok(got.length === 0, "system / owner / onlyone notice → no push");
 await post("/api/events", { kind: "notice", from: "lead@box", text: "done", ref: "T-1" }, M); await wait();
 ok(got.length === 1 && got[0].h.get("urgency") === "normal", "agent notice → push (normal urgency)");
 
@@ -84,7 +83,7 @@ await post("/api/events", { kind: "proposals", from: "lead@box", text: "p", ref:
 await wait();
 ok(got.length === 0, `quiet hours (${quiet} UTC) + notice off → nothing`);
 await post("/api/events", { kind: "decision", from: "lead@box", text: "urgent", ref: "D-4", priority: "urgent" }, M);
-await post("/api/events", { kind: "login", from: "hub", text: "new login" }, M);
+await post("/api/events", { kind: "login", from: "onlyone", text: "new login" }, M);
 await wait();
 ok(got.map((g) => g.payload.kind).sort().join() === "decision,login", `quiet hours let through: ${got.map((g) => g.payload.kind)}`);
 

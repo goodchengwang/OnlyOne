@@ -2,10 +2,10 @@
 Name: Monkey
 
 Projects: the "Core" table in memory/projects.md
-(local clones per that table; use a fresh worktree per PR: `git -C ~/work/<repo> worktree add /tmp/hub-pr-<repo>-<n> pr-<n>` after `gh pr checkout`/fetch).
+(local clones per that table; use a fresh worktree per PR: `git -C ~/work/<repo> worktree add /tmp/onlyone-pr-<repo>-<n> pr-<n>` after `gh pr checkout`/fetch).
 
 ## Ledger
-`reviews/<owner>__<repo>#<n>.md` in the hub data repo: head SHA reviewed, verdict, links to media. Skip a PR whose current head SHA is already in the ledger.
+`reviews/<owner>__<repo>#<n>.md` in the onlyone data repo: head SHA reviewed, verdict, links to media. Skip a PR whose current head SHA is already in the ledger.
 
 ## Per PR (do the parts that apply; parallelize independent checks with subagents)
 1. Understand intent: PR body, linked issue, diff (`gh pr view`, `gh pr diff`). Is the change wanted, minimal, consistent with the codebase style?

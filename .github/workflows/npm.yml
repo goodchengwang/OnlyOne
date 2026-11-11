@@ -1,0 +1,81 @@
+name: npm CLI
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - npm/**
+      - src/**
+      - cloud/src/**
+      - scripts/package-npm.ts
+      - scripts/test-npm-install.mjs
+      - scripts/test-npm-service.mjs
+      - test/npm-*.test.ts
+      - .github/workflows/npm.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { platform: linux-x64, runner: ubuntu-24.04 }
+          - { platform: linux-arm64, runner: ubuntu-24.04-arm }
+          - { platform: darwin-x64, runner: macos-15-intel }
+          - { platform: darwin-arm64, runner: macos-15 }
+          - { platform: win32-x64, runner: windows-latest }
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: bun install --frozen-lockfile
+      - run: bunx tsc --noEmit
+      - run: bun test test/npm-setup.test.ts test/npm-runtime.test.ts
+      - name: Build native package
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          version=0.1.1
+          if [ "$GITHUB_REF_TYPE" = tag ]; then version="${GITHUB_REF_NAME#v}"; fi
+          bun scripts/package-npm.ts "$version" dist/npm "$PLATFORM"
+      - run: node scripts/test-npm-install.mjs dist/npm
+      - run: node scripts/test-npm-service.mjs dist/npm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm-${{ matrix.platform }}
+          path: dist/npm/
+          if-no-files-found: error
+  publish:
+    if: github.ref_type == 'tag'
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: npm-*
+          path: dist/npm
+          merge-multiple: true
+      # Configure npm trusted publishing for all six package names, or supply NPM_TOKEN.
+      - name: Publish platform packages, then the main package
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for package in dist/npm/onlyone-*; do
+            (cd "$package" && npm publish --access public --provenance)
+          done
+          (cd dist/npm/onlyonecli && npm publish --access public --provenance)

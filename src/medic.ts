@@ -6,6 +6,7 @@ import { $ } from "bun";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { arch, homedir, platform, release } from "node:os";
 import { join } from "node:path";
+import { CLI_VERSION, npmBuild } from "./release";
 import { type Cfg, CODE, L, DATA, hostName, HOME_DIR } from "./core";
 
 const STATE = join(HOME_DIR, "medic.json");
@@ -19,6 +20,13 @@ async function sh(cmd: string) {
 }
 
 async function context(): Promise<string> {
+  if (npmBuild) return [
+    `OS: ${platform()} ${release()} ${arch()} · host ${hostName({})}`,
+    `npm OnlyOne ${CLI_VERSION} · executable ${process.execPath} · private runtime ${join(HOME_DIR, "cli")}`,
+    `data: ${DATA} · sync ${await (await import("./sync")).syncStatus().catch(String)}`,
+    `tools: ${["node", "npm", "gh", "claude", "codex"].map(c => `${c}=${Bun.which(c) || "missing"}`).join(" ")}`,
+    `service log tail:\n${tail(join(HOME_DIR, "cli", "daemon.log"))}`,
+  ].join("\n");
   const svc = platform() === "linux" ? await sh("journalctl --user -u onlyone -n 80 --no-pager 2>&1")
     : platform() === "darwin" ? tail(join(DATA, "logs", "daemon.log")) : "";
   return [
@@ -31,7 +39,13 @@ async function context(): Promise<string> {
   ].join("\n");
 }
 
-const PROMPT = (problem: string, ctx: string, canPush: boolean) => `You are the OnlyOne MEDIC on this machine. Something is broken; fix it.
+const PROMPT = (problem: string, ctx: string, canPush: boolean) => npmBuild ? `You are the OnlyOne MEDIC. Diagnose this npm installation.
+Problem: ${problem}
+Environment: ${ctx}
+Read logs, inspect dependencies and service status, repair per-machine configuration, or rerun onlyone install. Use onlyone update for framework updates.
+The executor is a compiled npm release: never edit its binaries, launcher, version pointers, or package contents. There is no source checkout here; do not run Git, bun install or bun test, and do not create a repair PR.
+Never delete fleet data, sync state or credentials, and never print secrets. If permissions or agent login require the owner, report the exact action needed.
+Verify the failing operation and service readiness. End with one json fenced block: {"fixed":true|false,"summary":"...","owner_action":"command or empty","pr":""}` : `You are the OnlyOne MEDIC on this machine. Something is broken; fix it.
 
 ## Problem
 ${problem}
@@ -52,7 +66,7 @@ End with one \`\`\`json block: {"fixed": true|false, "summary": "...", "owner_ac
 
 /** Run the medic. `auto` = triggered by a failure (rate-limited to once per hour per problem kind). */
 export async function medic(problem: string, cfg: Cfg, opts: { auto?: boolean; kind?: string } = {}) {
-  if (process.env.HUB_NO_MEDIC || cfg.medic?.enabled === false) return null;
+  if (process.env.ONLYONE_NO_MEDIC || cfg.medic?.enabled === false) return null;
   const state: Record<string, string> = existsSync(STATE) ? JSON.parse(readFileSync(STATE, "utf8")) : {};
   const kind = opts.kind ?? "manual";
   if (opts.auto && state[kind] && Date.now() - Date.parse(state[kind]) < 60 * 60_000) return null;
@@ -67,7 +81,7 @@ export async function medic(problem: string, cfg: Cfg, opts: { auto?: boolean; k
     ? ["claude", "-p", "--output-format", "text", "--permission-mode", "bypassPermissions", "--disallowedTools", "Bash(git push --force:*)", "Bash(git push -f:*)", "Bash(rm -rf /:*)", "Bash(rm -rf ~:*)"]
     : ["codex", "exec", "--skip-git-repo-check", "--approve-for-me", "-c", "sandbox_workspace_write.network_access=true", "-"];
   console.error(`🩺 medic (${cli}) is looking at: ${problem.split("\n")[0].slice(0, 120)}`);
-  const p = Bun.spawn(cmd, { cwd: CODE, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe", env: { ...process.env, HUB_NO_MEDIC: "1" } });
+  const p = Bun.spawn(cmd, { cwd: CODE, stdin: new Blob([prompt]), stdout: "pipe", stderr: "pipe", env: { ...process.env, ONLYONE_NO_MEDIC: "1" } });
   const timer = setTimeout(() => p.kill(), (cfg.medic?.timeout_minutes ?? 30) * 60_000);
   const out = await new Response(p.stdout).text();
   await p.exited; clearTimeout(timer);

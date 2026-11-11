@@ -11,7 +11,7 @@ import { appendOnly } from "../src/sync";
 
 const args = process.argv.slice(2);
 const dry = args.includes("--dry-run"), keepBoth = args.includes("--keep-both");
-const dir = args.find((a) => !a.startsWith("--")) ?? process.env.HUB_DATA ?? join(homedir(), ".onlyone", "data");
+const dir = args.find((a) => !a.startsWith("--")) ?? process.env.ONLYONE_DATA_DIR ?? join(homedir(), ".onlyone", "data");
 
 const START = /^<{7}( |$)/, MID = /^={7}$/, END = /^>{7}( |$)/;
 

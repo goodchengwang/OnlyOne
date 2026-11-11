@@ -2,7 +2,7 @@
 const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
 
 /**
- * The offsets of the newlines hub text must keep plain because of a GFM table: the ones ending its lines (a header
+ * The offsets of the newlines onlyone text must keep plain because of a GFM table: the ones ending its lines (a header
  * row and a delimiter row, both with a pipe, then the rows up to the first blank line) and the one before its header,
  * which a table interrupts the paragraph at.
  */
@@ -22,8 +22,8 @@ function tableNewlines(text: string): Set<number> {
   return keep;
 }
 
-/** Hub text keeps its line breaks: single newlines become hard breaks, outside code fences and tables. */
-export function hubMarkdown(text: string): string {
+/** OnlyOne text keeps its line breaks: single newlines become hard breaks, outside code fences and tables. */
+export function onlyoneMarkdown(text: string): string {
   return text
     .split(/(^```[\s\S]*?^```)/m)
     .map((part, i) => {
