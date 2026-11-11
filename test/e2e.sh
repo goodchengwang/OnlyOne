@@ -7,7 +7,7 @@ SRC=$(cd "$(dirname "$0")/.." && pwd)
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 export ONLYONE_HOME="$W" ONLYONE_DATA_DIR="$W/data" ONLYONE_HOST=pc ONLYONE_SYNC_FAKE="$W/worker.sqlite"
 cd "$SRC"; onlyone() { bun "$SRC/src/cli.ts" "$@"; }
-onlyone init --primary >/dev/null
+onlyone init https://onlyone.test --token pc-token >/dev/null  # offline: ONLYONE_SYNC_FAKE, the first machine seeds the fake cloud
 cd "$W/data"
 cat > "$W/fake-agent" <<'F'
 #!/usr/bin/env bash
@@ -85,7 +85,7 @@ tick_until "grep -qs 'Results from delegated subtasks' tasks/done/$SPL.md"
 grep -q "Results from delegated subtasks" tasks/done/$SPL.md
 ! grep -l "parent: $SPL" tasks/proposed/*.md 2>/dev/null
 # a second host joins and mirrors the same data
-ONLYONE_HOME="$W/w2" ONLYONE_DATA_DIR="$W/w2/data" ONLYONE_HOST=w2 bun "$SRC/src/cli.ts" init --worker http://unused --token x >/dev/null
+ONLYONE_HOME="$W/w2" ONLYONE_DATA_DIR="$W/w2/data" ONLYONE_HOST=w2 bun "$SRC/src/cli.ts" init https://onlyone.test --token w2-token >/dev/null
 cmp tasks/done/T-0001.md "$W/w2/data/tasks/done/T-0001.md"
 test ! -e "$W/w2/data/config.local.toml.pc" && ! grep -q fake-agent "$W/w2/data/config.local.toml"
 echo "E2E OK"; cat journal/*.md

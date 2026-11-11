@@ -53,7 +53,8 @@ async function joinViaLogin(url: string, host: string, ask = setupQuestion): Pro
   return String(j.json.token);
 }
 
-/** Join a deployed cloud. Re-running init keeps the fixed coordinator and existing mirror. */
+/** Join a deployed cloud. Re-running init keeps the fixed coordinator and existing mirror.
+ *  With ONLYONE_SYNC_FAKE the files API runs in-process: the first machine seeds the templates. */
 export async function init(opts: { worker?: string; token?: string; ask?: typeof setupQuestion } = {}) {
   const { pull, readOnlyOneToml, writeOnlyOneToml, setSyncData } = await import("./sync");
   const me = process.env.ONLYONE_HOST || hostname().split(".")[0];
@@ -62,13 +63,16 @@ export async function init(opts: { worker?: string; token?: string; ask?: typeof
   if (saved.server?.token && saved.cloud?.url !== url) throw new Error("This home belongs to a different installation. Use an empty ONLYONE_HOME.");
   if (opts.token && saved.server?.token && opts.token !== saved.server.token) throw new Error("This home already has a different machine credential. Use an empty ONLYONE_HOME.");
   let token = opts.token ?? (url === saved.cloud?.url ? saved.server?.token : undefined);
-  if (token) {
+  // offline tests run the files API in-process over SQLite (ONLYONE_SYNC_FAKE): no HTTP to probe
+  const offline = !!process.env.ONLYONE_SYNC_FAKE;
+  if (token && !offline) {
     const response = await fetch(url + "/api/host/security", { headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(30_000) }).catch(() => null);
     if (!response) { console.error("Could not reach cloud; local data was kept"); process.exitCode = 1; return; }
     if (!response.ok || !(await response.json() as { primary?: string }).primary) {
       console.error(`Stored machine credential was rejected (${response.status}); local data was kept. Check this device in your Worker before signing in again.`); process.exitCode = 1; return;
     }
   }
+  if (offline && !token) { console.error("ONLYONE_SYNC_FAKE cannot sign in: pass a machine token with --token"); process.exitCode = 1; return; }
   token ??= await joinViaLogin(url, me, opts.ask);
   if (!token) { process.exitCode = 1; return; }
   if (saved.server?.token && (token !== saved.server.token || url !== saved.cloud?.url)) {
@@ -81,7 +85,14 @@ export async function init(opts: { worker?: string; token?: string; ask?: typeof
   writeOnlyOneToml({ cloud: { url }, server: { token } });
   setSyncData(DATA, HOME_DIR);
   if (!(await pull())) { console.error(`Could not sync from ${url}`); process.exitCode = 1; return; }
-  if (!existsSync(P("config.toml"))) { console.error("Cloud has no initial config; rerun bun run deploy:cloud"); process.exitCode = 1; return; }
+  if (!existsSync(P("config.toml"))) {
+    if (!offline) { console.error("Cloud has no initial config; rerun bun run deploy:cloud"); process.exitCode = 1; return; }
+    // offline: the fake cloud starts empty, so the first machine seeds the templates and claims the coordinator
+    seedTemplates();
+    writeFileSync(P("config.toml"), readFileSync(P("config.toml"), "utf8").replace('primary = "__PRIMARY__"', `primary = "${me}"`));
+    const { commitPush } = await import("./core");
+    if (!(await commitPush("[init] seed the templates"))) { console.error("Could not push the templates to the fake cloud"); process.exitCode = 1; return; }
+  }
   for (const d of STATE_DIRS) mkdirSync(P(d), { recursive: true });
   writeLocalConfig(me);
   console.log(`✔ joined ${url}; data mirrored to ${DATA}\n  next: onlyone install (runs the daemon as a service)`);
