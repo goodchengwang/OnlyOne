@@ -1,0 +1,176 @@
+# Shared fleet config (committed). Per-machine overrides & secrets → config.local.toml (gitignored).
+
+[owner]
+name = "Your Name"
+github = "your-github"
+
+[fleet]
+max_followup_depth = 4                # stop runaway follow-up chains
+primary = "__PRIMARY__"            # always-on Linux PC: runs routines, judge, Slack/Discord polling, reaping
+offline_after_minutes = 8             # no heartbeat for this long → host considered offline (at least 8: heartbeats go up every ~5 min)
+reap_after_minutes = 20               # active task on an offline host → requeued
+prefer_wait_minutes = 10              # soft 'prefer' waits at most this long for an online preferred host
+
+[update]
+check_minutes = 30                    # check an explicitly configured Git origin (git ff + bun test, auto-rollback)
+
+[host]
+tick_seconds = 60
+# max_parallel = 8                    # concurrent agents; default = cores/3 (min 2), then throttled by the resource governor
+caps = []                             # extra capability tags, e.g. ["gpu", "docker", "home-lan"]
+
+[resources]
+work_dirs = ["~/work"]                # where repo target/ and node_modules/ live
+disk_min_gb = 30                      # below this → tiered cleanup
+disk_min_pct = 10
+disk_hard_min_gb = 5                  # below this → stop starting new agents
+mem_min_pct = 10
+load_mid = 0.7                        # load/cores ratio → halve parallelism
+load_high = 0.9                       # → stop adding agents
+heavy_max_load = 0.5                  # heavy tasks (bench/full build) start only below this
+stale_repo_days = 7                   # target/ of repos (and, on macOS, Xcode DerivedData / ccache entries) untouched this long may be removed
+
+[clis]
+# Claude Opus = challenging work (development, debugging, architecture, UI, judge, learning, evolution).
+# Codex (ChatGPT) = routine work; these agents use Codex first and fall back to Claude. Tasks marked
+# difficulty = "hard" or weight = "heavy" always go to Claude.
+routine_agents = ["dispatcher", "ops-watcher", "reporter", "oss-triage", "reviewer", "chief-of-staff"]
+# per-agent override, e.g.  [clis.agents]  reviewer = ["codex", "claude"]
+timeout_minutes = 90
+[clis.claude]
+permission_mode = "bypassPermissions" # hard gates still apply via --disallowedTools (src/gates.ts)
+model = "claude-opus-5-5"
+[clis.codex]
+# model = "gpt-5.5-codex"
+
+[autonomy]
+level = "onboarding"                  # onboarding → assisted → autonomous. Only the owner changes this
+                                      # (the architect proposes graduation from metrics: shadow-judge accuracy, approval rate).
+batch_minutes = 15                    # onboarding: self-generated tasks are batched into one approval message (P-xxxx)
+renotify_hours = 3                    # an unanswered batch is rebuilt (stale/new items) at most this often
+# auto_routines = ["uptime-watch"]    # extra read-only routines that skip approval (same as readonly = true)
+
+[idle]
+enabled = true
+after_minutes = 20                    # queue empty this long → Chief of Staff sends you a numbered menu
+cooldown_minutes = 180                # re-offer an unanswered menu after this
+quiet_hours = "23:30-08:30"           # no menus at night (tasks keep running)
+
+# ------------------------------------------------------------------ AI accounts (put these in config.local.toml per machine)
+# Multiple accounts rotate automatically: usage limit → cooldown + next account; expired login → link sent to you.
+# [[accounts]]
+# cli = "claude"
+# name = "work"          # isolated CLAUDE_CONFIG_DIR at ~/.onlyone/accounts/claude-work
+# [[accounts]]
+# cli = "claude"
+# name = "personal"
+# [[accounts]]
+# cli = "codex"
+# name = "chatgpt-pro"   # isolated CODEX_HOME
+
+[medic]                               # AI self-repair (onlyone fix; auto on install/update/daemon failures)
+enabled = true
+push = true                           # framework fixes → branch + PR on the OnlyOne repo
+timeout_minutes = 30
+
+[judge]
+enabled = true
+cli = "claude"
+model = "claude-opus-5-5"
+
+[tunnel]                              # Cloudflare Tunnel → public HTTPS for the client, no LAN/VPN needed
+mode = "quick"                        # quick (no account, URL changes on restart) | named (stable: `cloudflared tunnel login` once) | off
+# name = "onlyone"
+# hostname = "hub.example.com"
+
+[server]                              # runs on the primary; chat API for the NSH client + built-in web chat
+enabled = true
+port = 8787
+host = "0.0.0.0"                      # reach it via Tailscale (MagicDNS name = hostname)
+# token = "__TOKEN__"
+# url = "__URL__"
+# public_url = "https://<primary>.tailnet.ts.net/" # link used in phone push
+
+[notify]
+on_failure = true
+# ntfy_url = "http://<primary>:2586/onlyone"   # optional phone push (self-hosted ntfy or ntfy.sh topic)
+# Put tokens in config.local.toml or env (HUB_SLACK_BOT_TOKEN / HUB_DISCORD_BOT_TOKEN ...)
+# slack_channel = "C0123456"
+# discord_channel = "123456789012345678"
+# slack_owner_user_id = "U0123"       # only accept decision replies from you
+# discord_owner_user_id = "1234"
+
+[gates]
+extra = []                            # more Claude Code tool patterns to hard-block, e.g. "Bash(kubectl delete:*)"; an owner decision does not unlock these
+
+# ------------------------------------------------------------------ routines (signal → task generators)
+# every: "15m" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM"
+# More examples (PR review, CI, uptime, nightly builds): presets/routines.toml in the OnlyOne code.
+# requires = hard capability (task waits for such a host) ; prefer = soft (falls back to anyone)
+
+[[routine]]
+name = "workflow-coach"
+every = "weekdays 10:00"
+agent = "chief-of-staff"
+prompt = """Workflow coach for a new OnlyOne owner. OnlyOne ships with only a small, general team; your job is to help the owner
+build, step by step, the routines and members that fit THEIR role (any job, not only engineering). Plain words, no jargon.
+1. Read memory/owner.md, memory/focus.md, the last week's journal and tasks, and agents/*/profile.md + config.toml routines.
+   If memory/owner.md still has blanks (role, what a normal week looks like, recurring chores, tools they use), ask about the
+   most important missing one or two first, as numbered options plus "other: tell me".
+2. Otherwise suggest ONE next step that would save the owner real time, based on what they actually asked for recently:
+   a recurring task to add (what, how often, what they get), a member to add (pick from the presets/agents/ library of the
+   OnlyOne code or write a new profile), or an existing default to change or turn off. Use needs_decision with 2-3 options,
+   recommendation first, and "not now".
+3. When the owner agrees, make the change yourself (config.toml [[routine]], agents/<id>/profile.md, memory/owner.md) and
+   say in one line what was added. Never repeat a suggestion the owner declined.
+4. When the owner says the setup fits, or nothing useful is left to add, say so and suggest turning this routine off in Settings."""
+
+[[routine]]
+name = "daily-report"
+every = "weekdays 19:00"
+agent = "reporter"
+prompt = "Write today's short daily report to reports/daily/<date>.md from the journal and finished tasks. Send a 5-line summary notification."
+
+[[routine]]
+name = "weekly-report"
+every = "weekly FRI 17:00"
+agent = "reporter"
+prompt = "Draft this week's report from the journal, finished tasks and reports/daily, in the format the owner set in memory/projects.md (if any). Ask before submitting anywhere official."
+
+[[routine]]
+name = "focus-check"
+readonly = true                       # only observes: runs without approval; changes come back as gated followups
+every = "weekly MON 09:30"
+agent = "chief-of-staff"
+prompt = "Weekly focus check. Read memory/focus.md and last week's journal/reports. Return needs_decision with a numbered list: current focus items to KEEP / likely-finished items to DROP / newly observed items to ADD (each with evidence). After the owner answers, rewrite memory/focus.md (dated) accordingly."
+
+[[routine]]
+name = "learn-ceo"
+kind = "learn"                        # runs on EVERY host over its local Claude/Codex history (incremental)
+every = "daily 04:00"
+
+[[routine]]
+name = "evolve"
+every = "daily 03:30"
+agent = "architect"
+prompt = "Run your evolve loop (see profile) on the last 7 days. fleet/metrics.json was just refreshed."
+
+[[routine]]
+name = "evolve-deep"
+every = "weekly SUN 21:00"
+agent = "architect"
+weight = "heavy"
+prompt = "Deep weekly evolution: 30-day window. Re-read every agent profile and policy end to end; rewrite for clarity and remove obsolete rules (Tier 2 for removals). Propose new agents for recurring uncovered work and any framework PR."
+
+[email]                               # Used for: owner login codes on the cloud client (`to` = who may log in,
+                                      # comma-separated) and the token-changed notice. `onlyone cloud deploy` copies this
+                                      # section into Worker secrets — rerun it after edits.
+                                      # No SMTP: set only `to` + `from` (an address on a Cloudflare domain with Email
+                                      # Routing on; `to` must be a verified destination) → HUB_MAIL_FROM.
+                                      # SMTP: also set host/user/pass → HUB_SMTP. Port 465 = implicit TLS, 587 = STARTTLS.
+# to = "you@example.com"
+# host = "smtp.example.com"
+# port = 465
+# user = ""
+# pass = ""                           # put in the private data repo only
+# from = "OnlyOne <hub@example.com>"

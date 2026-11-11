@@ -1,0 +1,49 @@
+{
+  "name": "OnlyOne",
+  "id": "dev.onlyone.app",
+  "version": "0.1.0",
+  "build": 1,
+  "appearance": "system",
+  "theme": "theme.json",
+  "web": {
+    "host": "./host.js"
+  },
+  "capabilities": {
+    "clipboard": true,
+    "statusBar": true,
+    "network": {
+      "hosts": [
+        "*"
+      ]
+    },
+    "host": [
+      "page",
+      "pushState",
+      "pushEnable",
+      "pushDisable",
+      "setSession",
+      "setBadge",
+      "clearNotifications",
+      "vibrate",
+      "speechState",
+      "speechStart",
+      "speechStop",
+      "speechAbort"
+    ],
+    "picker": true,
+    "speech": true,
+    "notifications": true,
+    "fs": {
+      "read": [
+        "${homeDir}"
+      ]
+    },
+    "openUrl": {
+      "schemes": [
+        "https",
+        "mailto"
+      ]
+    }
+  },
+  "icon": "icon.png"
+}
