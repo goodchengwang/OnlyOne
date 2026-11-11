@@ -207,7 +207,7 @@ let lastCleanup = 0;
 /** Runs tiered cleanup until disk is back above target. Returns a human summary or null if nothing needed. */
 export async function ensureDisk(cfg: Cfg, host: string, busyRepos: Set<string>, alert: (t: string) => Promise<unknown>) {
   const r = cfg.resources ?? {};
-  const low = (s: Stats) => s.diskFreeGB < (r.disk_min_gb ?? 30) || s.diskFreePct < (r.disk_min_pct ?? 10);
+  const low = (s: Stats) => s.diskFreeGB < (r.disk_min_gb ?? 10) || s.diskFreePct < (r.disk_min_pct ?? 10);
   let s = sample(cfg);
   if (!low(s) || Date.now() - lastCleanup < 30 * 60_000) return null;
   lastCleanup = Date.now();
