@@ -30,7 +30,14 @@ Keep fixes focused on the existing behavior. A bug fix, security fix, or perform
 For the Mac app, run `nsh run app` from the repository root. UI changes hot reload. Sign in with the server address
 and email code: the app binds this Mac to that cloud and starts the executor through launchd, using this checkout
 and the installed Bun. No manual `init` or background-service installation is required. Other platforms remain
-management clients. Closing the app leaves the executor running; signing out drains its work and disables it.
+management clients. Opening either the development or packaged Mac app selects its executor automatically: the
+old executor stops accepting work, finishes its running tasks, then the matching service is loaded. Opening the same
+version again reuses it. Settings → Version has a local background-service start/stop button; stopping also waits
+for running tasks without signing out. Closing the app leaves the executor running; signing out drains its work and disables it.
+Service status and unchanged-version opens make zero Worker requests. The budget reserves two user-triggered
+switches or stop/start cycles per machine/day: 96 requests and 192 indexed row writes across three Macs
+(16 requests / 32 indexed rows per idle lifecycle change); task-result writes retain their existing budget.
+There is no new unattended polling or cloud timer.
 Executor logs are `~/.onlyone/app/<origin-hash>/executor.log`; its private configuration and data are beside that log.
 The source executor also watches its code: valid saves in `src/` and shared `cloud/src/` dependencies trigger a
 graceful restart automatically, without the daemon's minute-long tick delay. Saves are debounced; unchanged builds

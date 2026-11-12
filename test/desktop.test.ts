@@ -119,12 +119,12 @@ test.skipIf(!hasLaunchd)(`launchd reuses, reloads and stops the ${source ? "sour
   writeFileSync(join(binding.home, "onlyone.toml"), `[cloud]\nurl = ${JSON.stringify(binding.url)}\n[server]\ntoken = "test-machine"\n`);
   writeFileSync(join(binding.home, "data/config.toml"), "[fleet]\nprimary = \"test\"\n");
   writeFileSync(stub, `#!${process.execPath}
-    import { writeFileSync, appendFileSync } from "node:fs";
+    import { writeFileSync, appendFileSync, existsSync } from "node:fs";
     const root = process.env.ONLYONE_HOME;
     appendFileSync(root + "/starts", process.pid + "\\n");
     const stop = () => {
       writeFileSync(root + "/stopping", "yes");
-      setTimeout(() => { writeFileSync(root + "/finished", "yes"); process.exit(0); }, 200);
+      setInterval(() => { if (!existsSync(root + "/hold")) { writeFileSync(root + "/finished", "yes"); process.exit(0); } }, 200);
     };
     process.on("SIGTERM", stop);
     if (${source}) {
@@ -135,11 +135,12 @@ test.skipIf(!hasLaunchd)(`launchd reuses, reloads and stops the ${source ? "sour
     setInterval(() => {}, 1000);
   `);
   chmodSync(stub, 0o700);
-  const invoke = async (action: string) => {
-    const code = `import { desktop } from ${JSON.stringify(join(import.meta.dir, "../src/desktop.ts"))}; await desktop(${JSON.stringify({ root, cli: source ? [process.execPath, stub] : [stub] })});`;
+  const invoke = async (action: string, useSource = source) => {
+    const code = `import { desktop } from ${JSON.stringify(join(import.meta.dir, "../src/desktop.ts"))}; await desktop(${JSON.stringify({ root, cli: useSource ? [process.execPath, stub] : [stub] })});`;
     const child = Bun.spawn([process.execPath, "-e", code], { stdin: new Blob([JSON.stringify({ action, url: binding.url, session: "" })]), stdout: "pipe", stderr: "pipe" });
-    const [exit, error] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+    const [exit, error, output] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]);
     expect({ exit, error }).toEqual({ exit: 0, error: "" });
+    return JSON.parse(output.trim().split("\n").at(-1)!);
   };
   try {
     await invoke("start");
@@ -178,13 +179,45 @@ test.skipIf(!hasLaunchd)(`launchd reuses, reloads and stops the ${source ? "sour
       appendFileSync(stub, "\n// updated runtime\n");
       await invoke("start");
       expect(readFileSync(runtime, "utf8")).toContain("updated runtime");
-      expect(readFileSync(join(binding.home, "restart-requested"), "utf8")).toContain("force");
+      expect(readFileSync(join(binding.home, "starts"), "utf8").trim().split("\n")).toHaveLength(starts + 2);
     }
+    for (const useSource of [!source, source]) {
+      const old = readFileSync(join(binding.home, "service-ready"), "utf8");
+      rmSync(join(binding.home, "finished"), { force: true });
+      rmSync(join(binding.home, "stopping"), { force: true });
+      writeFileSync(join(binding.home, "hold"), "task in progress");
+      let completed = false;
+      const switching = invoke("start", useSource).then((s) => { completed = true; return s; });
+      for (let n = 0; n < 100 && !existsSync(join(binding.home, "stopping")); n++) await Bun.sleep(20);
+      expect(existsSync(join(binding.home, "stopping"))).toBe(true);
+      expect(completed).toBe(false);
+      expect((await ctl("print", service)).stdout).toContain(`pid = ${old}`);
+      expect(existsSync(join(binding.home, "finished"))).toBe(false);
+      expect((await invoke("status")).stopping).toBe(true);
+      const queued = invoke("start", useSource);
+      rmSync(join(binding.home, "hold"));
+      expect(await switching).toEqual({ running: true, stopping: false, mode: useSource ? "development" : "release" });
+      await queued;
+      expect(existsSync(join(binding.home, "finished"))).toBe(true);
+      const next = readFileSync(join(binding.home, "service-ready"), "utf8");
+      expect(next).not.toBe(old);
+      await invoke("start", useSource);
+      expect(readFileSync(join(binding.home, "service-ready"), "utf8")).toBe(next);
+    }
+    writeFileSync(join(binding.home, "hold"), "long running task");
+    let stopped = false;
+    const stopping = invoke("stop").then((s) => { stopped = true; return s; });
+    await Bun.sleep(10_500); // task duration must not be mistaken for a ten-second readiness failure
+    expect(stopped).toBe(false);
+    expect(await invoke("status")).toMatchObject({ running: true, stopping: true });
+    rmSync(join(binding.home, "hold"));
+    expect(await stopping).toEqual({ running: false, stopping: false, mode: null });
+    expect(await invoke("status")).toEqual({ running: false, stopping: false, mode: null });
   } finally {
     await ctl("bootout", service);
     await ctl("enable", service);
     rmSync(join(homedir(), "Library/LaunchAgents", `${binding.label}.plist`), { force: true });
     rmSync(root, { recursive: true, force: true });
   }
-}, 30_000);
+}, 45_000);
 }

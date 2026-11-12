@@ -30,6 +30,9 @@ const ENROLL_REQUESTS = HOSTS.length * 6, ENROLL_ROWS = HOSTS.length * 100;
 // Validation/debouncing is local; reserve eight requests and 16 indexed rows for reconnect/state/usage per reload.
 // With no saves there are no reload requests, rows or cloud timers.
 const DEV_RELOADS = HOSTS.length * 8 * 10, DEV_REQUESTS = DEV_RELOADS * 8, DEV_ROWS = DEV_RELOADS * 16;
+// Two owner-requested version switches or stop/start cycles per Mac/day: conservatively allow 16 lifecycle/
+// reconnect requests and 32 indexed writes each. Status queries and opening an unchanged version stay local.
+const SERVICE_CHANGES = HOSTS.length * 2, SERVICE_REQUESTS = SERVICE_CHANGES * 16, SERVICE_ROWS = SERVICE_CHANGES * 32;
 // Three owner-created members/routines per day: each of three clients fetches the avatar and (if open) settings
 // once, plus one state push per change (2 rows). File traffic is measured below; no unattended requests/writes.
 const TEAM_REQUESTS = 3 * (3 + 3 + 1), TEAM_ROWS = 3 * 2;
@@ -107,8 +110,8 @@ test("a fleet day stays under the free-plan target", async () => {
     expect(await sync.commitPush(`owner routine daily-${i}`)).toBe(true);
     for (const h of HOSTS.slice(1)) { as(h); await sync.pull(); }
   }
-  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS + ENROLL_REQUESTS + DEV_REQUESTS + TEAM_REQUESTS;
-  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS + ENROLL_ROWS + DEV_ROWS + TEAM_ROWS;
+  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS + ENROLL_REQUESTS + DEV_REQUESTS + TEAM_REQUESTS + SERVICE_REQUESTS;
+  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS + ENROLL_ROWS + DEV_ROWS + TEAM_ROWS + SERVICE_ROWS;
   console.log(`fleet day: ${requests} requests (target ${TARGET.requests}), ~${rowsWritten} rows written (target ${TARGET.rowsWritten})`);
   expect(requests).toBeLessThanOrEqual(TARGET.requests);
   expect(rowsWritten).toBeLessThanOrEqual(TARGET.rowsWritten);

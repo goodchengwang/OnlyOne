@@ -45,7 +45,8 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
-import { executor } from "./executor";
+import { executor, hasExecutor, type DesktopStatus } from "./executor";
+import { ExecutorSettings, type ExecutorControl } from "./executor-settings";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf as memberAvatar } from "./avatars";
 import type { MemberView } from "../cloud/src/team";
@@ -2750,7 +2751,7 @@ const SETTINGS_TABS = () => [
 type SettingsTab = ReturnType<typeof SETTINGS_TABS>[number][0];
 
 /** The wide (desktop, tablet, wide browser) settings page. */
-function TeamSettings(props: { onlyone: OnlyOne; push: Push; settings: Settings; wide: boolean; onRules: () => void; onConnection: () => void; onDisconnect: () => void }) {
+function TeamSettings(props: { service: ExecutorControl; onlyone: OnlyOne; push: Push; settings: Settings; wide: boolean; onRules: () => void; onConnection: () => void; onDisconnect: () => void }) {
   const { view, error, save } = props.settings;
   props.settings.load();
   const eff = () => view()?.effective;
@@ -2893,6 +2894,7 @@ function TeamSettings(props: { onlyone: OnlyOne; push: Push; settings: Settings;
         </Group>
         </If>
         <If when={on("version")}>
+        <If when={hasExecutor}><ExecutorSettings service={props.service} /></If>
         <Group title={L("Version", "版本")} hint={L("CLI versions are reported by each machine; development builds show their Git commit. App and cloud updates are separate.", "CLI 版本以各台机器实际运行为准，开发版显示 Git 提交号。客户端与云端分别更新。")}>
           <VersionRows onlyone={props.onlyone} />
         </Group>
@@ -3292,7 +3294,7 @@ function SaveNote(props: { settings: Settings }) {
 const routineValue = (r: { enabled: boolean; every: string }) => (r.enabled ? everyLabel(r.every) : L("Off", "已关闭"));
 
 /** 设置 on a phone: a list of sections; 通知, each member and each routine push pages of their own. */
-function PhoneSettings(props: { onlyone: OnlyOne; push: Push; settings: Settings; onOpen: (r: Route) => void; onDisconnect: () => void }) {
+function PhoneSettings(props: { service: ExecutorControl; onlyone: OnlyOne; push: Push; settings: Settings; onOpen: (r: Route) => void; onDisconnect: () => void }) {
   const { view, error, save } = props.settings;
   props.settings.load();
   const notify = notifyModel(props.push, view, save);
@@ -3371,6 +3373,7 @@ function PhoneSettings(props: { onlyone: OnlyOne; push: Push; settings: Settings
       <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />
       </Section>
+      <If when={hasExecutor}><ExecutorSettings service={props.service} /></If>
       <Section title={L("Version", "版本")} hint={L("CLI versions are reported by each machine; development builds show their Git commit. App and cloud updates are separate.", "CLI 版本以各台机器实际运行为准，开发版显示 Git 提交号。客户端与云端分别更新。")}>
         <VersionRows onlyone={props.onlyone} />
       </Section>
@@ -3715,7 +3718,7 @@ type Route =
   | { name: "doc"; path: string };
 const CHANNEL: Route = { name: "channel" };
 
-function Chat(props: { onlyone: OnlyOne; openRef?: string | null; onConnection: () => void; onDisconnect: () => void; onTray?: (chat: TrayChat | null) => void }) {
+function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: string | null; onConnection: () => void; onDisconnect: () => void; onTray?: (chat: TrayChat | null) => void }) {
   const onlyone = props.onlyone;
   const settings = createSettings(onlyone);
   const push = createPush(onlyone, settings.toast.show);
@@ -4967,9 +4970,9 @@ function Chat(props: { onlyone: OnlyOne; openRef?: string | null; onConnection: 
         return (
           <If
             when={wide()}
-            else={<PhoneSettings onlyone={onlyone} push={push} settings={settings} onOpen={(x) => nav.push(x)} onDisconnect={props.onDisconnect} />}
+            else={<PhoneSettings service={props.service} onlyone={onlyone} push={push} settings={settings} onOpen={(x) => nav.push(x)} onDisconnect={props.onDisconnect} />}
           >
-            <TeamSettings onlyone={onlyone} push={push} settings={settings} wide={wide()} onRules={() => openRules(true)} onConnection={props.onConnection} onDisconnect={props.onDisconnect} />
+            <TeamSettings service={props.service} onlyone={onlyone} push={push} settings={settings} wide={wide()} onRules={() => openRules(true)} onConnection={props.onConnection} onDisconnect={props.onDisconnect} />
           </If>
         );
       case "notify": return <PhoneNotify push={push} settings={settings} />;
@@ -5352,11 +5355,39 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
 function Connected(props: { config: Config; openRef: string | null; onExpired: () => void; onLogout: () => void; onTray: (chat: TrayChat | null) => void }) {
   const onlyone = createOnlyOne(props.config);
   const executorError = signal("");
-  const startExecutor = () => {
-    executorError.set("");
-    executor("start", props.config).catch(() => executorError.set(L("This Mac could not start executing tasks. Try again.", "这台 Mac 的执行服务未能启动，请重试")));
+  const executorState = signal<DesktopStatus | null>(null);
+  const executorBusy = signal<"start" | "stop" | null>(null);
+  let retryAction: "start" | "stop" = "start";
+  const refreshExecutor = () => {
+    if (!hasExecutor || untracked(executorBusy)) return;
+    executor("status", props.config).then((s) => { if (!untracked(executorBusy)) executorState.set(s); }).catch(() => executorError.set(L("Could not read the background service status. Please retry.", "无法读取后台服务状态，请重试。")));
   };
-  startExecutor();
+  const runExecutor = async (action: "start" | "stop"): Promise<boolean> => {
+    if (untracked(executorBusy)) return false;
+    retryAction = action;
+    executorError.set("");
+    executorBusy.set(action);
+    try { executorState.set(await executor(action, props.config)); return true; }
+    catch { executorError.set(L("Could not change the background service. Please retry.", "后台服务操作未完成，请重试。")); return false; }
+    finally { executorBusy.set(null); refreshExecutor(); }
+  };
+  const service: ExecutorControl = { state: executorState, busy: executorBusy, error: executorError, run: runExecutor, refresh: refreshExecutor };
+  if (hasExecutor) {
+    void runExecutor("start");
+    let active = lifecycle() === "active";
+    effect(() => {
+      const next = lifecycle() === "active";
+      if (next && !active) untracked(() => {
+        if (executorBusy()) return;
+        executor("status", props.config).then((s) => {
+          if (executorBusy()) return;
+          executorState.set(s);
+          if (s?.running && !s.stopping) void runExecutor("start");
+        }).catch(() => refreshExecutor());
+      });
+      active = next;
+    });
+  }
   cleanup(onlyone.dispose);
   // The service worker answers decisions from notifications with the session.
   hostCall("setSession", { session: props.config.token, origin: props.config.url });
@@ -5369,17 +5400,17 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
     <If when={executorError()}>
       <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: tints.danger }}>
         <Text style={{ flex: 1, color: colors.danger }}>{executorError()}</Text>
-        <Button label={L("Retry", "重试")} onPress={startExecutor} />
+        <Button label={L("Retry", "重试")} onPress={() => void runExecutor(retryAction)} />
       </View>
     </If>
     <Chat
+      service={service}
       onlyone={onlyone}
       openRef={props.openRef}
       onConnection={props.onExpired}
       onTray={props.onTray}
       onDisconnect={async () => {
-        try { await executor("stop", props.config); }
-        catch { executorError.set(L("The local executor could not stop. Try signing out again.", "本机执行服务未能停止，请重试退出登录")); return; }
+        if (hasExecutor && !await runExecutor("stop")) return;
         const off = await hostCall<{ endpoint: string | null }>("pushDisable");
         if (off?.endpoint) await onlyone.api("POST", "/api/push/unsubscribe", { endpoint: off.endpoint });
         await hostCall("setSession", { session: null });

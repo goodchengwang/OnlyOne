@@ -4,6 +4,7 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, mkdirSync, readFil
 import { homedir, hostname } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { lockDaemon } from "./daemon-lock";
+import type { DesktopStatus } from "./desktop-status";
 
 export function desktopBinding(value: string, root = join(homedir(), ".onlyone", "app")) {
   const url = new URL(value);
@@ -80,75 +81,104 @@ export async function enrollDesktop(binding: ReturnType<typeof desktopBinding>, 
 export async function desktop(options: { root?: string; cli?: string[] } = {}) {
   if (process.platform !== "darwin") throw new Error("Automatic execution is available on macOS");
   const input = JSON.parse(await Bun.stdin.text()) as { action?: string; url?: string; session?: string };
-  if (typeof input.url !== "string" || !["start", "stop"].includes(input.action ?? "")) throw new Error("Invalid executor request");
+  if (typeof input.url !== "string" || !["start", "stop", "status"].includes(input.action ?? "")) throw new Error("Invalid executor request");
   const binding = desktopBinding(input.url, options.root);
   const { home, label } = binding;
-  if (input.action === "stop" && !existsSync(home)) return;
-  mkdirSync(home, { recursive: true, mode: 0o700 });
-  const unlock = lockDaemon(home);
-  process.once("exit", unlock);
   const domain = `gui/${process.getuid!()}`, service = `${domain}/${label}`;
-  if (input.action === "stop") {
-    // disable affects future loads; PathState also prevents this loaded job from respawning.
-    rmSync(join(home, "enabled"), { force: true });
-    const disabled = await run(["/bin/launchctl", "disable", service]);
-    if (disabled.code) throw new Error(disabled.stderr);
-    const state = await run(["/bin/launchctl", "print", service]);
-    if (state.code === 0 && /\bpid = \d+/.test(state.stdout)) {
-      const stopped = await run(["/bin/launchctl", "kill", "SIGTERM", service]);
-      if (stopped.code) throw new Error(stopped.stderr);
+  const inspect = () => run(["/bin/launchctl", "print", service]);
+  const pidOf = (state: { stdout: string }) => state.stdout.match(/\bpid = (\d+)/)?.[1];
+  const status = async (): Promise<DesktopStatus> => {
+    const running = !!pidOf(await inspect());
+    return { running, stopping: running && !existsSync(join(home, "enabled")),
+      mode: running ? existsSync(join(home, "dev-source")) ? "development" : "release" : null };
+  };
+  if (input.action === "status") { console.log(JSON.stringify(await status())); return; }
+  if (input.action === "stop" && !existsSync(home)) { console.log(JSON.stringify(await status())); return; }
+  mkdirSync(home, { recursive: true, mode: 0o700 });
+  let unlock: () => void;
+  for (;;) {
+    try { unlock = lockDaemon(home); break; }
+    catch (error) {
+      if (!(error instanceof Error) || !/already using|executor is starting/.test(error.message)) throw error;
+      await Bun.sleep(250);
     }
-    return;
   }
-  let cli = options.cli ?? command();
-  const development = cli.length > 1;
-  const sourceMarker = join(home, "dev-source");
-  const enableWatch = development && !existsSync(sourceMarker);
-  await enrollDesktop(binding, input.session ?? "", cli);
-  if (development) writeFileSync(sourceMarker, cli[1], { mode: 0o600 });
-  else rmSync(sourceMarker, { force: true });
-  if (cli.length === 1) {
-    // launchd must survive the app being moved or replaced during an update.
-    const runtime = join(home, "runtime", "onlyone-executor");
-    mkdirSync(dirname(runtime), { recursive: true, mode: 0o700 });
-    const version = createHash("sha256").update(readFileSync(cli[0])).digest("hex");
-    const stamp = `${runtime}.sha256`;
-    if (!existsSync(runtime) || !existsSync(stamp) || readFileSync(stamp, "utf8") !== version) {
-      const replacing = existsSync(runtime);
-      const next = `${runtime}.next`;
-      copyFileSync(cli[0], next);
-      chmodSync(next, 0o700);
-      renameSync(next, runtime);
-      writeFileSync(stamp, version, { mode: 0o600 });
-      if (replacing) writeFileSync(join(home, "restart-requested"), `${new Date().toISOString()} force`, { mode: 0o600 });
+  process.once("exit", unlock);
+  try {
+    const stop = async () => {
+      // Disable respawn before SIGTERM; never boot out a process with unfinished tasks.
+      rmSync(join(home, "enabled"), { force: true });
+      const disabled = await run(["/bin/launchctl", "disable", service]);
+      if (disabled.code) throw new Error(disabled.stderr);
+      let state = await inspect();
+      if (pidOf(state)) {
+        const stopped = await run(["/bin/launchctl", "kill", "SIGTERM", service]);
+        if (stopped.code && pidOf(await inspect())) throw new Error(stopped.stderr);
+        while (pidOf(state = await inspect())) await Bun.sleep(250);
+      }
+      if (state.code === 0) {
+        const unloaded = await run(["/bin/launchctl", "bootout", service]);
+        if (unloaded.code && (await inspect()).code === 0) throw new Error(unloaded.stderr);
+      }
+    };
+    if (input.action === "stop") {
+      await stop();
+      console.log(JSON.stringify(await status()));
+      return;
     }
-    cli = [runtime];
-  }
-  const path = [dirname(process.execPath), join(homedir(), ".bun/bin"), join(homedir(), ".local/bin"), join(homedir(), ".cargo/bin"), "/opt/homebrew/bin", "/usr/local/bin", process.env.PATH ?? "/usr/bin:/bin"].join(":");
-  const plist = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
-  mkdirSync(dirname(plist), { recursive: true });
-  writeFileSync(plist, executorPlist(label, [...cli, "daemon"], home, path, development), { mode: 0o600 });
-  writeFileSync(join(home, "enabled"), "", { mode: 0o600 });
-  const enabled = await run(["/bin/launchctl", "enable", service]);
-  if (enabled.code) throw new Error(enabled.stderr);
-  let state = await run(["/bin/launchctl", "print", service]);
-  if (enableWatch && /\bpid = \d+/.test(state.stdout)) {
-    const restarted = await run(["/bin/launchctl", "kill", "SIGTERM", service]);
-    if (restarted.code) throw new Error(restarted.stderr);
-  }
-  if (state.code) {
-    const installed = await run(["/bin/launchctl", "bootstrap", domain, plist]);
-    if (installed.code) throw new Error(installed.stderr);
-  } else if (!/\bpid = \d+/.test(state.stdout)) {
-    const started = await run(["/bin/launchctl", "kickstart", service]);
-    if (started.code) throw new Error(started.stderr);
-  }
-  for (let attempt = 0; attempt < 40; attempt++) {
-    state = await run(["/bin/launchctl", "print", service]);
-    const pid = state.stdout.match(/\bpid = (\d+)/)?.[1];
-    const ready = join(home, "service-ready");
-    if (pid && existsSync(ready) && readFileSync(ready, "utf8").trim() === pid) return;
-    await Bun.sleep(250);
-  }
-  throw new Error(`Executor did not become ready; see ${join(home, "executor.log")}`);
+    let cli = options.cli ?? command();
+    const development = cli.length > 1;
+    const sourceMarker = join(home, "dev-source");
+    await enrollDesktop(binding, input.session ?? "", cli);
+    let runtimeChanged = false;
+    if (cli.length === 1) {
+      // launchd must survive the app being moved or replaced during an update.
+      const runtime = join(home, "runtime", "onlyone-executor");
+      mkdirSync(dirname(runtime), { recursive: true, mode: 0o700 });
+      const version = createHash("sha256").update(readFileSync(cli[0])).digest("hex");
+      const stamp = `${runtime}.sha256`;
+      if (!existsSync(runtime) || !existsSync(stamp) || readFileSync(stamp, "utf8") !== version) {
+        runtimeChanged = true;
+        const next = `${runtime}.next`;
+        copyFileSync(cli[0], next);
+        chmodSync(next, 0o700);
+        renameSync(next, runtime);
+        writeFileSync(stamp, version, { mode: 0o600 });
+      }
+      cli = [runtime];
+    }
+    const path = [dirname(process.execPath), join(homedir(), ".bun/bin"), join(homedir(), ".local/bin"), join(homedir(), ".cargo/bin"), "/opt/homebrew/bin", "/usr/local/bin", process.env.PATH ?? "/usr/bin:/bin"].join(":");
+    const plist = join(homedir(), "Library", "LaunchAgents", `${label}.plist`);
+    mkdirSync(dirname(plist), { recursive: true });
+    let state = await inspect();
+    const loaded = state.stdout.match(/\n\s*arguments = \{\n([\s\S]*?)\n\s*\}/)?.[1]
+      .trim().split("\n").map((line) => line.trim());
+    const args = [...cli, "daemon"];
+    const changed = runtimeChanged || JSON.stringify(loaded) !== JSON.stringify(args);
+    if (state.code === 0 && (changed || !existsSync(join(home, "enabled")))) {
+      await stop();
+      state = await inspect();
+    }
+    if (development) writeFileSync(sourceMarker, cli[1], { mode: 0o600 });
+    else rmSync(sourceMarker, { force: true });
+    writeFileSync(plist, executorPlist(label, args, home, path, development), { mode: 0o600 });
+    writeFileSync(join(home, "enabled"), "", { mode: 0o600 });
+    const enabled = await run(["/bin/launchctl", "enable", service]);
+    if (enabled.code) throw new Error(enabled.stderr);
+    if (state.code) {
+      const installed = await run(["/bin/launchctl", "bootstrap", domain, plist]);
+      if (installed.code) throw new Error(installed.stderr);
+    } else if (!pidOf(state)) {
+      const started = await run(["/bin/launchctl", "kickstart", service]);
+      if (started.code) throw new Error(started.stderr);
+    }
+    for (let attempt = 0; attempt < 40; attempt++) {
+      state = await run(["/bin/launchctl", "print", service]);
+      const pid = state.stdout.match(/\bpid = (\d+)/)?.[1];
+      const ready = join(home, "service-ready");
+      if (pid && existsSync(ready) && readFileSync(ready, "utf8").trim() === pid) { console.log(JSON.stringify(await status())); return; }
+      await Bun.sleep(250);
+    }
+    throw new Error(`Executor did not become ready; see ${join(home, "executor.log")}`);
+  } finally { process.off("exit", unlock); unlock(); }
 }
