@@ -85,6 +85,7 @@ first and the main package last for a `vX.Y.Z` tag: `v0.1.3` publishes npm versi
 Each of the six packages must trust GitHub Actions repository `goodchengwang/OnlyOne`, workflow `npm.yml`,
 with **Allow npm publish** enabled and no environment name. Publishing uses OIDC, without `NPM_TOKEN`.
 Pushes without a tag, pull requests and manual runs on branches only build and test.
+The publish job checks that all six packages exist before publishing any of them. `onlyone-win32-x64` is currently unavailable in the public registry; complete its first publication and trusted publisher setup before tagging a release.
 Published npm versions cannot be overwritten, including after unpublishing; the existing platform packages already occupy `0.1.0`, `0.1.1` and `0.1.2`.
 The native App workflow and its pinned NSH version are separate.
 

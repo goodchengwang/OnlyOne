@@ -74,6 +74,15 @@ jobs:
           path: dist/npm
           merge-multiple: true
       # Each package trusts goodchengwang/OnlyOne's npm.yml through OIDC; no npm token is used.
+      - name: Check trusted-publishing prerequisites before publishing any package
+        run: |
+          for package in dist/npm/onlyone-* dist/npm/onlyonecli; do
+            name=$(node -p "require('./$package/package.json').name")
+            if ! npm view "$name" name --registry=https://registry.npmjs.org; then
+              echo "::error::Cannot read $name from npm. Complete its first publication and configure its trusted publisher for goodchengwang/OnlyOne, npm.yml before retrying."
+              exit 1
+            fi
+          done
       - name: Publish platform packages, then the main package
         run: |
           for package in dist/npm/onlyone-*; do
