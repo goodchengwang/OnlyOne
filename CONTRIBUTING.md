@@ -27,7 +27,9 @@ Keep fixes focused on the existing behavior. A bug fix, security fix, or perform
 
 ## Development
 
-For the Mac app, run `nsh run app` from the repository root. UI changes hot reload. Sign in with the server address
+For the Mac app, run `bun run dev` from the repository root to use the project-local signed development host
+with system notifications. To use `nsh run app` directly, follow the runtime setup in [README.md](README.md#development).
+UI changes hot reload. Sign in with the server address
 and email code: the app binds this Mac to that cloud and starts the executor through launchd, using this checkout
 and the installed Bun. No manual `init` or background-service installation is required. Other platforms remain
 management clients. Opening either the development or packaged Mac app selects its executor automatically: the

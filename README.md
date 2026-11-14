@@ -163,7 +163,20 @@ The native app ID is `dev.onlyone.app`.
 
 ## Development
 
-Run `nsh run app` for Mac development. The UI hot reloads, and the source executor automatically validates saves
+Run `bun run dev` for Mac development with system notifications. It wraps the currently installed NSH development
+host in a signed `OnlyOne Development.app` under the ignored `.nsh/dev-runtime/`, with a separate notification
+identity (`dev.onlyone.app.development`). It does not change the installed NSH or the packaged app.
+To keep using `nsh run app` directly, prepare and select the runtime once in each development terminal:
+
+```bash
+bash scripts/prepare-dev-runtime.sh && export NSH_RUNTIME="$PWD/.nsh/dev-runtime"
+nsh run app
+```
+
+OnlyOne Development asks for notification permission when you enable notifications in settings. Run the preparation
+again after updating NSH; `bun run dev` does this automatically. `unset NSH_RUNTIME` restores the default runtime;
+use a terminal without this override for packaging or other targets.
+The UI hot reloads, and the source executor automatically validates saves
 and gracefully restarts when its bundled code changes. No manual daemon restart or repackaging is needed; running
 tasks finish first, and invalid saves leave the current executor running. This source watcher is disabled in installed builds.
 
