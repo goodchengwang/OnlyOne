@@ -7,6 +7,9 @@ import { ownerText, readClaude, readCodex, redact } from "../src/sessions";
 
 // Fake values, assembled so the source never holds anything key-shaped.
 const body = (n: number) => "aB3".repeat(n).slice(0, n);
+const token = (n: number) => "Q7vK2mZx9RtP4wNs8YbH6cLd".repeat(n).slice(0, n); // mixed case + digit, like a real id
+const hex = (n: number) => "0123456789abcdef".repeat(n).slice(0, n);
+const uuid = "0f9a1c2d-3b4e-5f60-7182-93a4b5c6d7e8";
 const googleNew = "AQ." + body(50);
 const googleOld = "AIza" + body(35);
 
@@ -42,6 +45,29 @@ test("redact: a huge unbroken run stays fast", () => {
 test("redact: credentials in headers and URLs", () => {
   expect(redact("Authorization: Bearer " + body(40))).not.toContain(body(40));
   expect(redact("postgres://admin:" + body(12) + "@db.example.com/x")).not.toContain(body(12));
+});
+
+test("redact: cookie and session names are redacted by keyword, name kept", () => {
+  // The forms that leaked into the 2026-11-14 digest: the name never says "token" or "password".
+  expect(redact("Cookie: webBuild=6.47.1; galaxy_creator_session_id=" + token(36))).toBe("Cookie: webBuild=6.47.1; galaxy_creator_session_id=[REDACTED]");
+  expect(redact("galaxy.creator.beaker.session.id=" + hex(22))).toBe("galaxy.creator.beaker.session.id=[REDACTED]");
+  expect(redact("timeslogin=" + token(36) + "; webBuild=6.47.1")).toBe("timeslogin=[REDACTED]; webBuild=6.47.1");
+  expect(redact("PHPSESSID=" + token(26))).toBe("PHPSESSID=[REDACTED]");
+  expect(redact("set-cookie: csrftoken=" + token(32))).toBe("set-cookie: csrftoken=[REDACTED]");
+  expect(redact('{"sessionId": "' + token(24) + '"}')).toBe('{"sessionId": [REDACTED]}');
+  expect(redact("Authorization: Basic " + token(28))).toBe("Authorization: Basic [REDACTED]");
+});
+
+test("redact: a minted-looking value is dropped even when the name says nothing", () => {
+  expect(redact("sec_poison_id=" + token(32))).toBe("sec_poison_id=[REDACTED]"); // no keyword in the name: the fallback catches it
+  expect(redact("sec_poison_id=" + uuid)).toBe("sec_poison_id=[REDACTED]"); // lowercase-only uuid
+  expect(redact("state " + token(43))).toBe("state [REDACTED]");
+  expect(redact("commit " + hex(40))).toBe("commit [REDACTED]");
+});
+
+test("redact: short values and readable identifiers stay", () => {
+  for (const s of ["session=1", "sid=ab12", "key: value", "claude-opus-4-5-20251101", "consider: the deduplication path"])
+    expect(redact(s)).toBe(s);
 });
 
 test("redact: ordinary text is left alone", () => {

@@ -32,17 +32,31 @@ const OUT = join(HOME_DIR, "learn");
 type Turn = { ts: string; project: string; tool: "claude" | "codex"; text: string; prev?: string };
 
 // ---------------------------------------------------------------- redaction
+// A credential name never says "token" or "password": cookies and session ids are named
+// galaxy_creator_session_id, galaxy.creator.beaker.session.id, timeslogin, sec_poison_id, PHPSESSID…
+// so match the keyword anywhere inside the name, with `sid` only as a whole segment (consider, president).
+const CRED_NAME = String.raw`[A-Za-z0-9_.-]*(?:sess|token|key|cookie|secret|pass|auth|login|csrf|xsrf)[A-Za-z0-9_.-]*|\bsid(?![a-z])[A-Za-z0-9_.-]*`;
+// name=value / name: value — keep the name and the separator, drop the value. `=` is not part of an
+// unquoted value, so "Cookie: webBuild=6.41.7; sess=<id>" redacts only the value that is a value.
+const ASSIGN = new RegExp(String.raw`((?:${CRED_NAME})["']?\s*[:=：]\s*)(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s;,，。、=]{12,}=*)`, "gi");
 const SECRET = [
   /\b(sk-(?:ant|proj|live|test)?-?[\w-]{16,})/g, /\b(gh[pousr]_[A-Za-z0-9]{20,})/g, /\b(xox[abpr]-[\w-]{10,})/g,
   /\b(github_pat_\w{20,})/g, /\b(glpat-[\w-]{15,})/g, /\b(npm_[A-Za-z0-9]{30,})/g, /\b(hf_[A-Za-z0-9]{25,})/g, /\b([rs]k_(?:live|test)_\w{10,})/g,
   /\b(AIza[\w-]{30,})/g, /\b(AQ\.[\w.-]{20,})/g, /\b(ya29\.[\w.-]{20,})/g, /\b(GOCSPX-[\w-]{15,})/g, // Google: API keys (old and new format), OAuth
   /\b((?:AKIA|ASIA)[0-9A-Z]{16})\b/g, /\b(eyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{10,})/g, /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /\bBearer\s+[\w.~+\/-]{16,}=*/g, /\b[a-z][a-z0-9+.-]*:\/\/[^\s:\/@]+:[^\s\/@]+@/gi,
-  /((?:password|passwd|secret|token|api[_-]?key|access[_-]?key)["']?\s*[:=：]\s*)(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\S+)/gi, /\b[0-9a-f]{32,}\b/gi,
+  ASSIGN,
+  /((?:password|passwd|secret|token|api[_-]?key|access[_-]?key)["']?\s*[:=：]\s*)(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\S+)/gi,
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, // UUID: a lowercase-only id the fallback below would keep
+  /\b[0-9a-f]{20,}\b/gi,
 ];
 export function redact(s: string): string {
   let out = s.replace(/[\w.+-]{2000,}/g, "[REDACTED]"); // not prose, and the email and URL patterns go quadratic on it
   for (const re of SECRET) out = out.replace(re, (_m, g1) => (typeof g1 === "string" && /[:=：]\s*$/.test(g1) ? `${g1}[REDACTED]` : "[REDACTED]"));
+  // Fallback for names no keyword matches (sec_poison_id=…): a long run that looks minted rather than
+  // written — a base64/hex id, hash or cookie value. Needs a digit and a capital, so all-lowercase prose
+  // like claude-opus-4-5-20251101 or onlyone-app-52eb… survives, and a run ending at / is a path segment.
+  out = out.replace(/(?<![\w.+-])[A-Za-z0-9+/-]{20,}(?![\w.+-])(?!\/)/g, (m) => (/[0-9]/.test(m) && /[A-Z]/.test(m) ? "[REDACTED]" : m));
   return out.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]");
 }
 
