@@ -1,4 +1,5 @@
 // Channels on the onlyone side: the files (channels/<slug>.md), what agents are told, and what their results assign.
+import { projectStore, listProjects } from "./projects";
 import { existsSync, readFileSync } from "node:fs";
 import { P, list, now, readDoc, writeDoc } from "./core";
 import { CHANNEL_SLUG, type ChannelRow, parseChannel, slugify } from "../cloud/src/tools";
@@ -6,7 +7,7 @@ import { CHANNEL_SLUG, type ChannelRow, parseChannel, slugify } from "../cloud/s
 export type ChannelPick = string | { name: string; goal?: string };
 
 export function channels(): ChannelRow[] {
-  return list(P("channels")).map((f) => parseChannel(`channels/${f.split(/[\\/]/).pop()}`, readFileSync(f, "utf8"))).filter((c): c is ChannelRow => !!c);
+  return [...listProjects(projectStore()).map((p) => ({ slug: p.id, project_id: p.id, name: p.name, host: p.host, repo: p.repo, goal: `${p.host} · ${p.repo}`, status: "active" as const, created: p.created })), ...list(P("channels")).map((f) => parseChannel(`channels/${f.split(/[\\/]/).pop()}`, readFileSync(f, "utf8"))).filter((c): c is ChannelRow => !!c)];
 }
 
 const file = (slug: string) => P("channels", `${slug}.md`);
@@ -32,11 +33,11 @@ export function updateChannel(slug: string, patch: { goal?: unknown; archived?: 
  *  with a goal) opens a new one; archived channels never get new items. */
 export function resolveChannels(picks: unknown): string[] {
   if (!Array.isArray(picks)) return [];
-  const all = channels();
+  const all = channels().filter((c) => !c.project_id);
   const out = new Set<string>();
   for (const p of picks.slice(0, 4)) {
     const name = typeof p === "string" ? p : p && typeof p === "object" && typeof (p as any).name === "string" ? (p as any).name : "";
-    if (!name.trim()) continue;
+    if (!name.trim() || name.startsWith("prj-")) continue;
     const hit = all.find((c) => c.slug === name.trim() || c.slug === slugify(name) || c.name.toLowerCase() === name.trim().toLowerCase());
     if (hit) { if (hit.status === "active") out.add(hit.slug); continue; }
     const goal = typeof p === "object" ? String((p as any).goal ?? "") : "";
@@ -48,7 +49,7 @@ export function resolveChannels(picks: unknown): string[] {
 
 /** The prompt section: the active channels and how to pick. */
 export function channelPrompt(): string {
-  const act = channels().filter((c) => c.status === "active");
+  const act = channels().filter((c) => c.status === "active" && !c.project_id);
   const lines = act.map((c) => `- \`${c.slug}\` ${c.name}: ${c.goal}`).join("\n");
   return `# Channels (work topics the owner can drill into)
 ${lines || "(none yet)"}

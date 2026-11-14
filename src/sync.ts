@@ -126,7 +126,7 @@ const lastPull = new Map<string, number>(); // per mirror (tests switch between 
 
 // ------------------------------------------------------------------ state
 type Entry = { v: number; h: string; m: number; s: number };
-type State = { rev: number; files: Record<string, Entry>; pushedAt?: number };
+type State = { rev: number; files: Record<string, Entry>; pushedAt?: number; lazyPushedAt?: number };
 function loadState(): State {
   try { return JSON.parse(readFileSync(STATE(), "utf8")); } catch { return { rev: 0, files: {} }; }
 }
@@ -372,15 +372,17 @@ export async function commitPush(msg: string, opts: { force?: boolean } = {}): P
   return withLock(async () => {
     const st = loadState();
     for (let attempt = 0; attempt < 4; attempt++) {
-      const changes = scan(st);
+      let changes = scan(st);
       if (!changes.length) { saveState(st); return true; }
-      const lazy = changes.every((c) => latestOnly(c.path));
-      // Preserve lazy pacing across source reloads and service restarts.
-      if (lazy && !opts.force && syncTiming.now() - (st.pushedAt ?? -Infinity) < syncTiming.lazyPushMs) { saveState(st); return true; }
+      // Task commits must not force a fresh heartbeat/journal/lesson copy on every status change.
+      const deferred = (path: string) => latestOnly(path) || /^projects\/prj-[a-f0-9-]{36}\/memory\.md$/.test(path);
+      if (!opts.force && syncTiming.now() - (st.lazyPushedAt ?? st.pushedAt ?? -Infinity) < syncTiming.lazyPushMs)
+        changes = changes.filter((c) => !deferred(c.path));
+      if (!changes.length) { saveState(st); return true; }
       const r = await t("/api/files/commit", { method: "POST", body: { msg, changes: wire(changes) } });
       if (!r) { saveState(st); return false; } // offline: changes stay pending locally
-      if (r.status === 429) { st.pushedAt = syncTiming.now(); saveState(st); return false; } // over the Worker's budget: later
-      if (r.status === 200) { recordCommitted(st, changes, r.json.files); st.pushedAt = syncTiming.now(); saveState(st); return true; }
+      if (r.status === 429) { st.pushedAt = syncTiming.now(); st.lazyPushedAt = st.pushedAt; saveState(st); return false; } // over the Worker's budget: later
+      if (r.status === 200) { recordCommitted(st, changes, r.json.files); st.pushedAt = syncTiming.now(); if (st.lazyPushedAt === undefined || changes.some((c) => deferred(c.path))) st.lazyPushedAt = st.pushedAt; saveState(st); return true; }
       if (r.status !== 409) { console.error(`sync: commit rejected ${r.status}: ${JSON.stringify(r.json).slice(0, 300)}`); saveState(st); return false; }
       const conflicts: string[] = r.json.conflicts ?? [];
       const { ok, lost, seen } = await _pull(st, t);

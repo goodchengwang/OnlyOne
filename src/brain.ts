@@ -8,10 +8,11 @@
 // owner messages reach this daemon over the existing owner→fleet inbox (long-polled, so within milliseconds), and the
 // reply goes back as a normal feed event.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { projectMemoryFile, projectPrompt } from "./projects";
 import { channelPrompt } from "./channels";
 import { join, relative } from "node:path";
 import { DATA, HOME_DIR, L, P, loadConfig, _commitPush, _pull, journal, locked, now, readDoc, writeDoc } from "./core";
-import { type Ev, type FileRow, type ToolStore, type WriteOp, isWrite, listDecisions, listRoutines, listTasks, editMemoryEntry, runTool, toolsFor, writeOp } from "../cloud/src/tools";
+import { type Ev, type FileRow, type ToolStore, type WriteOp, isWrite, parseDoc, listDecisions, listRoutines, listTasks, editMemoryEntry, runTool, toolsFor, writeOp } from "../cloud/src/tools";
 
 // ---------------------------------------------------------------- the local tool store (the data repo on this machine)
 
@@ -63,7 +64,7 @@ export function addFollowUp(file: string, text: string, waiting: boolean) {
 
 /** Writes that only touch task metadata or memory files: done right here (git-synced data repo). */
 export function dataActs(host: string, io = { pull: _pull, push: _commitPush }): Acts {
-  const pull = () => io.pull(), push = (m: string) => io.push(m);
+  const pull = () => io.pull(), push = (m: string, ownerVisible = false) => io.push(m, ownerVisible ? { force: true } : undefined);
   const findTask = (id: string, dirs: string[]) => dirs.map((d) => P("tasks", d, `${id}.md`)).find(existsSync);
   return {
     set_priority: (op) => locked(async () => {
@@ -88,6 +89,7 @@ export function dataActs(host: string, io = { pull: _pull, push: _commitPush }):
     }),
     remember: (op) => locked(async () => {
       await pull();
+      if (op.file === "memory/projects.md") return { ok: false, error: "Project index is owner-managed" };
       const f = P(...op.file.split("/"));
       mkdirSync(join(f, ".."), { recursive: true });
       const line = `- ${op.text.replace(/\s*\n\s*/g, " ")} _(owner, ${now().slice(0, 10)}, via chat)_\n`;
@@ -95,18 +97,19 @@ export function dataActs(host: string, io = { pull: _pull, push: _commitPush }):
       if (prev.includes(op.text.trim())) return { ok: true, file: op.file, note: "already there" };
       writeFileSync(f, prev && !prev.endsWith("\n") ? `${prev}\n${line}` : prev + line);
       journal(host, `🧠 remembered in ${op.file}: ${op.text.slice(0, 80)}`);
-      await push(`[${host}] memory ${op.file}`);
+      await push(`[${host}] memory ${op.file}`, true); // Owner-visible memory updates sync before confirming.
       return { ok: true, file: op.file };
     }),
     edit_memory: (op) => locked(async () => {
       await pull();
+      if (op.file === "memory/projects.md") return { ok: false, error: "Project index is owner-managed" };
       const f = P(...op.file.split("/"));
       if (!existsSync(f)) return { ok: false, error: `${op.file} not found` };
       const edit = editMemoryEntry(readFileSync(f, "utf8"), op.match, op.text);
       if (typeof edit === "string") return { ok: false, error: edit };
       writeFileSync(f, edit.text);
       journal(host, `🧠 ${op.text ? "edited" : "deleted"} in ${op.file}: ${edit.entry.replace(/\s*\n\s*/g, " ").slice(0, 300)}`);
-      await push(`[${host}] memory ${op.file}`);
+      await push(`[${host}] memory ${op.file}`, true);
       return { ok: true, file: op.file, [op.text ? "replaced" : "deleted"]: edit.entry };
     }),
   };
@@ -209,6 +212,8 @@ How to decide:
 - A complaint or change request about a product (OnlyOne, NSH, ...) is work, not a rule: create_task only, never remember it.
   Read it together with the owner's previous messages: one in a series of product changes belongs to that series. When
   you cannot tell, do not remember; say what you took it as, so the owner can correct you.
+- Project registration is owner-only: direct the owner to the sidebar project dialog; never scan or create project records.
+- Inside a project, remember/read_memory/edit_memory default to its own memory. Set global=true only when the owner explicitly asks for a fleet-wide rule. Never put project facts in global or agent memory.
 - A memory is wrong, outdated or should go (${L(`"delete that one", "that is wrong"`, `"删掉那条", "记错了"`)}): find it with read_memory (query), then edit_memory; only when the
   owner asks. Without text it deletes the entry.
 - Answering or changing the answer to a decision card: answer_decision. Stop/drop a task only when clearly asked: cancel_task.
@@ -229,6 +234,7 @@ After write calls only, you are done (they run after your reply is posted). Afte
 results and answer again.`;
 
 export type BrainIn = {
+  project_id?: string;
   text: string;
   /** The task the owner replied to / wrote on (T-…). */
   replyTo?: string;
@@ -270,6 +276,7 @@ export function context(st: ToolStore, m: BrainIn): string {
     `The channel just before (oldest first):\n${(m.chat ?? []).join("\n") || "(empty)"}`,
     m.channel ? `The owner wrote this inside the channel #${m.channel.name} (\`${m.channel.slug}\`), goal: ${m.channel.goal || "(none)"}. Read it in that context; the conversation above is this channel's. Your reply and any task you create belong to this channel (it is added to the task's channels automatically).` : "",
     m.replyTo ? `The owner wrote this as a reply to the team's message about ${m.replyTo}.` : "",
+    m.project_id ? projectPrompt(m.project_id) : "",
     `The owner's message:\n${m.text.slice(0, 4000)}`,
   ].filter(Boolean).join("\n\n");
 }
@@ -291,9 +298,27 @@ export function parseTurn(out: string): { calls: { tool: string; args: any }[]; 
   return null;
 }
 
-/** One owner message → reply + tool calls. `post` puts the reply in the channel (as soon as it is final, before the
- * writes run, so the owner sees it within seconds even when a write syncs the data repo). */
+/** Keep project-specific tool reads and writes within the current project. */
+export function projectTools(st: ToolStore, projectId?: string): ToolStore {
+  const allowed = (path: string) => {
+    if (/^projects\/[^/]+\/memory\.md$/.test(path)) return path === projectMemoryFile(projectId ?? "");
+    if (projectId && /^(tasks|decisions)\//.test(path)) { const f = st.read(path); return !!f && parseDoc(f.text).meta.project_id === projectId; }
+    return true;
+  };
+  return { ...st,
+    read: (path) => allowed(path) ? st.read(path) : null,
+    list: (dir) => st.list(dir).filter((f) => allowed(f.path)),
+    act: (op) => {
+      if ((op.tool === "remember" || op.tool === "edit_memory") && !allowed(op.file)) return Promise.resolve({ ok: false, error: "Memory belongs to another project" });
+      if (projectId && op.tool === "create_task") op = { ...op, project_id: projectId };
+      return st.act(op);
+    },
+  };
+}
+
+/** One owner message → reply and scoped tool calls. */
 export async function think(m: BrainIn, st: ToolStore, model: Model, post: (reply: string, ref?: string) => void): Promise<BrainOut> {
+  st = projectTools(st, m.project_id);
   const t0 = Date.now();
   const res: BrainOut = { reply: "", calls: [], rounds: 0, ms: { model: [], total: 0 } };
   const conv = await model.open(systemPrompt());
@@ -307,6 +332,11 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
       res.ms.model.push(Date.now() - tm);
       const turn = parseTurn(out);
       if (!turn) { input = `That was not one JSON object. Answer again with exactly {"calls": [...], "reply": "..."}.`; continue; }
+      for (const c of turn.calls) {
+        if (!m.project_id || !["remember", "edit_memory", "read_memory"].includes(c.tool)) continue;
+        if (c.args.global !== true) c.args.file = projectMemoryFile(m.project_id);
+        delete c.args.global;
+      }
       const reads = turn.calls.filter((c) => !isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const writes = turn.calls.filter((c) => isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const unknown = turn.calls.filter((c) => !BRAIN_TOOLS.some((t) => t.name === c.tool));

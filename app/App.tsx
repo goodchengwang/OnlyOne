@@ -55,6 +55,7 @@ const avatarOf = (from: string) => memberAvatar(from, memberProfiles());
 import { CheckMark } from "./ui/icons";
 import { attachmentName, isDoc } from "./files";
 import { onlyoneMarkdown } from "./markdown";
+import { canPickProjectFolder, pickProjectFolder } from "./project-folder";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
 import { setupTray, type TrayChat } from "./tray";
@@ -187,7 +188,7 @@ const CODE_LEN = 8;
 
 type Config = { url: string; token: string };
 /** `token` holds the login session (sent as `Bearer`, and `?token=` on the WebSocket and media URLs). */
-const KEYS = { url: "onlyone.url", token: "onlyone.token", email: "onlyone.email", theme: "onlyone.theme", notifyOff: "onlyone.notifyOff", draft: "onlyone.draft" };
+const KEYS = { url: "onlyone.url", token: "onlyone.token", email: "onlyone.email", theme: "onlyone.theme", notifyOff: "onlyone.notifyOff" };
 /** iOS and Android draw the pages' headers (title, back, swipe back); the desktops and the web show the app's. */
 const systemHeader = platform.os === "ios" || platform.os === "android";
 const MONO = "monospace";
@@ -338,7 +339,7 @@ function createOnlyOne(cfg: Config) {
     const r = await fetch(`${cfg.url}/api/messages`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ text, ...(clientId ? { client_id: clientId } : {}), ...(replyTo ? { reply_to: replyTo } : {}), ...(attachments.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) }),
+      body: JSON.stringify({ text, ...(clientId ? { client_id: clientId } : {}), ...(replyTo ? { reply_to: replyTo } : {}), ...(attachments.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}), ...(channel?.startsWith("prj-") ? { project_id: channel } : {}) }),
     });
     if (r.status === 401) conn.set("unauthorized");
     if (!r.ok) throw new Error(L(`Send failed (${r.status})`, `发送失败（${r.status}）`));
@@ -1413,6 +1414,62 @@ function createMessageReads(onlyone: OnlyOne) {
 }
 type MessageReads = ReturnType<typeof createMessageReads>;
 
+/** Explicit project creation; no directory or conversation discovery feeds this form. */
+function ProjectEditor(props: { onlyone: OnlyOne; open: boolean; onClose: () => void; onCreated: (c: Channel) => void }) {
+  const name = signal(""), folder = signal(""), computer = signal("");
+  const busy = signal(false), choosing = signal(false), note = signal("");
+  let id = `prj-${crypto.randomUUID()}`;
+  effect(() => { if (props.open) { name.set(""); folder.set(""); computer.set(""); note.set(""); id = `prj-${crypto.randomUUID()}`; } });
+  const close = () => { if (!busy() && !choosing()) props.onClose(); };
+  const choose = async () => {
+    choosing.set(true); note.set("");
+    try {
+      const picked = await pickProjectFolder();
+      if (picked) { folder.set(picked.path); computer.set(picked.host); if (!name().trim()) name.set(picked.path.replace(/\/$/, "").split("/").pop() ?? ""); }
+    } catch { note.set(L("Could not open the folder chooser. Please try again.", "无法打开文件夹选择器，请重试。")); }
+    finally { choosing.set(false); }
+  };
+  const submit = async () => {
+    if (busy() || choosing()) return;
+    busy.set(true); note.set("");
+    const r = await props.onlyone.api("POST", "/api/projects", { id, name: name().trim(), host: computer().trim(), repo: folder().trim() });
+    busy.set(false);
+    if (!r.ok || !r.data.project) { note.set(String(r.data.error ?? L("Could not create project. Please retry.", "创建项目失败，请重试。"))); return; }
+    const p = r.data.project as { id: string; name: string; host: string; repo: string; created: string };
+    props.onCreated({ slug: p.id, project_id: p.id, name: p.name, host: p.host, repo: p.repo, goal: `${p.host} · ${p.repo}`, status: "active", created: p.created, last_activity: p.created, stale: false, count: 0, items: [], refs: [] });
+    props.onClose();
+  };
+  return <Dialog testID="project-editor" open={props.open} animation="fade" onOpenChange={({ open }) => !open && close()} backdropClass="bg-scrim" style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}>
+    <View style={{ width: "100%", maxWidth: 480, maxHeight: Math.max(220, windowSize().height - keyboardFrame().height - 32), borderRadius: 20, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, padding: 20, gap: 18 }}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
+        <Text style={{ flex: 1, fontSize: 20, fontWeight: "600", color: colors.text }}>{L("Create project", "创建项目")}</Text>
+        <IconButton icon="close" label={L("Close", "关闭")} onPress={close} />
+      </View>
+      <Scroll testID="project-fields" style={{ flexShrink: 1 }} contentStyle={{ gap: 18 }}>
+      <TextField testID="project-name" value={name()} onChange={name.set} placeholder={L("Project name", "项目名称")} style={{ height: 36, minHeight: 36 }} />
+      <View style={{ gap: 8 }}>
+        <Text style={{ fontSize: 13, fontWeight: "600", color: colors.text }}>{L("Source folder", "源文件夹")}</Text>
+        <View style={{ minHeight: 104, borderWidth: 1, borderColor: colors.border, borderRadius: 12, padding: 16, gap: 10, alignItems: "center", justifyContent: "center" }}>
+          <If when={folder()}>
+            <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+              <Icon name="folder" size={17} tint={colors.muted} />
+              <Text testID="project-selected-folder" style={{ fontSize: 14, color: colors.text, numberOfLines: 1 }}>{folder().replace(/[\\/]+$/, "").split(/[\\/]/).pop() || folder()}</Text>
+            </View>
+          </If>
+          <Button testID="project-pick-folder" variant="ghost" icon="folder" label={choosing() ? L("Choosing…", "选择中…") : folder() ? L("Change folder", "更换文件夹") : L("Add a folder on this computer", "在此电脑上添加文件夹")} disabled={!canPickProjectFolder || busy() || choosing()} onPress={() => void choose()} />
+          <If when={!canPickProjectFolder}><Text style={{ fontSize: 13, color: colors.muted }}>{L("Choose the folder in the Mac app.", "请在 Mac App 中选择项目文件夹。")}</Text></If>
+        </View>
+      </View>
+      <If when={note()}><Text testID="project-error" style={{ fontSize: 14, color: colors.danger }}>{note()}</Text></If>
+      </Scroll>
+      <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 10 }}>
+        <Button testID="project-cancel" variant="ghost" label={L("Cancel", "取消")} disabled={busy() || choosing()} onPress={close} />
+        <Button testID="project-create" variant="primary" label={busy() ? L("Creating…", "创建中…") : L("Create project", "创建项目")} disabled={busy() || choosing() || !name().trim() || !folder().trim() || !computer().trim()} onPress={() => void submit()} />
+      </View>
+    </View>
+  </Dialog>;
+}
+
 /** Channel snapshots refresh from pushed task/channel revisions, never on a timer. */
 function createChannels(onlyone: OnlyOne, reads: MessageReads) {
   const list = signal<Channel[]>([]);
@@ -1426,7 +1483,7 @@ function createChannels(onlyone: OnlyOne, reads: MessageReads) {
   let revision = "";
   effect(() => {
     const st = onlyone.status();
-    const next = JSON.stringify([st?.channels_revision, st?.tasks, st?.decisions, st?.recent?.map((t) => [t.id, t.updated])]);
+    const next = JSON.stringify([st?.projects_revision, st?.channels_revision, st?.tasks, st?.decisions, st?.recent?.map((t) => [t.id, t.updated])]);
     if (next === revision) return;
     revision = next;
     clearTimeout(timer); timer = setTimeout(() => void load(), 150);
@@ -1457,7 +1514,7 @@ const TASK_HEAD = 72;
 
 /** One channel: its goal (editable), archive, and the tasks and cards that belong to it, newest first. */
 /** A channel's head above its conversation: name and purpose together, actions out of the way. The conversation itself is the main chat's. */
-function ChannelHeader(props: { channels: Channels; slug: string }) {
+function ChannelHeader(props: { channels: Channels; slug: string; onMemory: () => void }) {
   const ch = () => props.channels.list().find((c) => c.slug === props.slug);
   const editing = signal(false);
   const goal = signal("");
@@ -1476,7 +1533,7 @@ function ChannelHeader(props: { channels: Channels; slug: string }) {
           {/* header: a channel reads like a room, name and purpose together, actions out of the way */}
           <View testID="channel-header" style={{ flexDirection: "row", alignItems: "flex-start", gap: 14, paddingBottom: 8 }}>
             <View style={{ width: 44, height: 44, borderRadius: radius.card, alignItems: "center", justifyContent: "center", backgroundColor: alpha(colors.accent, 0.12) }}>
-              <Text style={{ fontSize: 22, fontWeight: "700", color: colors.accent }}>#</Text>
+              <If when={ch()?.project_id} else={<Text style={{ fontSize: 22, fontWeight: "700", color: colors.accent }}>#</Text>}><Icon name="folder" size={24} tint={colors.accent} /></If>
             </View>
             <View style={{ flex: 1, minWidth: 0, gap: 4 }}>
               <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
@@ -1510,11 +1567,13 @@ function ChannelHeader(props: { channels: Channels; slug: string }) {
               </If>
             </View>
             <View style={{ flexDirection: "row", gap: 4 }}>
-              <If when={!editing()}>
+              <If when={!editing() && !ch()?.project_id}>
                 <Button testID="channel-edit-goal" variant="ghost" label={L("Edit", "编辑")} onPress={() => { name.set(ch()!.name); goal.set(ch()!.goal); editing.set(true); }} />
               </If>
+              <If when={ch()?.project_id} else={
               <Button testID="channel-archive" variant="ghost" label={ch()!.status === "archived" ? L("Unarchive", "取消归档") : L("Archive", "归档")}
                 onPress={() => void props.channels.save(props.slug, { archived: ch()!.status !== "archived" })} />
+              }><Button testID="project-memory" variant="ghost" icon="scroll" label={L("Project memory", "项目记忆")} onPress={props.onMemory} /></If>
             </View>
           </View>
         </If>
@@ -1938,6 +1997,7 @@ function Sidebar(props: {
   channels: Channels;
   channel: () => string | null;
   onChannel: (slug: string) => void;
+  onAddProject: () => void;
   onHelp: () => void;
   onClose?: () => void;
   chrome?: boolean;
@@ -1951,7 +2011,7 @@ function Sidebar(props: {
 }) {
   /** Archived channels stay folded under one row; the open one stays in place so the selection doesn't vanish. */
   const showArchived = signal(false);
-  const archivedChannels = () => props.channels.list().filter((c) => c.status === "archived" && c.slug !== props.channel());
+  const archivedChannels = () => props.channels.list().filter((c) => !c.project_id && c.status === "archived" && c.slug !== props.channel());
   const s = () => props.onlyone.status();
   // the onlyone closes a decision on its next tick: one the channel already shows answered leaves the list now
   // 排队 starts open and 最近 collapsed; the heading toggles each (owner, T-0987; 排队 open by default, T-1097).
@@ -2016,6 +2076,18 @@ function Sidebar(props: {
               <Text style={rowText()}>{L("Memory", "记忆")}</Text>
             </SidebarRow>
           </View>
+          <View style={{ flexDirection: "row", alignItems: "center", paddingLeft: 18, paddingRight: 10, paddingTop: 14 }}>
+            <Text style={{ flex: 1, fontSize: 13, fontWeight: "600", color: colors.faint }}>{L("Projects", "项目")}</Text>
+            <IconButton testID="add-project" icon="plus" label={L("Add project", "添加项目")} onPress={props.onAddProject} />
+          </View>
+          <Each of={props.channels.list().filter((c) => !!c.project_id)} key={(c) => c.slug}>{(c) =>
+            <SidebarRow selected={props.channel() === c().slug} onPress={() => props.onChannel(c().slug)} title={c().goal}>
+              <Icon name="folder" size={17} tint={colors.muted} />
+              <Text testID={`side-project-${c().slug}`} style={rowText()}>{c().name}</Text>
+              <If when={props.channels.unread(c())}><Count value={props.channels.unread(c())} /></If>
+            </SidebarRow>
+          }</Each>
+          <If when={!props.channels.list().some((c) => c.project_id)}><SideEmpty text={L("Add a project to start a workspace", "添加项目，开始独立的工作空间")} /></If>
           <SideHeading title={L("Needs your decision", "待你决定")} count={waits().length || undefined} accent />
           <Each of={waits()} key={(d) => d.id}>
             {(d) => (
@@ -2072,9 +2144,9 @@ function Sidebar(props: {
             </Each>
           </If>
 
-          <If when={props.channels.list().length}>
+          <If when={props.channels.list().some((c) => !c.project_id)}>
             <SideHeading testID="side-channels" open={channelsOpen} title={L("Channels", "Channels")} count={props.channels.list().reduce((n, c) => n + props.channels.unread(c), 0) || undefined} accent />
-            <Each of={props.channels.list().filter((c) => (c.status !== "archived" || c.slug === props.channel()) && (channelsOpen() || c.slug === props.channel() || props.channels.unread(c) > 0))} key={(c) => c.slug}>
+            <Each of={props.channels.list().filter((c) => !c.project_id && (c.status !== "archived" || c.slug === props.channel()) && (channelsOpen() || c.slug === props.channel() || props.channels.unread(c) > 0))} key={(c) => c.slug}>
               {(c) => (
                 <SidebarRow onPress={() => props.onChannel(c().slug)} selected={props.channel() === c().slug} title={c().goal || c().name}>
                   <Text style={{ width: 17, textAlign: "right", fontSize: 15, color: colors.faint }}>#</Text>
@@ -3760,6 +3832,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     sidebarOpen.set(open);
   };
   const help = signal(false);
+  const projectEditor = signal(false);
   // The pages: the channel at the bottom, what the sidebar, a link or settings opened above it.
   const nav = createNavStack<Route>([CHANNEL]);
   const top = () => { const r = nav.routes(); return r[r.length - 1]; };
@@ -3771,15 +3844,35 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   const scope = signal<string | null>(null);
   effect(() => { const r = top(); readerAt.set(r.name === "task" ? `task:${r.id}` : r.name === "channel" ? `channel:${scope() ?? ""}` : r.name); });
   const scoped = () => { const slug = scope(); return slug ? channels.list().find((c) => c.slug === slug) : undefined; };
-  const openScope = (slug: string | null) => { drawer.set(false); nav.popToRoot(); scope.set(slug); };
+  const drafts = new Map<string, { text: string; ref: string | null; note: string | null; files: Attachment[] }>();
+  const positions = new Map<string, { index: number; limit: number; atEnd: boolean }>();
+  const draftKey = (slug: string | null) => `onlyone.project-draft:${onlyone.cfg.url}:${slug ?? "main"}`;
+  const openScope = (slug: string | null) => {
+    const previous = untracked(scope);
+    if (previous !== slug) {
+      drafts.set(previous ?? "", { text: draft(), ref: replyTo(), note: replyNote(), files: attachments() });
+      positions.set(previous ?? "", { index: firstVisibleRow, limit: limit(), atEnd: atEnd() });
+      void Storage.setItem(draftKey(previous), draft());
+      const saved = drafts.get(slug ?? "");
+      draft.set(saved?.text ?? ""); replyTo.set(saved?.ref ?? null); replyNote.set(saved?.note ?? null); attachments.set(saved?.files ?? []);
+      if (!saved) void Storage.getItem(draftKey(slug)).then((text) => { if (untracked(scope) === slug && !untracked(draft) && text) draft.set(text); });
+    }
+    drawer.set(false); nav.popToRoot(); scope.set(slug);
+  };
   // a channel's history beyond what this device holds; what is said there arrives live like the main chat's
   const channelFeed = signal<OnlyOneEvent[]>([]);
+  const channelFeeds = new Map<string, OnlyOneEvent[]>();
   effect(() => {
     const slug = scope();
     scoped()?.last_activity;
     if (!slug) { channelFeed.set([]); return; }
+    channelFeed.set(channelFeeds.get(slug) ?? []);
     void onlyone.api("GET", `/api/channels/feed?slug=${encodeURIComponent(slug)}`).then((r) => {
-      if (untracked(scope) === slug && r?.ok && Array.isArray(r.data.events)) channelFeed.set(r.data.events as OnlyOneEvent[]);
+      if (untracked(scope) === slug && r?.ok && Array.isArray(r.data.events)) {
+        const events = r.data.events as OnlyOneEvent[]; channelFeed.set(events);
+        channelFeeds.delete(slug); channelFeeds.set(slug, events);
+        while (channelFeeds.size > 6) channelFeeds.delete(channelFeeds.keys().next().value!);
+      }
     }).catch(() => {});
   });
   /** Shows a page over the channel, in place of the one shown (the sidebar's pages are siblings). */
@@ -3800,6 +3893,10 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   // Entering the channel (first load, back from a task or settings) shows the latest messages.
   effect(() => { if (onChannel() && !jumping) { atEnd.set(true); unseen.set(0); toEnd(); } });
   const draft = signal("");
+  let draftTimer: ReturnType<typeof setTimeout> | undefined;
+  effect(() => { const text = draft(), slug = scope(); clearTimeout(draftTimer); draftTimer = setTimeout(() => void Storage.setItem(draftKey(slug), text), 250); });
+  cleanup(() => { clearTimeout(draftTimer); void Storage.setItem(draftKey(untracked(scope)), untracked(draft)); });
+  void Storage.getItem(draftKey(null)).then((v) => { if (v && !untracked(scope) && !untracked(draft)) draft.set(v); });
   const replyTo = signal<string | null>(null);
   /** What the reply answers, for the chip ("Kai：nsh #812 主要修的是…"); none for a decision (its id says it). */
   const replyNote = signal<string | null>(null);
@@ -4000,9 +4097,12 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     windowScope = slug;
     timelineWindow = createTimelineWindow(PAGE);
     built = new Map();
-    limit.set(PAGE);
+    const position = positions.get(slug ?? "");
+    limit.set(position?.limit ?? PAGE);
     headPassed.set(false);
-    atEnd.set(true); unseen.set(0); count = untracked(shown).length; toEnd();
+    atEnd.set(position?.atEnd ?? true); unseen.set(0); count = untracked(shown).length;
+    if (position && !position.atEnd) requestAnimationFrame(() => requestAnimationFrame(() => { if (untracked(scope) === slug) scroller?.scrollToIndex({ index: Math.max(0, position.index), animated: false }); }));
+    else toEnd();
   });
   // Pages whose head has scrolled under the bar, which then carries a compact title instead; back at the head it unfolds.
   const taskFolds = signal<Record<string, Folded | null>>({});
@@ -4010,7 +4110,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     if (r.name === "task") return taskFolds()[r.id] ?? null;
     if (r !== CHANNEL || !headPassed() || !scope()) return null;
     const c = scoped();
-    return { title: `# ${c?.name ?? scope()}`, detail: c?.goal ?? "", reveal: () => scrollTimeline(0) };
+    return { title: `${c?.project_id ? "" : "# "}${c?.name ?? scope()}`, detail: c?.goal ?? "", reveal: () => scrollTimeline(0) };
   };
 
   const reply = (ref: string, note?: string) => {
@@ -4045,15 +4145,9 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   // An update restarts the app: what looks sent leaves first, and what is being typed comes back.
   async function restartToUpdate() {
     await Promise.allSettled(deliverHeld());
-    if (draft()) await Storage.setItem(KEYS.draft, draft());
+    await Storage.setItem(draftKey(untracked(scope)), draft());
     await updates.install();
-    await Storage.removeItem(KEYS.draft); // the install failed: this run still holds the draft
   }
-  Storage.getItem(KEYS.draft).then((v) => {
-    if (!v) return;
-    if (!untracked(draft)) draft.set(v);
-    void Storage.removeItem(KEYS.draft);
-  });
   function undo(id?: string) {
     const o = id ? outbox().find((x) => x.id === id) : [...outbox()].reverse().find((x) => x.state === "held");
     if (!o || !holds.has(o.id)) return false;
@@ -4061,6 +4155,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     holds.delete(o.id);
     outbox.update((list) => list.filter((x) => x.id !== o.id));
     if (!/^[DLP]-[A-Z]?\d{4} \S+$/.test(o.text) || o.ref || o.files.length) {
+      if ((o.channel ?? null) !== untracked(scope)) openScope(o.channel ?? null);
       draft.set(o.text);
       replyNote.set(null);
       replyTo.set(o.ref);
@@ -4464,6 +4559,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
       channels={channels}
       channel={() => (onChannel() ? scope() : null)}
       onChannel={(slug) => openScope(slug)}
+      onAddProject={() => { drawer.set(false); projectEditor.set(true); }}
       onHelp={() => help.set(true)}
       onClose={inDrawer ? () => drawer.set(false) : undefined}
       chrome={!inDrawer}
@@ -4548,7 +4644,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
                     if ("head" in row) {
                       return (
                         <View>
-                          <ChannelHeader channels={channels} slug={row.head} />
+                          <ChannelHeader channels={channels} slug={row.head} onMemory={() => nav.push({ name: "doc", path: `projects/${row.head}/memory.md` })} />
                           <If when={shown().length === 0}>
                             <View testID="channel-empty" style={{ gap: 6, paddingVertical: 16 }}>
                               <Text style={{ fontSize: 16, fontWeight: "600", color: colors.text }}>{L(`This is the start of #${scoped()?.name ?? row.head}`, `这里是 #${scoped()?.name ?? row.head} 的开始`)}</Text>
@@ -5076,6 +5172,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
         )}
       </If>
 
+      <ProjectEditor onlyone={onlyone} open={projectEditor()} onClose={() => projectEditor.set(false)} onCreated={(c) => { channels.list.update((all) => sortChannels([...all.filter((x) => x.slug !== c.slug), c])); openScope(c.slug); }} />
       <HelpSheet open={help()} onClose={() => help.set(false)} />
       <If when={dropping()}>
         {(files) => <DropTarget files={files()} />}

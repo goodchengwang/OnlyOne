@@ -5,6 +5,7 @@
 // (git-synced data repo, running agents); the cloud store forwards it to the primary daemon over the existing
 // owner→fleet inbox — so a write has exactly one implementation, on the machine that owns the data.
 // Never exposed here: merge, release, settings, machine credentials (policies/autonomy.md hard gates).
+import { getProject, listProjects } from "./projects";
 import { MEMBER_ID, ROUTINE_NAME, validSchedule } from "./team";
 import { BUILTIN_ROUTINES } from "../../src/builtin-routines";
 
@@ -14,7 +15,7 @@ export type FileRow = { path: string; text: string; updated: string };
 /** A write. `tool` is the tool name; the rest are its validated arguments. */
 export type WriteOp =
   | { tool: "send_message"; text: string; reply_to?: string }
-  | { tool: "create_task"; title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[] }
+  | { tool: "create_task"; title: string; details?: string; repo?: string; project_id?: string; agent?: string; follows?: string; channels?: unknown[] }
   | { tool: "amend_task"; id: string; text: string }
   | { tool: "cancel_task"; id: string }
   | { tool: "set_priority"; id: string; priority: Priority }
@@ -44,7 +45,7 @@ export const TASK_ID = /^T-[\w-]*\d{4}$/, DECISION_ID = /^[DP]-[\w]*\d{4}$/;
 export const PRIORITIES = ["urgent", "high", "normal", "low"] as const;
 type Priority = (typeof PRIORITIES)[number];
 /** Where `remember` and `edit_memory` may write: the shared memory files, or one agent's memory. */
-export const MEMORY_FILE = /^(memory\/[\w.-]+\.md|agents\/[\w-]+\/memory\.md)$/;
+export const MEMORY_FILE = /^(memory\/[\w.-]+\.md|agents\/[\w-]+\/memory\.md|projects\/prj-[a-f0-9-]{36}\/memory\.md)$/;
 
 /** Replaces the one memory entry containing `match` with `text` (empty: deletes it). An entry is a line plus its indented
  * continuation lines. The new file text and the entry it changed, or the problem when `match` does not pick exactly one. */
@@ -186,15 +187,15 @@ export function searchJournal(st: ToolStore, query: string, days = 14, limit = 4
   return out;
 }
 /** Memory: one file in full, or the index of memory files (shared memory/*.md and agents/<name>/memory.md). */
-export function readMemory(st: ToolStore, file?: string, query?: string) {
+export function readMemory(st: ToolStore, file?: string, query?: string, offset = 0) {
   if (file) {
     if (!MEMORY_FILE.test(file) && !/^agents\/[\w-]+\/profile\.md$/.test(file) && !/^policies\/[\w.-]+\.md$/.test(file)) return null;
     const f = st.read(file);
     if (!f) return null;
     const q = (query ?? "").toLowerCase();
-    return { file, updated: f.updated, text: q ? f.text.split("\n").filter((l) => l.toLowerCase().includes(q)).join("\n").slice(0, 20_000) : f.text.slice(0, 20_000) };
+    return { file, updated: f.updated, total: f.text.length, offset, truncated: f.text.length > offset + 20_000, text: q ? f.text.split("\n").filter((l) => l.toLowerCase().includes(q)).join("\n").slice(offset, offset + 20_000) : f.text.slice(offset, offset + 20_000) };
   }
-  const files = [...st.list("memory/"), ...st.list("agents/").filter((f) => f.path.endsWith("/memory.md"))].filter((f) => MEMORY_FILE.test(f.path));
+  const files = [...st.list("memory/"), ...st.list("agents/").filter((f) => f.path.endsWith("/memory.md")), ...st.list("projects/").filter((f) => f.path.endsWith("/memory.md"))].filter((f) => MEMORY_FILE.test(f.path));
   const q = (query ?? "").toLowerCase();
   return { files: files.map((f) => ({ file: f.path, updated: f.updated, lines: f.text.split("\n").length,
     ...(q ? { matches: f.text.split("\n").filter((l) => l.toLowerCase().includes(q)).slice(0, 10) } : {}) }))
@@ -256,7 +257,7 @@ export const TOOLS: Tool[] = [
   { name: "list_routines", title: "List routines", annotations: RO, inputSchema: obj({}),
     description: "The fleet's recurring routines (name, schedule, agent, enabled, what it does)." },
   { name: "read_memory", title: "Read memory", annotations: RO,
-    inputSchema: obj({ file: str("Optional: memory/<name>.md, agents/<name>/memory.md, agents/<name>/profile.md or policies/<name>.md; omit to list memory files"),
+    inputSchema: obj({ global: { type: "boolean", description: "True only for an explicitly requested fleet-wide memory" }, offset: int("Character offset for reading long memory files", { minimum: 0 }), file: str("Optional: memory/<name>.md, agents/<name>/memory.md, agents/<name>/profile.md, projects/<id>/memory.md or policies/<name>.md; omit to list memory files"),
       query: str("Optional: only lines containing this text (case-insensitive)") }),
     description: "The fleet's durable memory: the owner's preferences, principles, taste, projects (memory/*.md) and each agent's own memory. Without `file`, lists the files (with matching lines when `query` is given)." },
   { name: "search_journal", title: "Search the journal", annotations: RO,
@@ -272,7 +273,7 @@ export const TOOLS: Tool[] = [
     description: "Send a chat message to the fleet as the owner (same as typing in the OnlyOne app). The chat brain answers it and acts on it." },
   { name: "create_task", title: "Create a task", annotations: RW, write: true,
     inputSchema: obj({ title: str("Short imperative title"), details: str("Goal, context and acceptance criteria — everything the agent needs, in the owner's words"),
-      repo: str("Optional repo, e.g. longbridge/nsh"), agent: str("Optional agent name from list_agents (default: lead, who plans and delegates)"),
+      project_id: str("An existing owner-created project id; never create or infer a new project"), repo: str("Optional repo, e.g. longbridge/nsh"), agent: str("Optional agent name from list_agents (default: lead, who plans and delegates)"),
       channels: { type: "array", description: "Work topics matched by goal: existing slugs, or {name, goal} for a new channel; empty for none", items: { anyOf: [{ type: "string" }, { type: "object", properties: { name: { type: "string" }, goal: { type: "string" } }, required: ["name", "goal"], additionalProperties: false }] }, maxItems: 3 },
       follows: str("Optional: the task (T-…) this continues or corrects; the new task reads its result") }, ["title"]),
     description: "Hand a piece of work to the fleet. An agent picks it up, does it and reports back in the feed. Use for anything that takes more than a quick answer (code, reviews, releases, research)." },
@@ -300,15 +301,15 @@ export const TOOLS: Tool[] = [
       agent: str("Member id from list_agents (required for a new routine)"),
       every: str('Schedule in the coordinator host’s local timezone: "15m", "hourly", "daily 09:00", "weekdays 09:00", "weekly MON 09:00"'),
       prompt: str("What the member should do and report each run (required for a new routine)"),
-      enabled: { type: "boolean", description: "False to disable the routine" },
+      enabled: { type: "boolean", description: "New routines are enabled by default. Set false only when the owner asks to disable; omitted on updates keeps the current state." },
       readonly: { type: "boolean", description: "True only for observation/reporting that changes no external state" } }, ["name"]),
     description: "Add, change or disable a recurring task directly, without a project or code task. Specify the member, schedule and complete instructions for a new routine. When adding a member too, call upsert_member before this tool. Omitted fields keep their values." },
   { name: "remember", title: "Remember", annotations: RW, write: true,
-    inputSchema: obj({ text: str("The rule or fact, one or two sentences, phrased so it is useful later (who/what it applies to, and why)"),
-      file: str("memory/owner.md (who the owner is), memory/principles.md (how to work), memory/taste.md (UI/code taste), memory/projects.md, or agents/<name>/memory.md for one agent's know-how") }, ["text", "file"]),
+    inputSchema: obj({ global: { type: "boolean", description: "True only when the owner explicitly asks for a fleet-wide rule" }, text: str("The rule or fact, one or two sentences, phrased so it is useful later (who/what it applies to, and why)"),
+      file: str("memory/owner.md (who the owner is), memory/principles.md (how to work), memory/taste.md (UI/code taste), projects/<project_id>/memory.md for project-specific knowledge, or agents/<name>/memory.md for one agent's know-how") }, ["text", "file"]),
     description: "Write a durable memory the whole fleet reads from now on: the owner's preference, a rule ('always do this'), a fact about a project." },
   { name: "edit_memory", title: "Edit or delete a memory", annotations: DESTRUCTIVE, write: true,
-    inputSchema: obj({ file: str("The memory file, as listed by read_memory"),
+    inputSchema: obj({ global: { type: "boolean", description: "True only for an explicitly requested fleet-wide memory" }, file: str("The memory file, as listed by read_memory"),
       match: str("Text copied from the entry, enough to pick exactly one line (find it with read_memory first)"),
       text: str("The whole corrected entry, replacing the old one. Omit to delete the entry") }, ["file", "match"]),
     description: "Correct or delete one existing memory entry, when the owner says it is wrong, outdated or should go. New facts go in remember." },
@@ -333,8 +334,10 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
     case "create_task": {
       if (!s(a.title)) return "title required";
       const agent = s(a.agent);
+      const project = s(a.project_id);
+      if (project && !getProject(st, project)) return "Unknown project";
       if (agent && !st.read(`agents/${agent}/profile.md`)) return `unknown agent ${agent} (see list_agents)`;
-      return { tool: name, title: s(a.title).slice(0, 120), details: s(a.details).slice(0, 20_000) || undefined, repo: s(a.repo) || undefined,
+      return { tool: name, title: s(a.title).slice(0, 120), details: s(a.details).slice(0, 20_000) || undefined, repo: s(a.repo) || undefined, ...(project ? { project_id: project } : {}),
         agent: agent || undefined, follows: TASK_ID.test(s(a.follows)) ? s(a.follows) : undefined, ...(Array.isArray(a.channels) ? { channels: a.channels.slice(0, 3) } : {}) };
     }
     case "amend_task": {
@@ -387,19 +390,23 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
       if (a.prompt !== undefined && (!prompt || prompt.length > 20_000)) return "prompt must be 1–20000 characters";
       for (const field of ["enabled", "readonly"]) if (a[field] !== undefined && typeof a[field] !== "boolean") return `${field} must be boolean`;
       return { tool: name, name: routine, ...(agent ? { agent } : {}), ...(every ? { every } : {}), ...(prompt ? { prompt } : {}),
-        ...(typeof a.enabled === "boolean" ? { enabled: a.enabled } : {}), ...(typeof a.readonly === "boolean" ? { readonly: a.readonly } : {}) };
+        ...(typeof a.enabled === "boolean" ? { enabled: a.enabled } : !existing ? { enabled: true } : {}), ...(typeof a.readonly === "boolean" ? { readonly: a.readonly } : {}) };
     }
     case "remember": {
       const text = s(a.text), file = s(a.file);
       if (!text) return "text required";
-      if (!MEMORY_FILE.test(file)) return "file must be memory/<name>.md or agents/<name>/memory.md";
+      if (file === "memory/projects.md") return "Project index is managed by the owner project dialog";
+      if (!MEMORY_FILE.test(file)) return "file must be memory/<name>.md, agents/<name>/memory.md or projects/<id>/memory.md";
+      if (file.startsWith("projects/") && !getProject(st, file.split("/")[1])) return "Unknown project";
       if (file.startsWith("agents/") && !st.read(`agents/${file.split("/")[1]}/profile.md`)) return `unknown agent in ${file}`;
       return { tool: name, text: text.slice(0, 2000), file };
     }
     case "edit_memory": {
       const file = s(a.file), match = s(a.match), text = s(a.text).replace(/\s*\n\s*/g, " ").slice(0, 2000);
       if (!match) return "match required";
-      if (!MEMORY_FILE.test(file)) return "file must be memory/<name>.md or agents/<name>/memory.md";
+      if (file === "memory/projects.md") return "Project index is managed by the owner project dialog";
+      if (!MEMORY_FILE.test(file)) return "file must be memory/<name>.md, agents/<name>/memory.md or projects/<id>/memory.md";
+      if (file.startsWith("projects/") && !getProject(st, file.split("/")[1])) return "Unknown project";
       const row = st.read(file);
       if (!row) return `${file} not found`;
       const edit = editMemoryEntry(row.text, match, text);
@@ -441,7 +448,7 @@ export async function runTool(st: ToolStore, name: string, a: any, base = ""): P
     case "list_agents": return ok({ agents: listAgents(st) });
     case "list_routines": return ok({ routines: listRoutines(st) });
     case "read_memory": {
-      const r = readMemory(st, s(a.file) || undefined, s(a.query) || undefined);
+      const r = readMemory(st, s(a.file) || undefined, s(a.query) || undefined, Math.max(0, Number(a.offset) || 0));
       return r ? ok(r) : bad(`${s(a.file)} not found or not readable`);
     }
     case "search_journal": {
@@ -477,7 +484,7 @@ export async function runTool(st: ToolStore, name: string, a: any, base = ""): P
 // ---------------------------------------------------------------- channels
 // A channel is a work topic the AI opens (like a Slack channel in a company): "NSH i18n", "Omamail". Stored as
 // channels/<slug>.md (name, goal, status, created); tasks carry `channels: a,b`. Read-only drill-down views of the main chat.
-export type ChannelRow = { slug: string; name: string; goal: string; status: "active" | "archived"; created: string };
+export type ChannelRow = { project_id?: string; host?: string; repo?: string; slug: string; name: string; goal: string; status: "active" | "archived"; created: string };
 export type ChannelItem = { id: string; kind: "task" | "decision" | "report"; title: string; state: string; updated: string; task?: string };
 export const CHANNEL_SLUG = /^[a-z0-9][a-z0-9-]{0,47}$/;
 export const STALE_DAYS = 7;
@@ -499,7 +506,7 @@ export function parseChannel(path: string, text: string): ChannelRow | null {
 }
 
 export function listChannelRows(st: ToolStore): ChannelRow[] {
-  return st.list("channels/").filter((f) => /^channels\/[^/]+\.md$/.test(f.path)).map((f) => parseChannel(f.path, f.text)).filter((c): c is ChannelRow => !!c)
+  return [...listProjects(st).map((p) => ({ slug: p.id, project_id: p.id, name: p.name, host: p.host, repo: p.repo, goal: `${p.host} · ${p.repo}`, status: "active" as const, created: p.created })), ...st.list("channels/").filter((f) => /^channels\/[^/]+\.md$/.test(f.path)).map((f) => parseChannel(f.path, f.text)).filter((c): c is ChannelRow => !!c)]
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 

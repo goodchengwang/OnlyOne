@@ -16,6 +16,7 @@
 // Guest workers (low-trust shared machines): /api/guest/* and /api/guests/* — see guests.ts.
 // MCP (Claude / ChatGPT connectors): /mcp + OAuth 2.1 at /oauth/* and /.well-known/oauth-* — see mcp.ts and docs/mcp.md.
 // Every other /api/* and /media/* needs Bearer <ONLYONE_TOKEN|session> (or ?token= for WebSocket / <img>).
+import { createProjectFiles, listProjects, getProject } from "./projects";
 import { DurableObject } from "cloudflare:workers";
 import { b64dec, b64enc, handleFiles, handleReadFiles, initFilesSchema } from "./files";
 import { FREE, LEAN, SHED, TARGET, latestOnly } from "./budget";
@@ -165,7 +166,7 @@ export class OnlyOne extends DurableObject<Env> {
     super(ctx, env);
     setLang(env.ONLYONE_LANG);
     const raw = ctx.storage.sql, cursors = this.cursors;
-    this.sql = { exec: (q: string, ...b: SqlStorageValue[]) => { const c = raw.exec(q, ...b); cursors.push(c); return c; }, get databaseSize() { return raw.databaseSize; } } as unknown as SqlStorage;
+    this.sql = { transactionSync: <T>(fn: () => T) => ctx.storage.transactionSync(fn), exec: (q: string, ...b: SqlStorageValue[]) => { const c = raw.exec(q, ...b); cursors.push(c); return c; }, get databaseSize() { return raw.databaseSize; } } as unknown as SqlStorage;
     // a host keeps one hibernating socket open for "inbox has something"; its keepalive never wakes this object
     ctx.setWebSocketAutoResponse(new WebSocketRequestResponsePair("ping", "pong"));
     this.sql.exec(`CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, json TEXT);
@@ -213,7 +214,7 @@ export class OnlyOne extends DurableObject<Env> {
 
   statusView() { return { ...(this.get("status") ?? {
     tasks: { proposed: 0, inbox: 0, active: 0, blocked: 0, failed: 0, done: 0 }, active: [], recent: [], decisions: [], hosts: [],
-  }), onlyone: { online: this.hostOnline(), seen: this.get("host_seen"), primary: this.primary() } }; }
+  }), projects_revision: JSON.stringify(listProjects(this.mcp.store())), onlyone: { online: this.hostOnline(), seen: this.get("host_seen"), primary: this.primary() } }; }
 
   settingsView() { return this.get("settings") ?? {
     current: {}, effective: { agents: [], routines: [], autonomy: "onboarding", max_parallel: null, media_days: 7 },
@@ -385,7 +386,7 @@ export class OnlyOne extends DurableObject<Env> {
       const previous = this.sql.exec("SELECT json FROM events WHERE json_extract(json, '$.client_id') = ? LIMIT 1", clientId).toArray()[0];
       if (previous) return JSON.parse(previous.json as string) as Ev;
     }
-    const ev = this.append({ from: "owner", kind: "owner", text, ref, ...(clientId ? { client_id: clientId } : {}), ...(attachments?.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) });
+    const ev = this.append({ from: "owner", kind: "owner", text, ref, ...(clientId ? { client_id: clientId } : {}), ...(attachments?.length ? { attachments } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}), ...(channel?.startsWith("prj-") ? { project_id: channel } : {}) });
     this.toInbox({ type: "message", event: ev });
     if (!this.hostOnline()) this.append({ from: "onlyone", kind: "system", text: this.primary() ? L("Queued. The coordinator is offline; this will be handled when it reconnects.", "已排队。协调主机离线，等待上线后执行。") : L("Queued. No execution computer is connected yet. Connect your first computer to start.", "已排队。尚未接入执行电脑，请接入首台电脑后开始执行。"), ref: ev.id, ...(channel ? { channel } : {}) });
     return ev;
@@ -580,6 +581,11 @@ export class OnlyOne extends DurableObject<Env> {
       const r = handleReadFiles(this.sql, url);
       if (r) return r;
     }
+    if (p === "/api/files/commit" && m === "POST" && who === "machine") {
+      const body = await req.clone().json().catch(() => null) as { changes?: { path?: string; base_version?: number }[] } | null;
+      if (body?.changes?.some((c) => /^projects\/[^/]+\/project\.md$/.test(c.path ?? "") || (c.path === "memory/projects.md" && Number(c.base_version) > 0)))
+        return json({ error: "Project registration and its index are owner-managed; use the project dialog" }, 403);
+    }
     if (p === "/api/files/commit" && m === "POST" && this.level() === "shed") { // over budget: heartbeats and journals wait
       const b = (await req.clone().json().catch(() => null)) as { changes?: { path?: string }[] } | null;
       if (b?.changes?.length && b.changes.every((c) => latestOnly(String(c.path ?? ""))))
@@ -679,7 +685,8 @@ export class OnlyOne extends DurableObject<Env> {
     }
 
     if (p === "/api/messages" && m === "POST") {
-      const { text = "", reply_to, attachments, thread, client_id, channel } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown; client_id?: unknown; channel?: unknown };
+      const { text = "", reply_to, attachments, thread, client_id, channel, project_id } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown; client_id?: unknown; channel?: unknown; project_id?: unknown };
+      if (project_id !== undefined && (typeof project_id !== "string" || !getProject(this.mcp.store(), project_id) || channel !== project_id)) return json({ error: "Invalid project context" }, 400);
       const room = typeof channel === "string" && channel ? channelsView(this.mcp.store()).channels.find((c) => c.slug === channel)?.slug : undefined;
       if (channel !== undefined && channel !== "" && !room) return json({ error: "channel not found" }, 400);
       if (client_id !== undefined && (typeof client_id !== "string" || !/^[\w:-]{1,100}$/.test(client_id)))
@@ -726,6 +733,23 @@ export class OnlyOne extends DurableObject<Env> {
       if (!id || !/^T-[\w]*\d{4}$/.test(id)) return json({ error: "id required" }, 400);
       this.toInbox({ type: "cancel", id, done: done === true });
       return json({ ok: true });
+    }
+    if (p === "/api/projects" && m === "GET") return json({ projects: listProjects(this.mcp.store()) });
+    if (p === "/api/projects" && m === "POST") {
+      if (who === "machine") return json({ error: "Owner session required" }, 403);
+      const input = await req.json().catch(() => null);
+      const result = createProjectFiles(this.mcp.store(), input);
+      if (typeof result === "string") return json({ error: result }, 400);
+      const changes = Object.entries(result.changes).map(([path, text]) => {
+        const row = this.sql.exec("SELECT version FROM files WHERE path = ? AND deleted = 0", path).toArray()[0];
+        return { path, base_version: Number(row?.version ?? 0), content: b64enc(new TextEncoder().encode(text)) };
+      });
+      if (changes.length) {
+        const r = await handleFiles(this.sql, new Request("https://internal/api/files/commit", { method: "POST", body: JSON.stringify({ msg: "Owner created project", changes }) }), new URL("https://internal/api/files/commit"), "owner");
+        if (!r?.ok) return r ?? json({ error: "Could not save project" }, 500);
+        this.pushStatus();
+      }
+      return json({ project: result.project });
     }
     if (p === "/api/channels" && m === "GET") return json(channelsView(this.mcp.store()));
     if (p === "/api/channels/feed" && m === "GET") { // the channel's digest, however far back the app's feed doesn't reach

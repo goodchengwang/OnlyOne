@@ -1,4 +1,5 @@
 // Builds the prompt for an agent, runs Claude Code / Codex headless, parses the structured result.
+import { projectPrompt } from "./projects";
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -53,6 +54,9 @@ export function buildPrompt(meta: Record<string, string>, body: string, cfg: Cfg
 The fleet coordinates through the shared onlyone folder at ${ROOT} (tasks/, journal/, decisions/, agents/). Read it when you need context; you do not message other agents — you leave traces (commits in project repos, journal lines, follow-up tasks) that they pick up.
 The onlyone folder is not a git repository: files you write there (reports/, memory) are synced to the cloud by the daemon after your run. Never git add/commit them, and never report a task as failed because the onlyone has no git metadata.
 
+# Project registration
+Only the owner can create projects through the app dialog. Never scan to register projects, write project.md, or modify memory/projects.md.
+
 # Your profile
 ${readIf(P("agents", agent, "profile.md"))}
 
@@ -65,8 +69,10 @@ ${readAll(P("policies"))}
 # Owner profile & principles
 ${readAll(P("memory"))}
 
+${projectPrompt(meta.project_id)}
+
 # Owner decision precedents (follow them; never re-ask a decided question)
-${precedents(25) || "(none yet)"}
+${precedents(25, meta.project_id) || "(none yet)"}
 
 # Recent fleet journal
 ${recentJournal() || "(empty)"}

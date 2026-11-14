@@ -1,4 +1,5 @@
 // Decisions: agent asks → AI judge (owner's precedents & principles) → only unprecedented taste calls reach the owner.
+import { projectPrompt, projectMemoryFile } from "./projects";
 import { existsSync, unlinkSync, appendFileSync, writeFileSync } from "node:fs";
 import {
   type Cfg, L, P, agentName, journal, list, newTask, nextId, now, precedents, readAll, readDoc, readIf, today, writeDoc,
@@ -12,7 +13,7 @@ export function openDecision(task: Record<string, string>, res: Result, host: st
   const id = nextId("D", P("decisions"));
   const opts = res.options?.length ? res.options : ["A: approve", "B: reject"];
   writeDoc(P("decisions", "open", `${id}.md`), {
-    id, task: task.id, agent: task.agent, host, created: now(),
+    id, task: task.id, agent: task.agent, host, created: now(), project_id: task.project_id,
     question: res.question ?? "", recommendation: res.recommendation ?? "", options: opts.join(" | "),
     attachments: (res.attachments ?? []).join(" | ") || undefined,
     kind: task.kind === "menu" ? "menu" : undefined,
@@ -36,6 +37,8 @@ Be conservative: when in doubt, "hold". Never decide anything involving money, c
 # Owner principles & profile
 ${readAll(P("memory"))}
 
+${projectPrompt(meta.project_id)}
+
 # Fleet policy
 ${readAll(P("policies"))}
 
@@ -43,7 +46,7 @@ ${readAll(P("policies"))}
 ${readIf(P("memory", "judge-feedback.md"), 6000) || "(none)"}
 
 # Past decisions
-${precedents(60) || "(none)"}
+${precedents(60, meta.project_id) || "(none)"}
 
 # Question ${id} from agent ${meta.agent} (task ${meta.task})
 ${meta.question}
@@ -69,7 +72,7 @@ function learn(meta: Record<string, string>, answer: string, by: string): Record
   if (meta.shadow_verdict && meta.shadow_answer) extra.shadow_agree = choice(meta.shadow_answer) === choice(answer) ? "yes" : "no";
   if (meta.recommendation && meta.kind !== "proposals" && choice(meta.recommendation) !== choice(answer)) {
     extra.overrode_recommendation = "yes";
-    const f = P("memory", "lessons.md");
+    const f = meta.project_id ? P(projectMemoryFile(meta.project_id)) : P("memory", "lessons.md");
     if (!existsSync(f)) writeFileSync(f, "# Lessons learned (auto-appended by agents)\n\n");
     appendFileSync(f, `- ${today()} ${meta.id} [${meta.agent}] Q「${meta.question}」: agent recommended「${meta.recommendation}」, owner chose **${answer}**` +
       `${meta.shadow_answer ? ` (judge would have said「${meta.shadow_answer}」)` : ""}\n`);
@@ -224,11 +227,11 @@ export function overrideJudge(id: string, answer: string, src: string, host: str
   const { meta, body } = readDoc(f);
   if (meta.answered_by !== "judge") return false;
   writeDoc(f, { ...meta, answer, answered_by: `owner-override(${src})`, overridden_judge: meta.answer }, body + `\n## Owner override\n${answer}\n`);
-  const fb = P("memory", "judge-feedback.md");
+  const fb = meta.project_id ? P(projectMemoryFile(meta.project_id)) : P("memory", "judge-feedback.md");
   if (!existsSync(fb)) writeFileSync(fb, "# Owner corrections to judge rulings\n\n");
   appendFileSync(fb, `- ${today()} ${id}: Q「${meta.question}」judge said「${meta.answer}」→ owner: **${answer}**\n`);
   newTask(`Redo per owner override of ${id}`, `Judge answered "${meta.answer}" but the owner overrode it:\n\n**${answer}**\n\nOriginal question: ${meta.question}\nRelated task: ${meta.task}. Adjust/revert the earlier work accordingly.`,
-    { agent: meta.agent, priority: "high", source: `override:${id}` });
+    { agent: meta.agent, priority: "high", source: `override:${id}`, ...(meta.project_id ? { extra: { project_id: meta.project_id } } : {}) });
   journal(host, `🔁 owner overrode judge on ${id}: ${answer}`);
   return true;
 }

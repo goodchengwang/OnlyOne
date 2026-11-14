@@ -19,7 +19,7 @@
 // daily prune keeps only the latest row of every path.
 
 /** Structural subset of Cloudflare's SqlStorage (also satisfied by a bun:sqlite adapter in tests). */
-export interface FilesSql { exec(query: string, ...bindings: any[]): { toArray(): any[] }; readonly databaseSize?: number }
+export interface FilesSql { exec(query: string, ...bindings: any[]): { toArray(): any[] }; readonly databaseSize?: number; transactionSync?<T>(fn: () => T): T }
 
 export const MAX_FILE = 1_500_000;          // bytes per file (SQLite row limit is 2 MB)
 const PAGE_BYTES = 8_000_000;               // response budget for one changes page
@@ -115,7 +115,7 @@ export function pruneHistory(sql: FilesSql, now = Date.now(), dbBytes = 0) {
 }
 
 /** Prefixes the owner session may read (rules, memory, agent profiles, closed decisions). Never config / secrets. */
-export const READABLE = ["policies/", "memory/", "agents/", "decisions/closed/", "reports/"] as const;
+export const READABLE = ["policies/", "memory/", "agents/", "decisions/closed/", "reports/", "projects/"] as const;
 export const readable = (p: unknown): p is string => validPath(String(p ?? "").replace(/\/$/, "") || "x") && READABLE.some((r) => String(p).startsWith(r));
 /** Exclusive upper bound for a prefix range scan on the primary key: "a/" → "a0". */
 export const prefixEnd = (p: string) => p.slice(0, -1) + String.fromCharCode(p.charCodeAt(p.length - 1) + 1);
@@ -194,7 +194,8 @@ export async function handleFiles(sql: FilesSql, req: Request, url: URL, actor: 
       if (content.length > MAX_FILE) return json({ error: `file too large: ${c.path} is ${content.length} bytes (max ${MAX_FILE}); keep large artifacts outside the data folder` }, 413);
       items.push({ path: c.path, base, content, hash: await sha256hex(content) });
     }
-    return applyCas(sql, items, actor, String(b.msg ?? "").slice(0, 500));
+    const apply = () => applyCas(sql, items, actor, String(b.msg ?? "").slice(0, 500));
+    return sql.transactionSync ? sql.transactionSync(apply) : apply();
   }
 
   if (p === "/api/files/history" && req.method === "GET") {

@@ -173,7 +173,7 @@ Distill durable, actionable knowledge — how the owner works, judges and decide
 2. memory/principles.md — decision principles (what they approve/decline, trade-offs they repeatedly pick, risk appetite, when they
    want to be asked vs. not). Each entry: the rule, evidence count, latest date, source "session:<project>/<date>".
 3. memory/focus.md — only if the digest clearly shows a shift in what they work on now (dated).
-4. memory/projects.md / memory/release-cadence.md / memory/owner.md — correct facts (repos, cadences, tools, people roles) the digest reveals.
+4. memory/release-cadence.md / memory/owner.md — correct general facts the digest reveals. Never register projects, modify project.md or memory/projects.md, or copy project-specific facts into global/agent memory. Projects are created only by the owner in the app; write project facts only into an explicitly identified existing project memory.
 5. agents/<id>/memory.md — role-specific lessons (e.g. reviewer: what the owner checks in PRs; maintainer: build/test habits).
 
 6. From the OnlyOne section: for each agent/decision category, how often did the owner pick the recommendation, override the

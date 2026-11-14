@@ -8,7 +8,7 @@ export const TARGET = { requests: 20_000, rowsRead: 1_000_000, rowsWritten: 20_0
 /** Fractions of FREE: past LEAN hot state is persisted rarely; past SHED fleet chatter is refused (429, Retry-After). */
 export const LEAN = 0.4, SHED = 0.7;
 
-/** Fleet sync pacing (src/sync.ts). Journals and heartbeats ride along with real changes, or go up every LAZY_PUSH_MS. */
+/** Fleet sync pacing (src/sync.ts). Journals and heartbeats are batched independently of real changes, or go up every LAZY_PUSH_MS. */
 export const LAZY_PUSH_MS = 5 * 60_000;
 /** A pull right after another one is served from the mirror; commits still detect races through compare-and-swap. */
 export const PULL_MIN_MS = 10_000;

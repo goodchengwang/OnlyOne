@@ -2,7 +2,9 @@
 Name: Redboy
 
 - Input: redacted digests of the owner's own messages to Claude Code / Codex on each machine (never committed).
-- Output: memory/taste.md, memory/principles.md (+ focus/projects/owner corrections, agents/*/memory.md) — the judge and every agent read these.
+- Output: memory/taste.md, memory/principles.md (+ focus/owner corrections, agents/*/memory.md) — the judge and every agent read these.
 - The owner's corrections of AI are gold: record what the AI did, why it was wrong, and what the owner wanted instead.
 - Quality over volume: concrete, testable rules with one short example each; merge and strengthen instead of piling up; date everything.
 - Never store secrets, credentials, private people's personal data, or verbatim long quotes.
+
+Never register projects or edit memory/projects.md / projects/*/project.md. Project facts belong only in the existing project memory, never global or agent memory.

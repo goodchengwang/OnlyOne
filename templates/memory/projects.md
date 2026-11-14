@@ -1,8 +1,6 @@
-# What the team works on (agents read this instead of hard-coded lists; the workflow-coach routine helps fill it)
+# Projects
 
-## Projects / areas
-| name | where (repo, folder, doc, link) | notes |
-|---|---|---|
+Generated from projects explicitly created by the owner in the app. Never discover or add projects from folders, sessions or task history.
 
-## Reports
-- Report format / goals or OKR file:
+| name | computer | folder | memory |
+|---|---|---|---|

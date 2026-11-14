@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
 // onlyone — CLI + daemon for the agent fleet.
 import { CLI_VERSION, displayRev, npmBuild } from "./release";
+import { getProject, projectStore, projectMemoryFile } from "./projects";
 import { guestCmd } from "./guest";
 import { $ } from "bun";
-import { existsSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, statSync, readFileSync, unlinkSync, writeFileSync, mkdirSync } from "node:fs";
 import { parseArgs } from "node:util";
 import {
   type Cfg, P, ROOT, _commitPush, _pull, agentName, chooseCli, claim, commitPush, heartbeat, hostCaps, hostName, journal,
@@ -35,7 +36,7 @@ import { adoptCloudUrl, readOnlyOneToml } from "./sync";
 import { judgeAccuracy, level, needsApproval, noteStuckRoutine, proposeBatch, resolveProposals, routineQueued, supersedeProposed } from "./autonomy";
 import { CODE, L, UPDATE_REQUEST, type UpdateState, setUpdateState, updateState, allowedClis, capOk, idTagFor, isPrimary, runningRev, setApprovalGate, setIdTag } from "./core";
 import { accountEnv, accountsStatus, classify, failoverAccount, pendingLoginIds, pickAccount, reportFailure, retryLogins, submitLoginCode } from "./accounts";
-import { channelPrompt, channels, resolveChannels, updateChannel } from "./channels";
+import { channelPrompt, channels, originChannel, resolveChannels, updateChannel } from "./channels";
 import { teamActs } from "./team";
 import { publishStatus } from "./server";
 
@@ -129,6 +130,16 @@ const pendingRoute: string[] = [];
 const cancelled = new Set<string>(); // tasks the owner cancelled while their agent ran // decisions opened by workers, routed by the next tick
 async function processTask(path: string, cfg: Cfg, host: string) {
   const { meta, body } = readDoc(path);
+  if (meta.project_id) {
+    const project = getProject(projectStore(), meta.project_id);
+    if (!project || !existsSync(project.repo) || !statSync(project.repo).isDirectory() || project.host !== host) {
+      const reason = `Project folder unavailable on ${host}; expected ${project?.host ?? "registered computer"}: ${project?.repo ?? meta.project_id}. No fallback directory was used.`;
+      await locked(async () => { writeDoc(P("tasks", "failed", `${meta.id}.md`), { ...meta, finished: now(), status: "failed" }, `${body}\n\n${reason}`); unlinkSync(path); await _commitPush(`Project task ${meta.id} could not start`); });
+      await notify(reason, cfg, { kind: "notice", ref: meta.id });
+      return;
+    }
+    meta.repo = project.repo; meta.host = project.host;
+  }
   const wanted = allowedClis(meta, cfg);
   const installed = (c: string) => !!Bun.which(c);
   const first = pickAccount(cfg, wanted.filter(installed)) ?? failoverAccount(cfg, null, wanted, installed);
@@ -207,7 +218,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   await locked(async () => {
   await _pull();
 
-  remember(agent, res.lessons, meta.id);
+  remember(agent, res.lessons, meta.id, meta.project_id);
   const depth = Number(meta.depth ?? 0) + 1;
   const maxDepth = cfg.fleet?.max_followup_depth ?? 4;
   const ownerWork = meta.origin === "owner" || /^owner/.test(meta.source ?? "") || ownerPickedMenu(meta);
@@ -216,7 +227,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   const chans = [...new Set([...(meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(res.channels)])].join(",") || undefined;
   for (const f of (res.followups ?? []).slice(0, depth > maxDepth ? 0 : 8)) {
     const id = newTask(f.title, f.body ?? "", { agent: f.agent ?? agent, priority: f.priority ?? meta.priority, repo: f.repo, requires: f.requires, host: f.host,
-      source: `followup:${meta.id}`, extra: { depth: String(depth), ...((f as any).difficulty === "hard" ? { difficulty: "hard" } : {}), ...(ownerWork ? { origin: "owner" } : {}), ...(delegated ? { parent: meta.id } : {}), ...(meta.origin_channel ? { origin_channel: meta.origin_channel } : {}), ...(chans ? { channels: resolveChannels(chans.split(",")).join(",") } : {}) } });
+      source: `followup:${meta.id}`, extra: { ...(meta.project_id ? { project_id: meta.project_id } : {}), depth: String(depth), ...((f as any).difficulty === "hard" ? { difficulty: "hard" } : {}), ...(ownerWork ? { origin: "owner" } : {}), ...(delegated ? { parent: meta.id } : {}), ...(meta.origin_channel ? { origin_channel: meta.origin_channel } : {}), ...(chans ? { channels: resolveChannels(chans.split(",")).join(",") } : {}) } });
     children.push(id);
     journal(host, `  ↳ ${id} → ${f.agent ?? agent}: ${f.title}`);
   }
@@ -336,6 +347,7 @@ function noteUnservable(cfg: Cfg, host: string) {
     const { meta, body } = readDoc(p);
     const reqs = (meta.requires ?? "").split(",").map((x) => x.trim()).filter(Boolean);
     const pins = reqs.filter((r) => r.startsWith("host:"));
+    if (meta.project_id) continue; // A project folder belongs to one computer; never relax this pin.
     if (!pins.length || hosts.some((h) => reqs.every((r) => capOk(r, h.caps)))) continue;
     const rest = reqs.filter((r) => !r.startsWith("host:"));
     const since = Date.parse(meta.parked ?? meta.created ?? "") || Date.now();
@@ -704,7 +716,7 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
     for (const t of todo) {
       const v = r[t.meta.id];
       if (!v || !existsSync(t.p)) continue;
-      const req = [...new Set([...(t.meta.requires ?? "").split(","), ...String(v.requires ?? "").split(",")].map((x) => x.trim()).filter(Boolean))].join(",");
+      const req = [...new Set([...(t.meta.requires ?? "").split(","), ...String(v.requires ?? "").split(",").filter((r) => !t.meta.project_id || !r.trim().startsWith("host:"))].map((x) => x.trim()).filter(Boolean))].join(",");
       const pinned = t.meta.cli && t.meta.cli !== "auto";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
       writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req, ...(pinned ? {} : { cli: v.cli === "codex" ? "codex" : "claude" }),
@@ -802,9 +814,10 @@ async function daemon(cfg: Cfg) {
   // A new task from the owner's chat (created by the chat brain, or by create_task over MCP). It carries the channel's
   // recent conversation and the task it continues, so terse follow-ups ("不行，…", "这个细节记下来") keep their meaning.
   let chatNow: { text: string; chat: string[]; reply?: string; thread?: boolean; channel?: string } | null = null; // the owner message the brain is handling
-  const createOwnerTask = (op: { title: string; details?: string; repo?: string; agent?: string; follows?: string; channels?: unknown[] }) => locked(async () => {
+  const createOwnerTask = (op: { title: string; details?: string; repo?: string; project_id?: string; agent?: string; follows?: string; channels?: unknown[] }) => locked(async () => {
     await _pull();
     const m = chatNow;
+    const projectId = m?.channel?.startsWith("prj-") ? m.channel : op.project_id;
     const prev = op.follows ?? (m?.reply && !["inbox", "active", "waiting"].some((d) => existsSync(P("tasks", d, `${m.reply}.md`))) ? m.reply : undefined);
     const prevFile = prev ? ["done", "failed", "rejected", "blocked", "inbox", "active", "waiting"].map((d) => P("tasks", d, `${prev}.md`)).find(existsSync) : undefined;
     const asked = m ? `The owner (CEO) said in chat:\n\n> ${m.text.replace(/\n/g, "\n> ")}\n` : "The owner asked for this through OnlyOne's MCP connector.\n";
@@ -816,7 +829,7 @@ async function daemon(cfg: Cfg) {
     // said inside a channel: the task belongs to it and its results go back there
     const assignedChannels = [...new Set([...(m?.channel ? [m.channel] : []), ...resolveChannels(op.channels)])].join(",");
     const id = newTask(op.title.slice(0, 80), `${asked}${op.details ? `\n## What the chat understood\n${op.details}\n` : ""}${op.repo ? `\nRepo: ${op.repo}\n` : ""}${context}${cont}\nHandle it like a capable chief of staff (see your profile: "Owner requests").`,
-      { agent: op.agent ?? "lead", source: m ? "owner@chat" : "owner@mcp", priority: "high", extra: { origin: "owner", ...(m?.channel ? { origin_channel: m.channel } : {}), ...(assignedChannels ? { channels: assignedChannels } : {}), ...(op.repo ? { repo: op.repo } : {}), ...(prevFile && prev ? { follows: prev } : {}) } });
+      { agent: op.agent ?? "lead", source: m ? "owner@chat" : "owner@mcp", priority: "high", extra: { origin: "owner", ...(projectId ? { project_id: projectId } : {}), ...(m?.channel ? { origin_channel: m.channel } : {}), ...(assignedChannels ? { channels: assignedChannels } : {}), ...(op.repo ? { repo: op.repo } : {}), ...(prevFile && prev ? { follows: prev } : {}) } });
     journal(host, `💬 ${id} from owner ${m ? "chat" : "MCP"}${prevFile ? ` (follows ${prev})` : ""}: ${op.title.slice(0, 80)}`);
     await _commitPush(`[${host}] chat ${id}`);
     // plan it now and wake the loop, so an idle machine starts it within seconds instead of after the next tick or two
@@ -853,8 +866,15 @@ async function daemon(cfg: Cfg) {
   if (isPrimary(cfg, host) && Bun.which(String(cfg.router?.cli ?? "claude"))) model.warm(systemPrompt());
   if (isPrimary(cfg, host)) startServer(cfg, async (text, { reply, answered, sentAt, thread, channel }) => {
     const got = Date.now();
-    const room = channel ? channels().find((c) => c.slug === channel) : undefined;
-    const m = { text, replyTo: reply, answered, chat: recentChat(text, { channel }), sentAt, ...(room ? { channel: { slug: room.slug, name: room.name, goal: room.goal } } : {}) };
+    const roomId = channel ?? (reply ? originChannel(reply) : undefined);
+    // A newly created cloud project may arrive before the next debounced mirror pull.
+    if (roomId?.startsWith("prj-") && !getProject(projectStore(), roomId)) await locked(() => _pull({ force: true }));
+    const room = roomId ? channels().find((c) => c.slug === roomId) : undefined;
+    if (roomId?.startsWith("prj-") && !room) {
+      appendEvent({ from: "onlyone", kind: "system", channel: roomId, text: L("Project sync is not ready. Please retry this message after reconnecting.", "项目尚未同步完成，请重新连接后重试这条消息。") });
+      return;
+    }
+    const m = { text, replyTo: reply, answered, chat: recentChat(text, { channel: room?.slug }), sentAt, ...(room?.project_id ? { project_id: room.project_id } : {}), ...(room ? { channel: { slug: room.slug, name: room.name, goal: room.goal } } : {}) };
     chatNow = { text, chat: m.chat, reply, thread, channel: room?.slug };
     const post = (r: string, ref?: string) => appendEvent({ from: "onlyone", kind: "system", text: r.slice(0, 2000), ...(ref ? { ref } : {}), ...(thread ? { thread } : {}), ...(room ? { channel: room.slug } : {}) });
     let out: BrainOut;
@@ -866,7 +886,7 @@ async function daemon(cfg: Cfg) {
       // no model (CLI missing, logged out, timeout): the message still becomes work, silently — never lost, never canned
       console.error(`chat brain: ${err}`);
       // a terse follow-up without a reply target continues the task the channel was just about
-      const target = reply ?? followUpTarget(text, feed(new Date(Date.now() - 15 * 60_000).toISOString(), 200));
+      const target = reply ?? followUpTarget(text, feed(new Date(Date.now() - 15 * 60_000).toISOString(), 200).filter((e) => (e.channel ?? "") === (room?.slug ?? "")));
       const amended = target ? await store.act({ tool: "amend_task", id: target, text }) : null;
       const r = amended?.ok ? amended : await store.act({ tool: "create_task", title: text.split("\n")[0].slice(0, 80) });
       out = { reply: "", calls: [{ tool: "fallback", args: {}, ok: !!r.ok, result: r }], rounds: 0, ms: { model: [], total: Date.now() - got }, fallback: true };

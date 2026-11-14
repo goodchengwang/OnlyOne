@@ -43,6 +43,8 @@ test("natural-language member + routine writes run in order and confirm only aft
     expect(seen[1]).toContain('"avatar":"saved"');
     expect(agentName(id)).toBe("小白");
     expect(listRoutines(st).find((r) => r.name === routine)).toMatchObject({ every: "weekdays 09:00", agent: id, enabled: true });
+    expect(loadConfig().routine.find((r: any) => r.name === routine)?.enabled).toBe(true);
+    expect(JSON.parse(readFileSync(P("settings.json"), "utf8")).routines[routine].enabled).toBe(true);
     const roster = members();
     expect(agentDisplayName(`${id}@mac`, true, roster)).toBe("小白");
     expect(agentDisplayName("小白@mac", false, roster)).toBe("小白");
@@ -82,6 +84,8 @@ test("updates preserve the avatar and unrelated routine fields; uploaded avatars
     await runTool(st, "upsert_routine", recurring);
     await runTool(st, "upsert_routine", { name: routine, every: "daily 10:30", enabled: false });
     expect(loadConfig().routine.find((r: any) => r.name === routine)).toMatchObject({ every: "daily 10:30", enabled: false, agent: id, prompt: recurring.prompt, readonly: true });
+    await runTool(st, "upsert_routine", { name: routine, every: "daily 11:00" });
+    expect(loadConfig().routine.find((r: any) => r.name === routine)).toMatchObject({ every: "daily 11:00", enabled: false });
   });
 });
 

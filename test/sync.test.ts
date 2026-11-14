@@ -226,3 +226,27 @@ test("a replaced Worker (older copy, lower revs) is re-learned and our newer fil
   expect(await read("fleet/hosts/a.json")).toBe("{\"seen\":6}\n");
   sync.setTransport(t);
 });
+
+test("task churn cannot force lazy copies or starve them; owner-visible memory updates flush immediately", async () => {
+  const saved = { ...sync.syncTiming };
+  let clock = 1_900_000_000_000;
+  const memory = "projects/prj-00000000-0000-4000-8000-000000000003/memory.md";
+  try {
+    Object.assign(sync.syncTiming, { now: () => clock, lazyPushMs: 300000, pullMinMs: 0 });
+    as("a"); put("a", memory, "# Memory\n"); put("a", "journal/pacing.md", "# Journal\n");
+    expect(await sync.commitPush("initial", { force: true })).toBe(true);
+    const version = (await api("/api/files/history?path=" + encodeURIComponent(memory)))!.json.history[0].version;
+    for (let i = 0; i < 3; i++) {
+      clock += 60000;
+      put("a", memory, `# Memory\n- lesson ${i}\n`); put("a", "tasks/inbox/T-pacing.md", `task state ${i}`);
+      expect(await sync.commitPush("task state")).toBe(true);
+    }
+    expect((await api("/api/files/history?path=" + encodeURIComponent(memory)))!.json.history[0].version).toBe(version);
+    clock += 180000;
+    expect(await sync.commitPush("next tick")).toBe(true);
+    expect((await api("/api/files/history?path=" + encodeURIComponent(memory)))!.json.history[0].version).toBe(version + 1);
+    put("a", memory, "# Memory\n- owner rule\n");
+    expect(await sync.commitPush("owner-visible update", { force: true })).toBe(true);
+    expect((await api("/api/files/history?path=" + encodeURIComponent(memory)))!.json.history[0].version).toBe(version + 2);
+  } finally { Object.assign(sync.syncTiming, saved); }
+});

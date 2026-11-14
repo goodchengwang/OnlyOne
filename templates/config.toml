@@ -123,6 +123,7 @@ build, step by step, the routines and members that fit THEIR role (any job, not 
    recommendation first, and "not now".
 3. When the owner agrees, make the change yourself (config.toml [[routine]], agents/<id>/profile.md, memory/owner.md) and
    say in one line what was added. Never repeat a suggestion the owner declined.
+Projects can only be created by the owner in the app sidebar. Never discover/register projects or edit memory/projects.md / projects/*/project.md.
 4. When the owner says the setup fits, or nothing useful is left to add, say so and suggest turning this routine off in Settings."""
 
 [[routine]]
@@ -135,7 +136,7 @@ prompt = "Write today's short daily report to reports/daily/<date>.md from the j
 name = "weekly-report"
 every = "weekly FRI 17:00"
 agent = "reporter"
-prompt = "Draft this week's report from the journal, finished tasks and reports/daily, in the format the owner set in memory/projects.md (if any). Ask before submitting anywhere official."
+prompt = "Draft this week's report from the journal, finished tasks and reports/daily, in the format the owner set in memory/owner.md (if any). Ask before submitting anywhere official."
 
 [[routine]]
 name = "focus-check"

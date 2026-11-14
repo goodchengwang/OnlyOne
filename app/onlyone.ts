@@ -93,6 +93,7 @@ export type Status = {
   settings_revision?: string;
   onlyone?: { online: boolean; seen?: number; primary?: string };
   channels_revision?: string;
+  projects_revision?: string;
   tasks: Record<"proposed" | "inbox" | "active" | "blocked" | "failed" | "done", number>;
   active: TaskInfo[];
   recent?: TaskInfo[];

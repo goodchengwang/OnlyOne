@@ -15,7 +15,7 @@ readonly = true                       # only observes: runs without approval; ch
 every = "10m"
 agent = "ops-watcher"
 priority = "high"
-prompt = "Check the uptime alert source listed in memory/projects.md. Apply your escalation rules."
+prompt = "Check the uptime alert source in the registered project memory. Apply your escalation rules."
 
 [[routine]]
 name = "pr-review"
@@ -23,7 +23,7 @@ signal = """gh api graphql -f query='query($q:String!){search(query:$q,type:ISSU
 every = "30m"
 agent = "reviewer"
 requires = "os:linux"
-prompt = """Find open PRs on the Core repos in memory/projects.md
+prompt = """Find open PRs on the owner-registered repos in memory/projects.md (read each project memory for its scope)
 whose current head SHA is not in reviews/ (ledger), oldest first, PRs by others before my own. Review & verify up to 3 of them in parallel
 (one subagent + worktree + visual session each) per your profile."""
 
@@ -47,7 +47,7 @@ every = "daily 02:30"
 agent = "rust-maintainer"
 requires = "os:linux"
 weight = "heavy"
-prompt = "In each Core repo of memory/projects.md: git fetch, run cargo check/test on latest main. File follow-ups for regressions."
+prompt = "In each owner-registered repo of memory/projects.md: git fetch, run cargo check/test on latest main. File follow-ups for regressions."
 
 [[routine]]
 name = "macos-check"

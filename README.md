@@ -16,6 +16,18 @@ Describe an avatar to guide generation, or attach a picture and ask to use it. Y
 change responsibilities, reschedule routines or turn them off in chat. Times use the coordinator's local
 timezone. Avatar files are kept with the member and synced between computers; they do not expire with chat attachments.
 
+## Projects
+
+Use **Projects → Add project** in the sidebar to name a project and choose its source folder.
+Choose the folder with the Mac system dialog; its path and computer are recorded automatically. Phones and browsers can open existing projects; add new folders in the Mac app.
+Only this explicit creation flow registers projects. Session learning, discovered folders, channels and agents never add projects.
+
+Each project has its own conversation, draft and `projects/<id>/memory.md`. Saying “remember this” inside the project
+writes there; explicitly asking for a rule for every project writes global memory instead. The project header opens its memory.
+Tasks, retries and follow-ups retain the project and run on its selected computer. If that computer is offline they wait;
+if its folder is missing they report the error instead of running elsewhere. `memory/projects.md` is a generated index,
+not an editable project registry. Existing conversations and memories are not imported into projects.
+
 ## Install the CLI with npm
 
 Requires Node.js 22+ and npm. The public package is `onlyonecli`; the installed command is `onlyone`.

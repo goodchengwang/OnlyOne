@@ -1,4 +1,5 @@
 // onlyone core — shared files as the world (stigmergy; synced via the owner's Worker, src/sync.ts), task queue, agent runner, journal, memory.
+import { getProject, projectStore, projectMemoryFile } from "./projects";
 import { OFFLINE_AFTER_MINUTES } from "../cloud/src/budget";
 import { existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -197,6 +198,7 @@ export function repoRequires(repo?: string): string[] {
 
 /** A task matches if every comma-separated requirement is in the host's caps (plus what its local repo needs). */
 export function matches(meta: Record<string, string>, caps: string[]): boolean {
+  if (meta.project_id) { const p = getProject(projectStore(), meta.project_id); if (!p || !caps.includes(`host:${p.host}`)) return false; }
   const reqs = [meta.requires, meta.host && meta.host !== "any" ? `host:${meta.host}` : "", ...repoRequires(meta.repo)]
     .join(",").split(",").map((s) => s.trim()).filter(Boolean);
   return reqs.every((r) => capOk(r, caps));
@@ -207,6 +209,9 @@ export let approvalGate: (source: string) => boolean = () => false;
 export const setApprovalGate = (fn: (source: string) => boolean) => { approvalGate = fn; };
 
 export function newTask(title: string, body = "", o: TaskOpts = {}): string {
+  const project = o.extra?.project_id ? getProject(projectStore(), o.extra.project_id) : null;
+  if (o.extra?.project_id && !project) throw new Error("Unknown project");
+  if (project) o = { ...o, repo: project.repo, host: project.host, requires: [...(o.requires ?? "").split(",").filter((r) => r && !r.startsWith("host:")), `host:${project.host}`].join(","), extra: { ...o.extra, repo: project.repo, host: project.host, origin_channel: project.id, channels: project.id } };
   const id = nextId("T", P("tasks"));
   // work the owner asked for (directly or via a delegated parent) never needs re-approval
   const folder = o.extra?.origin !== "owner" && approvalGate(o.source ?? "owner") ? "proposed" : "inbox";
@@ -356,9 +361,9 @@ export function journal(host: string, line: string) {
   appendFileSync(f, `- ${hhmm()} \`${host}\` ${line}\n`);
 }
 
-export function remember(agent: string, lessons: string[] | undefined, source: string) {
+export function remember(agent: string, lessons: string[] | undefined, source: string, projectId?: string) {
   if (!lessons?.length) return;
-  const f = P("agents", agent, "memory.md");
+  const f = projectId ? P(projectMemoryFile(projectId)) : P("agents", agent, "memory.md");
   if (!existsSync(f)) { mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, `# ${agent} memory\n\n`); }
   appendFileSync(f, lessons.map((l) => `- ${l} _(${source}, ${today()})_\n`).join(""));
 }
@@ -366,13 +371,13 @@ export function remember(agent: string, lessons: string[] | undefined, source: s
 export const readIf = (p: string, tail = 12000) => (existsSync(p) ? readFileSync(p, "utf8").slice(-tail) : "");
 
 export const readAll = (dir: string, tail = 12000) =>
-  list(dir).map((p) => `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}`).join("\n\n").slice(-tail);
+  list(dir).filter((p) => p !== P("memory", "projects.md")).map((p) => `### ${p.split("/").pop()}\n${readFileSync(p, "utf8").trim()}`).join("\n\n").slice(-tail);
 
 export const recentJournal = (days = 2) =>
   list(P("journal")).slice(-days).map((p) => readFileSync(p, "utf8").slice(-4000)).join("\n");
 
-export function precedents(n = 30): string {
-  return list(P("decisions", "closed")).slice(-n).map((p) => {
+export function precedents(n = 30, projectId?: string): string {
+  return list(P("decisions", "closed")).filter((p) => { const id = readDoc(p).meta.project_id; return !id || id === projectId; }).slice(-n).map((p) => {
     const { meta } = readDoc(p);
     return `- ${meta.id} [${meta.agent}] Q: ${meta.question}\n  → **${meta.answer}** (by ${meta.answered_by})`;
   }).join("\n");

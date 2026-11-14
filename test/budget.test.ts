@@ -35,6 +35,11 @@ const DEV_RELOADS = HOSTS.length * 8 * 10, DEV_REQUESTS = DEV_RELOADS * 8, DEV_R
 const SERVICE_CHANGES = HOSTS.length * 2, SERVICE_REQUESTS = SERVICE_CHANGES * 16, SERVICE_ROWS = SERVICE_CHANGES * 32;
 // Three owner-created members/routines per day: each of three clients fetches the avatar and (if open) settings
 // once, plus one state push per change (2 rows). File traffic is measured below; no unattended requests/writes.
+// Three manual project creations/day; each writes metadata, initial memory and index (measured below).
+// Three clients refresh the shared channel snapshot once per creation; its first message may pull the new record once.
+// Plus 20 memory opens/client/day.
+// No project timer: unattended cost is zero. Reads write no rows; reserve 2 metering rows per owner request.
+const PROJECT_REQUESTS = 3 * (1 + HOSTS.length + 1) + HOSTS.length * 20, PROJECT_ROWS = PROJECT_REQUESTS * 2;
 const TEAM_REQUESTS = 3 * (3 + 3 + 1), TEAM_ROWS = 3 * 2;
 const RECEIPT_ROWS = 50;
 const OTHER_ROWS = RECEIPT_ROWS + (HOSTS.length * TASKS_PER_HOST * 2 + 96) * 2 + 50 * 6 + 2_000; // + events the fleet reports
@@ -110,8 +115,27 @@ test("a fleet day stays under the free-plan target", async () => {
     expect(await sync.commitPush(`owner routine daily-${i}`)).toBe(true);
     for (const h of HOSTS.slice(1)) { as(h); await sync.pull(); }
   }
-  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS + ENROLL_REQUESTS + DEV_REQUESTS + TEAM_REQUESTS + SERVICE_REQUESTS;
-  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS + ENROLL_ROWS + DEV_ROWS + TEAM_ROWS + SERVICE_ROWS;
+  // Project records and subsequent memory changes use the same CAS/sync paths as actual owner-created files.
+  as(HOSTS[0]);
+  for (let i = 0; i < 3; i++) {
+    const id = `prj-00000000-0000-4000-8000-${String(i).padStart(12, "0")}`;
+    const dir = join(dirs[HOSTS[0]], "projects", id); mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "project.md"), `---\nid: ${id}\nname: Project ${i}\nhost: h1\nrepo: /work/${i}\ncreated: 2026-11-07T00:00:00Z\n---\n`);
+    writeFileSync(join(dir, "memory.md"), "# Project memory\n");
+    mkdirSync(join(dirs[HOSTS[0]], "memory"), { recursive: true });
+    writeFileSync(join(dirs[HOSTS[0]], "memory/projects.md"), `# ${i + 1} owner-created projects\n`);
+    expect(await sync.commitPush("owner created project")).toBe(true);
+    for (let n = 0; n < 20; n++) {
+      appendFileSync(join(dir, "memory.md"), `- Project lesson ${n}\n`);
+      expect(await sync.commitPush("project lesson")).toBe(true);
+    }
+    for (const h of HOSTS.slice(1)) { as(h); await sync.pull(); }
+    as(HOSTS[0]);
+  }
+  clock += LAZY_PUSH_MS;
+  expect(await sync.commitPush("flush batched project lessons")).toBe(true);
+  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS + ENROLL_REQUESTS + DEV_REQUESTS + TEAM_REQUESTS + SERVICE_REQUESTS + PROJECT_REQUESTS;
+  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS + ENROLL_ROWS + DEV_ROWS + TEAM_ROWS + SERVICE_ROWS + PROJECT_ROWS;
   console.log(`fleet day: ${requests} requests (target ${TARGET.requests}), ~${rowsWritten} rows written (target ${TARGET.rowsWritten})`);
   expect(requests).toBeLessThanOrEqual(TARGET.requests);
   expect(rowsWritten).toBeLessThanOrEqual(TARGET.rowsWritten);

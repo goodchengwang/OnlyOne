@@ -1981,3 +1981,63 @@ describe("decision notification", () => {
     });
   }
 });
+
+test("projects: the compact dialog hides execution fields; registered rooms keep memory and drafts scoped", async () => {
+  const created: any[] = [], sent: any[] = [];
+  const project: any = { id: "prj-10000000-0000-4000-8000-000000000001", slug: "prj-10000000-0000-4000-8000-000000000001", project_id: "prj-10000000-0000-4000-8000-000000000001", name: "Alpha", host: "mac", repo: "/work/alpha", goal: "Alpha workspace", status: "active", created: ts(1), last_activity: ts(1), items: [], count: 0, refs: [] };
+  const app = await open("./App.tsx", {
+    storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 1200, height: 860,
+    network: {
+      ...onlyone(sent),
+      [`GET ${URL}/api/channels`]: () => ({ body: { channels: project ? [project] : [] } }),
+      [`GET ${URL}/api/channels/feed?*`]: { body: { events: [] } },
+      [`GET ${URL}/api/files/read?*`]: { body: { content: "# Alpha memory\n- Alpha-specific rule" } },
+      [`POST ${URL}/api/projects`]: (r: { body?: string | null }) => { created.push(JSON.parse(r.body!)); return { body: { project } }; },
+    },
+  });
+  await app.waitFor("id:add-project");
+  expect(created.length).toBe(0);
+  await app.press("id:add-project");
+  await app.waitFor("id:project-name");
+  await app.type("id:project-name", "Cancelled");
+  await app.press("id:project-cancel");
+  expect(created.length).toBe(0);
+  await app.press("id:add-project");
+  await app.type("id:project-name", "Alpha");
+  expect(app.shows("id:project-host")).toBe(false);
+  expect(app.shows("id:project-folder")).toBe(false);
+  expect(app.shows("id:project-pick-folder")).toBe(true);
+  await app.press("id:project-cancel");
+  expect(created.length).toBe(0);
+  await app.press(`id:side-project-${project.id}`);
+  await app.waitFor("id:project-memory");
+  expect(app.shows(`id:side-project-${project.id}`)).toBe(true);
+  expect(app.shows(`id:side-channel-${project.id}`)).toBe(false);
+  expect(app.shows("id:channel-archive")).toBe(false);
+  await app.type("id:composer", "Alpha draft");
+  await app.press("label:主会话");
+  expect(app.shows("Alpha draft")).toBe(false);
+  await app.type("id:composer", "Main draft");
+  await app.press(`id:side-project-${project.id}`);
+  await app.waitFor("Alpha draft");
+  expect(app.shows("Main draft")).toBe(false);
+  await app.press("id:send");
+  await app.waitUntil(() => sent.length === 1, { timeout: 10000 });
+  expect(sent[0]).toMatchObject({ text: "Alpha draft", channel: project.id, project_id: project.id });
+  await app.press("id:project-memory");
+  await app.waitFor("Alpha-specific rule");
+});
+
+test("projects: the dialog fits a narrow phone sidebar", async () => {
+  const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 390, height: 844, platform: "ios", network: { ...onlyone([]), [`GET ${URL}/api/channels`]: { body: { channels: [] } } } });
+  await app.waitFor("id:composer");
+  await app.press("label:菜单");
+  await app.waitFor("id:add-project");
+  await app.press("id:add-project");
+  await app.waitFor("id:project-create");
+  expect(app.shows("id:project-name")).toBe(true);
+  expect(app.shows("id:project-folder")).toBe(false);
+  expect(app.shows("id:project-host")).toBe(false);
+  expect(app.shows("请在 Mac App 中选择项目文件夹。")).toBe(true);
+  await app.press("id:project-cancel");
+});

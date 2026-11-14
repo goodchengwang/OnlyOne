@@ -22,6 +22,7 @@ import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } f
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
 import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
+import { createProject, projectStore, listProjects, getProject } from "./projects";
 import { channels, originChannel, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
@@ -202,6 +203,7 @@ export function status() {
     })(),
     decisions: list(P("decisions", "open")).map((p) => { const m = readDoc(p).meta; return { id: m.id, kind: m.kind ?? "decision", question: m.question, held: !!m.held, task: m.task }; }),
     channels_revision: JSON.stringify(channels()),
+    projects_revision: JSON.stringify(listProjects(projectStore())),
     hosts: hostViews(active, others.filter((t) => t.state === "done" || t.state === "failed")),
     /** The owner's latest "update every machine" (each host reports its progress on it in `hosts[].update`). */
     update: (() => { try { return { at: String(JSON.parse(readFileSync(UPDATE_REQUEST(), "utf8")).at ?? "") }; } catch { return undefined; } })(),
@@ -498,6 +500,17 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         if (!id || !/^T-[\w]*\d{4}$/.test(id)) return json({ error: "id required" }, 400);
         return json({ ok: true, result: await cancelTask(id, done === true) });
       }
+      if (url.pathname === "/api/projects" && req.method === "GET") return json({ projects: listProjects(projectStore()) });
+      if (url.pathname === "/api/projects" && req.method === "POST") {
+        if (cfg.cloud?.url) return json({ error: "Create projects through the signed-in cloud app" }, 409);
+        const input = await req.json().catch(() => null);
+        const r = await locked(async () => {
+          const p = createProject(input);
+          if (typeof p !== "string" && !await _commitPush("Owner created project")) return "Could not sync project; retry creation";
+          return p;
+        });
+        return typeof r === "string" ? json({ error: r }, 400) : json({ project: r });
+      }
       if (url.pathname === "/api/channels" && req.method === "GET") return json(channelsView(taskStore()));
       if (url.pathname === "/api/channels/feed" && req.method === "GET") {
         const c = channelsView(taskStore()).channels.find((c) => c.slug === url.searchParams.get("slug"));
@@ -531,7 +544,8 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       }
       if (url.pathname === "/api/events" && req.method === "POST") return json(appendEvent(await req.json() as Event));
       if (url.pathname === "/api/messages" && req.method === "POST") {
-        const { text = "", reply_to, attachments, thread: inThread, client_id, channel: inChannel } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown; client_id?: unknown; channel?: unknown };
+        const { text = "", reply_to, attachments, thread: inThread, client_id, channel: inChannel, project_id } = (await req.json()) as { text?: string; reply_to?: string; attachments?: unknown; thread?: unknown; client_id?: unknown; channel?: unknown; project_id?: unknown };
+        if (project_id !== undefined && (typeof project_id !== "string" || !getProject(projectStore(), project_id) || inChannel !== project_id)) return json({ error: "Invalid project context" }, 400);
         const channel = typeof inChannel === "string" && inChannel ? channels().find((c) => c.slug === inChannel)?.slug : undefined;
         if (inChannel !== undefined && inChannel !== "" && !channel) return json({ error: "channel not found" }, 400);
         if (client_id !== undefined && (typeof client_id !== "string" || !/^[\w:-]{1,100}$/.test(client_id)))
@@ -545,7 +559,7 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         if (files.some((p) => !existsSync(join(MEDIA, basename(p))))) return json({ error: "attachment not found" }, 400);
         if (!text.trim() && !files.length) return json({ error: "text required" }, 400);
         const thread = inThread === true && /^T-/.test(reply_to ?? "");
-        const ev = appendEvent({ from: "owner", kind: "owner", text, ref: reply_to, ...(client_id ? { client_id: client_id as string } : {}), ...(files.length ? { attachments: files } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}) });
+        const ev = appendEvent({ from: "owner", kind: "owner", text, ref: reply_to, ...(client_id ? { client_id: client_id as string } : {}), ...(files.length ? { attachments: files } : {}), ...(thread ? { thread } : {}), ...(channel ? { channel } : {}), ...(channel?.startsWith("prj-") ? { project_id: channel } : {}) });
         await handleOwnerMessage(text, reply_to, false, { paths: files, key: ev.id, thread, channel: ev.channel });
         return json(ev);
       }
