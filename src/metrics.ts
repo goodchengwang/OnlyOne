@@ -31,7 +31,8 @@ export function computeMetrics(days = 7) {
     shadow_judge: judgeAccuracy(),
     shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])), proposal_batches: approvals.length, proposals_rejected_total: rejected,
     window_days: days, generated: new Date().toISOString(), agents,
-    decisions: { total: decisions.length, by_judge: byWho(/^judge/), by_owner: byWho(/^owner\(/), owner_overrides_of_judge: byWho(/override/),
+    decisions: { total: decisions.length, by_judge: byWho(/^judge/), by_owner: byWho(/^owner\(/),
+      owner_overrides_of_judge: decisions.filter((m) => /^owner/.test(m.answered_by ?? "") && m.overrode_recommendation === "yes").length,
       owner_accepted_recommendation: rubberStamp },
   };
   writeFileSync(P("fleet", "metrics.json"), JSON.stringify(out, null, 2));

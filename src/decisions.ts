@@ -9,15 +9,43 @@ import { ask, type Result } from "./runner";
 import { judgeMayDecide } from "./autonomy";
 import { isMergeCard, mergeHeadline } from "./waits";
 
+/** A refreshed menu replaces the older unanswered one: keep one live card, no stacked duplicates.
+ *  The old card keeps its full content in decisions/closed, and its menu task ends instead of being resumed. */
+export function supersedeOpenMenus(keepId: string, host: string): string[] {
+  const gone: string[] = [];
+  for (const p of list(P("decisions", "open"))) {
+    const { meta, body } = readDoc(p);
+    if (meta.kind !== "menu" || meta.id === keepId) continue;
+    writeDoc(P("decisions", "closed", `${meta.id}.md`),
+      { ...meta, answer: `已被 ${keepId} 取代`, answered_by: "superseded", superseded_by: keepId, answered: now() },
+      `${body}\n## Superseded by ${keepId} (${now()})\nA newer next-steps menu replaced this card; it was never answered.\n`);
+    unlinkSync(p);
+    for (const folder of ["blocked", "waiting"] as const) {
+      const t = P("tasks", folder, `${meta.task}.md`);
+      if (!existsSync(t)) continue;
+      const { meta: tm, body: tb } = readDoc(t);
+      writeDoc(P("tasks", "done", `${meta.task}.md`), { ...tm, status: "done", finished: now(), superseded_by: keepId },
+        `${tb}\n\n## Superseded (${now()})\nThis menu was replaced by ${keepId} before the owner answered it.\n`);
+      unlinkSync(t);
+    }
+    gone.push(meta.id);
+  }
+  if (gone.length) journal(host, `🗂 menus ${gone.join(", ")} superseded by ${keepId}`);
+  return gone;
+}
+
 export function openDecision(task: Record<string, string>, res: Result, host: string): string {
   const id = nextId("D", P("decisions"));
   const opts = res.options?.length ? res.options : ["A: approve", "B: reject"];
+  const kind = task.kind === "menu" ? "menu" : task.kind === "worktree" ? "worktree" : undefined;
   writeDoc(P("decisions", "open", `${id}.md`), {
     id, task: task.id, agent: task.agent, host, created: now(), project_id: task.project_id,
     question: res.question ?? "", recommendation: res.recommendation ?? "", options: opts.join(" | "),
     attachments: (res.attachments ?? []).join(" | ") || undefined,
-    kind: task.kind === "menu" ? "menu" : task.kind === "worktree" ? "worktree" : undefined,
+    kind, supersedes: kind === "menu" ? list(P("decisions", "open")).map((p) => readDoc(p).meta)
+      .filter((m) => m.kind === "menu" && m.id !== id).map((m) => m.id).join(",") || undefined : undefined,
   }, `## Context\n${res.summary}\n\n## Options\n${opts.map((o) => `- ${o}`).join("\n")}\n`);
+  if (kind === "menu") supersedeOpenMenus(id, host);
   return id;
 }
 
