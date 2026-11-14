@@ -33,12 +33,12 @@ type Turn = { ts: string; project: string; tool: "claude" | "codex"; text: strin
 
 // ---------------------------------------------------------------- redaction
 // A credential name never says "token" or "password": cookies and session ids are named
-// galaxy_creator_session_id, galaxy.creator.beaker.session.id, timeslogin, sec_poison_id, PHPSESSID…
-// so match the keyword anywhere inside the name, with `sid` only as a whole segment (consider, president).
+// creator_session_id, sub.domain.session.id, applogin, PHPSESSID — so match the keyword anywhere inside
+// the name, with `sid` only as a whole segment (consider, president).
 const CRED_NAME = String.raw`[A-Za-z0-9_.-]*(?:sess|token|key|cookie|secret|pass|auth|login|csrf|xsrf)[A-Za-z0-9_.-]*|\bsid(?![a-z])[A-Za-z0-9_.-]*`;
 // name=value / name: value — keep the name and the separator, drop the value. `=` is not part of an
-// unquoted value, so "Cookie: webBuild=6.41.7; sess=<id>" redacts only the value that is a value.
-const ASSIGN = new RegExp(String.raw`((?:${CRED_NAME})["']?\s*[:=：]\s*)(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s;,，。、=]{12,}=*)`, "gi");
+// unquoted value, so "Cookie: build=6.41.7; session=<id>" redacts only the value that is a value.
+const ASSIGN = new RegExp(String.raw`((?:${CRED_NAME})["']?\s*[:=：]\s*)(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s;,，。、=]{12,}=*(?![\w=]))`, "gi");
 const SECRET = [
   /\b(sk-(?:ant|proj|live|test)?-?[\w-]{16,})/g, /\b(gh[pousr]_[A-Za-z0-9]{20,})/g, /\b(xox[abpr]-[\w-]{10,})/g,
   /\b(github_pat_\w{20,})/g, /\b(glpat-[\w-]{15,})/g, /\b(npm_[A-Za-z0-9]{30,})/g, /\b(hf_[A-Za-z0-9]{25,})/g, /\b([rs]k_(?:live|test)_\w{10,})/g,
@@ -53,7 +53,7 @@ const SECRET = [
 export function redact(s: string): string {
   let out = s.replace(/[\w.+-]{2000,}/g, "[REDACTED]"); // not prose, and the email and URL patterns go quadratic on it
   for (const re of SECRET) out = out.replace(re, (_m, g1) => (typeof g1 === "string" && /[:=：]\s*$/.test(g1) ? `${g1}[REDACTED]` : "[REDACTED]"));
-  // Fallback for names no keyword matches (sec_poison_id=…): a long run that looks minted rather than
+  // Fallback for a value whose name says nothing about being one: a long run that looks minted rather than
   // written — a base64/hex id, hash or cookie value. Needs a digit and a capital, so all-lowercase prose
   // like claude-opus-4-5-20251101 or onlyone-app-52eb… survives, and a run ending at / is a path segment.
   out = out.replace(/(?<![\w.+-])[A-Za-z0-9+/-]{20,}(?![\w.+-])(?!\/)/g, (m) => (/[0-9]/.test(m) && /[A-Z]/.test(m) ? "[REDACTED]" : m));

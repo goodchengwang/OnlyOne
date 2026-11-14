@@ -49,9 +49,9 @@ test("redact: credentials in headers and URLs", () => {
 
 test("redact: cookie and session names are redacted by keyword, name kept", () => {
   // The forms that leaked into the 2026-11-14 digest: the name never says "token" or "password".
-  expect(redact("Cookie: webBuild=6.47.1; galaxy_creator_session_id=" + token(36))).toBe("Cookie: webBuild=6.47.1; galaxy_creator_session_id=[REDACTED]");
-  expect(redact("galaxy.creator.beaker.session.id=" + hex(22))).toBe("galaxy.creator.beaker.session.id=[REDACTED]");
-  expect(redact("timeslogin=" + token(36) + "; webBuild=6.47.1")).toBe("timeslogin=[REDACTED]; webBuild=6.47.1");
+  expect(redact("Cookie: buildVersion=6.41.7; creator_session_id=" + token(36))).toBe("Cookie: buildVersion=6.41.7; creator_session_id=[REDACTED]");
+  expect(redact("acme.sub.domain.session.id=" + hex(22))).toBe("acme.sub.domain.session.id=[REDACTED]");
+  expect(redact("applogin=" + token(36) + "; buildVersion=6.41.7")).toBe("applogin=[REDACTED]; buildVersion=6.41.7");
   expect(redact("PHPSESSID=" + token(26))).toBe("PHPSESSID=[REDACTED]");
   expect(redact("set-cookie: csrftoken=" + token(32))).toBe("set-cookie: csrftoken=[REDACTED]");
   expect(redact('{"sessionId": "' + token(24) + '"}')).toBe('{"sessionId": [REDACTED]}');
@@ -59,8 +59,8 @@ test("redact: cookie and session names are redacted by keyword, name kept", () =
 });
 
 test("redact: a minted-looking value is dropped even when the name says nothing", () => {
-  expect(redact("sec_poison_id=" + token(32))).toBe("sec_poison_id=[REDACTED]"); // no keyword in the name: the fallback catches it
-  expect(redact("sec_poison_id=" + uuid)).toBe("sec_poison_id=[REDACTED]"); // lowercase-only uuid
+  expect(redact("visitor_id=" + token(32))).toBe("visitor_id=[REDACTED]"); // no keyword in the name: the fallback catches it
+  expect(redact("visitor_id=" + uuid)).toBe("visitor_id=[REDACTED]"); // lowercase-only uuid
   expect(redact("state " + token(43))).toBe("state [REDACTED]");
   expect(redact("commit " + hex(40))).toBe("commit [REDACTED]");
 });
