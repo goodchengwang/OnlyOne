@@ -12,7 +12,11 @@ test("OnlyOne has an independent app identity, CLI and bootstrap filename", () =
   const pkg = JSON.parse(readFileSync(join(source, "package.json"), "utf8"));
   expect(app.name).toBe("OnlyOne");
   expect(app.id).toBe("dev.onlyone.app");
-  expect(app.updater).toBeUndefined();
+  expect(app.updater.github).toBe("goodchengwang/OnlyOne");
+  expect(Buffer.from(app.updater.publicKey, "base64").length).toBe(32);
+  expect(app.updater.packages.roots).toHaveLength(1);
+  expect(Buffer.from(app.updater.packages.roots[0], "base64").length).toBe(32);
+  expect(app.updater.packages.roots[0]).not.toBe(app.updater.publicKey);
   expect(pkg.bin).toEqual({ onlyone: "src/cli.ts" });
   expect(basename(onlyoneTomlPath())).toBe("onlyone.toml");
   expect(existsSync(join(source, "app/onlyone.ts"))).toBe(true);

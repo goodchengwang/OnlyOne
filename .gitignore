@@ -8,3 +8,7 @@ node_modules/
 .claude/
 /.cloud-deploy/
 /dist/
+
+# App signing material must never enter source control.
+*.secret
+*.jks
