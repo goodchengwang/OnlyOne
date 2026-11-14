@@ -16,7 +16,7 @@ export function openDecision(task: Record<string, string>, res: Result, host: st
     id, task: task.id, agent: task.agent, host, created: now(), project_id: task.project_id,
     question: res.question ?? "", recommendation: res.recommendation ?? "", options: opts.join(" | "),
     attachments: (res.attachments ?? []).join(" | ") || undefined,
-    kind: task.kind === "menu" ? "menu" : undefined,
+    kind: task.kind === "menu" ? "menu" : task.kind === "worktree" ? "worktree" : undefined,
   }, `## Context\n${res.summary}\n\n## Options\n${opts.map((o) => `- ${o}`).join("\n")}\n`);
   return id;
 }
@@ -27,6 +27,8 @@ export async function judge(id: string, cfg: Cfg): Promise<Verdict | null> {
   if (cfg.judge?.enabled === false) return { verdict: "hold", reason: "judge disabled" };
   const { meta, body } = readDoc(P("decisions", "open", `${id}.md`));
   if (meta.kind === "menu") return { verdict: "hold", reason: "next-steps menu is always the owner's call" };
+  // whether work stays on its branch or becomes a PR is the owner's explicit choice (see worktree.ts / cli.ts)
+  if (meta.kind === "worktree") return { verdict: "hold", reason: "the owner chooses what happens to the worktree" };
   const prompt = `You are the owner's JUDGE. You apply the owner's recorded taste and past rulings to questions raised by their AI agent fleet.
 Decide one of:
 - "decided": the owner has clearly answered this kind of question before (precedent or principle). Give the answer and cite where.
@@ -174,7 +176,7 @@ export async function routeDecision(id: string, cfg: Cfg, host: string) {
   const f = P("decisions", "open", `${id}.md`);
   let { meta, body } = readDoc(f);
   // Every judge run is recorded (hold included) so closeDecision can score it against the owner's answer.
-  if (meta.kind !== "menu" && cfg.judge?.enabled !== false) {
+  if (meta.kind !== "menu" && meta.kind !== "worktree" && cfg.judge?.enabled !== false) {
     meta = { ...meta, shadow_verdict: v?.verdict ?? "error", shadow_answer: v?.answer ?? (v?.verdict === "sent_back" ? `SENT BACK: ${v.reason}` : "") };
     writeDoc(f, meta, body); // persisted before any close below reads it back
   }

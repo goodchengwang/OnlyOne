@@ -157,7 +157,10 @@ export function taskView(path: string, state: string, log: string[]) {
   const needs = state === "inbox" && m.parked && m.requires ? String(m.requires) : undefined;
   if (needs) state = "nohost";
   return { id: m.id, title: m.title, agent: m.agent, host: m.claimed_by, state, needs, waiting_on: m.waiting_on, wake_at: m.wake_at, started: m.started, created: m.created, cli: m.cli_used, model: m.model,
-    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, request, runs, steps };
+    finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, request, runs, steps,
+    // where the requirement lives: its branch, the worktree when it has one, why, and what was committed there
+    branch: m.branch, worktree: m.worktree, worktree_mode: m.worktree_mode, worktree_why: m.worktree_why, base_branch: m.base_branch,
+    commit: m.commit, diff: m.diff, pr: m.pr, worktree_error: m.worktree_error };
 }
 
 type TaskView = ReturnType<typeof taskView>;

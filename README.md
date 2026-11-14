@@ -28,6 +28,19 @@ Tasks, retries and follow-ups retain the project and run on its selected compute
 if its folder is missing they report the error instead of running elsewhere. `memory/projects.md` is a generated index,
 not an editable project registry. Existing conversations and memories are not imported into projects.
 
+### Worktrees per requirement
+
+A requirement that has a project repository is judged before it starts. A small, self-contained change stays on the
+current branch; a feature, a multi-file change, or a requirement that would run alongside another task on the same
+repository gets its own branch (`agent/<task id>-<slug>`) and checkout under `~/.onlyone/work/`. Several requirements
+on one repository then progress in parallel without blocking each other. The task page shows the branch, the worktree
+path, the reason it was chosen, the commit and the diff.
+
+When the agent finishes, the executor commits whatever the run left uncommitted on that branch, then asks the owner
+whether to keep iterating in the worktree or open a PR to the base branch. The owner always makes that choice (the
+judge does not answer it), and the agent never merges. Saying “use a worktree” in the request, or
+`onlyone add --worktree`, forces one; `[worktree] enabled = false` in `config.toml` turns the behaviour off.
+
 ## Install the CLI with npm
 
 Requires Node.js 22+ and npm. The public package is `onlyonecli`; the installed command is `onlyone`.

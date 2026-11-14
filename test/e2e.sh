@@ -12,6 +12,8 @@ cd "$W/data"
 cat > "$W/fake-agent" <<'F'
 #!/usr/bin/env bash
 p=$(cat)
+# a requirement in its own worktree edits a file there (but not on the rerun that follows the owner's decision)
+if grep -q "^## Worktree" <<<"$p" && ! grep -q "Decision D-" <<<"$p"; then echo "worktree change" >> change.txt; fi
 if grep -q "You are the owner.s JUDGE" <<<"$p"; then echo '```json
 {"verdict":"hold","reason":"new taste call"}
 ```'; exit; fi
@@ -20,6 +22,9 @@ if grep -q "You place tasks for an AI agent fleet" <<<"$p"; then
 fi
 if grep -q "Decision D-" <<<"$p"; then echo '```json
 {"status":"done","summary":"followed owner decision"}
+```'
+elif grep -q "^# Task T-[0-9]*: WTREE" <<<"$p"; then echo '```json
+{"status":"done","summary":"changed a file"}
 ```'
 elif grep -q "^# Task T-[0-9]*: SPLIT" <<<"$p" && ! grep -q "Results from delegated subtasks" <<<"$p"; then echo '```json
 {"status":"delegated","summary":"split in two","followups":[{"title":"part one","agent":"reviewer"},{"title":"part two","agent":"rust-maintainer"}]}
@@ -84,6 +89,31 @@ SPL=$(onlyone add "SPLIT big job" | tail -1)
 tick_until "grep -qs 'Results from delegated subtasks' tasks/done/$SPL.md"
 grep -q "Results from delegated subtasks" tasks/done/$SPL.md
 ! grep -l "parent: $SPL" tasks/proposed/*.md 2>/dev/null
+# A requirement-level worktree: its own branch and checkout, the run committed there, then the owner asked whether
+# to keep iterating or open a PR. Nothing touches the main checkout.
+REPO="$W/repo"; mkdir -p "$REPO"
+git -C "$REPO" init -q -b main
+echo hello > "$REPO/README.md"
+git -C "$REPO" add -A
+git -C "$REPO" -c user.name=e2e -c user.email=e2e@e2e commit -qm init
+WT=$(onlyone add "WTREE change header" --repo "$REPO" --worktree | tail -1)
+tick_until "test -f tasks/blocked/$WT.md && grep -lqs '^task: $WT\$' decisions/open/D-*.md"
+test -f tasks/blocked/$WT.md
+D=$(grep -l "^task: $WT$" decisions/open/*.md | head -1 | xargs basename | sed 's/\.md$//')
+test -n "$D"
+grep -q "^kind: worktree" decisions/open/$D.md
+grep -q "^worktree_mode: worktree" tasks/blocked/$WT.md
+WTDIR=$(sed -n 's/^worktree: //p' tasks/blocked/$WT.md | tail -1)
+BR=$(sed -n 's/^branch: //p' tasks/blocked/$WT.md | tail -1)
+test -d "$WTDIR" && test -n "$BR"
+test -f "$WTDIR/change.txt"                                  # the agent worked in the worktree
+test -z "$(git -C "$REPO" status --porcelain)"               # the main checkout is untouched
+test "$(git -C "$REPO" rev-list --count "main..$BR")" -ge 1  # the run's work is committed on the branch
+git -C "$WTDIR" log -1 --format=%B | grep -q "Agent: lead"
+onlyone decide "$D" A
+tick_until "test -f tasks/done/$WT.md"
+test -f tasks/done/$WT.md
+grep -q "^branch: $BR$" tasks/done/$WT.md
 # a second host joins and mirrors the same data
 ONLYONE_HOME="$W/w2" ONLYONE_DATA_DIR="$W/w2/data" ONLYONE_HOST=w2 bun "$SRC/src/cli.ts" init https://onlyone.test --token w2-token >/dev/null
 cmp tasks/done/T-0001.md "$W/w2/data/tasks/done/T-0001.md"

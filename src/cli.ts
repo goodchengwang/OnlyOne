@@ -13,6 +13,7 @@ import {
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
+import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, type WorkInfo, type Worktree } from "./worktree";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
@@ -128,8 +129,29 @@ export function runRoutines(cfg: Cfg, host: string, primary: boolean) {
 // ------------------------------------------------------------------ task processing
 const pendingRoute: string[] = [];
 const cancelled = new Set<string>(); // tasks the owner cancelled while their agent ran // decisions opened by workers, routed by the next tick
+const TASK_FOLDERS = ["inbox", "active", "waiting", "blocked", "failed", "done", "rejected"];
+/** A task's meta wherever it currently lives (a follow-up continues the checkout of the task it follows). */
+function taskMetaAnywhere(id?: string): Record<string, string> | undefined {
+  if (!id) return undefined;
+  for (const f of TASK_FOLDERS) {
+    const p = P("tasks", f, `${id}.md`);
+    if (existsSync(p)) return readDoc(p).meta;
+  }
+  return undefined;
+}
+
+/** Is another task on this host already working in the same git repository? Then this one gets its own worktree. */
+function busyRepoFor(host: string, meta: Record<string, string>): boolean {
+  const mine = gitRepo(meta.repo)?.root;
+  if (!mine) return false;
+  return list(P("tasks", "active"), /^T-.*\.md$/).some((p) => {
+    const m = readDoc(p).meta;
+    return m.id !== meta.id && m.claimed_by === host && !!m.repo && gitRepo(m.repo)?.root === mine;
+  });
+}
+
 async function processTask(path: string, cfg: Cfg, host: string) {
-  const { meta, body } = readDoc(path);
+  let { meta, body } = readDoc(path);
   if (meta.project_id) {
     const project = getProject(projectStore(), meta.project_id);
     if (!project || !existsSync(project.repo) || !statSync(project.repo).isDirectory() || project.host !== host) {
@@ -154,7 +176,34 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   }
   // the recovery note (meta.requeue_note) reaches the agent, but never becomes part of the owner's request text
   let acct: NonNullable<typeof first> = first;
-  const promptBody = meta.requeue_note ? `${body}\n\n> ${meta.requeue_note}\n` : body;
+  // A requirement gets its own branch when the planner said so, when another task already works in this repo, or
+  // when it continues a task that has a worktree. Small, self-contained changes stay on the main branch.
+  if (!meta.worktree && meta.follows) {
+    const prev = taskMetaAnywhere(meta.follows);
+    if (prev?.worktree) meta = { ...meta, worktree: prev.worktree, branch: prev.branch, base_branch: prev.base_branch, worktree_mode: "worktree", worktree_why: prev.worktree_why };
+  }
+  const wt = decideWorktree({ meta, cfg, busyRepo: !!meta.repo && busyRepoFor(host, meta) });
+  let tree: Worktree | null = null;
+  let treeError = "";
+  if (wt.use) {
+    const r = ensureWorktree({ repo: meta.repo, taskId: meta.id, title: meta.title, existing: meta.worktree, branch: meta.branch, base: meta.base_branch });
+    if ("error" in r) treeError = r.error;
+    else tree = r;
+  }
+  if (tree) {
+    // record the machine holding the checkout; the task itself stays schedulable (a requeued one recreates its branch)
+    meta = { ...meta, worktree_mode: "worktree", worktree_ran: "worktree", worktree_why: wt.why || meta.worktree_why, worktree: tree.path, worktree_host: host, branch: tree.branch, base_branch: tree.base };
+  } else {
+    const current = gitRepo(meta.repo)?.branch || meta.branch;
+    meta = { ...meta, worktree_mode: "main", worktree_ran: "main", ...(current ? { branch: current } : {}),
+      ...(treeError ? { worktree_error: treeError.slice(0, 300), worktree_why: `${wt.why || L("A worktree was planned", "原计划用 worktree")}${L(`; creating it failed (${treeError}), ran on the main branch instead`, `；创建失败（${treeError}），改在主分支执行`)}` } : wt.why ? { worktree_why: wt.why } : {}) };
+    // a checkout left by another machine is not this task's: do not point the page at a path that does not exist here
+    delete meta.worktree; delete meta.base_branch; delete meta.commit; delete meta.diff;
+  }
+  const worktreeNote = tree
+    ? `\n## Worktree\nThis run works in its own git worktree: \`${tree.path}\` on branch \`${tree.branch}\` (base \`${tree.base}\`). Keep every edit inside it. The executor commits whatever is left uncommitted when you finish; the owner then decides whether to keep iterating here or open a PR. Do not push or open a PR unless this run's task text says to.\n`
+    : "";
+  const promptBody = `${meta.requeue_note ? `${body}\n\n> ${meta.requeue_note}\n` : body}${worktreeNote}`;
   let cli = acct.cli, out = "", res!: ReturnType<typeof parseResult>;
   for (let hop = 0; ; hop++) { // quota / login trouble: switch account or CLI on this host instead of waiting it out
     cli = acct.cli;
@@ -170,7 +219,9 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const gh = await githubStarved(cfg);
     const b = budget(sample(cfg), running, meta.weight === "heavy");
     b.note += gh.note ? `\n${gh.note}` : "";
-    out = await runAgent(cli, buildPrompt(meta, promptBody, cfg, b.note), meta.repo || P(), cfg, log, !!meta.gate_override,
+    // the agent's working directory (and the prompt's "Working directory") is the worktree when there is one
+    const runMeta = tree ? { ...meta, repo: tree.path } : meta;
+    out = await runAgent(cli, buildPrompt(runMeta, promptBody, cfg, b.note), tree?.path ?? meta.repo ?? P(), cfg, log, !!meta.gate_override,
       { ...b.env, ...accountEnv(acct) });
     if (cancelled.has(meta.id)) { cancelled.delete(meta.id); return; } // the owner cancelled it while it ran
     if (out.includes(STALLED)) { // went quiet and was stopped: run it again from where it got to, up to twice
@@ -215,10 +266,21 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     });
     return;
   }
+  // Commit the run's work on its own branch before anything is reported: the owner decides what happens to it next.
+  let work: WorkInfo | null = null;
+  if (tree) {
+    work = commitWorktree(tree.path, { taskId: meta.id, title: meta.title, agent, base: tree.base });
+    meta = { ...meta, worktree: tree.path, branch: tree.branch, base_branch: tree.base, worktree_mode: "worktree",
+      ...(work.sha ? { commit: work.sha } : {}), ...(work.diff ? { diff: work.diff } : {}), ...(work.error ? { worktree_error: work.error.slice(0, 300) } : {}) };
+  }
   await locked(async () => {
   await _pull();
 
   remember(agent, res.lessons, meta.id, meta.project_id);
+  if (tree && work) {
+    const what = work.committed ? L(`committed ${work.sha}`, `提交 ${work.sha}`) : L(`no new commit (head ${work.sha ?? "-"})`, `没有新提交（HEAD ${work.sha ?? "-"}）`);
+    journal(host, `🌿 ${meta.id} ${what} · ${tree.branch}${work.diff ? ` · ${work.diff}` : ""}`);
+  }
   const depth = Number(meta.depth ?? 0) + 1;
   const maxDepth = cfg.fleet?.max_followup_depth ?? 4;
   const ownerWork = meta.origin === "owner" || /^owner/.test(meta.source ?? "") || ownerPickedMenu(meta);
@@ -231,8 +293,13 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     children.push(id);
     journal(host, `  ↳ ${id} → ${f.agent ?? agent}: ${f.title}`);
   }
-  const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined };
-  const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n`;
+  const prUrl = (res.summary.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/) ?? [])[0];
+  const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined,
+    ...(prUrl ? { pr: prUrl } : {}) };
+  const workLine = tree && work
+    ? `\n**Worktree:** \`${tree.branch}\` (base \`${tree.base}\`) at \`${tree.path}\`${work.sha ? ` · commit ${work.sha}` : ""}${work.diff ? ` · ${work.diff}` : ""}${work.error ? `\n**Commit failed:** ${work.error}` : ""}\n`
+    : "";
+  const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n${workLine}`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
   const latest = existsSync(path) ? readDoc(path).body : body;
   const added = latest.length > body.length && latest.startsWith(body) ? latest.slice(body.length) : "";
@@ -260,6 +327,23 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     const did = openDecision(meta, res, host);
     writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...done, decision: did }, body + runNote);
     journal(host, `⏸ ${meta.id} → ${did}: ${res.question}`);
+    pendingRoute.push(did);
+  } else if (res.status === "done" && tree && work?.commits && work.sha !== meta.worktree_asked_commit) {
+    // The work sits committed on its own branch: keep iterating there or turn it into a PR? The owner decides.
+    // Asked once per commit, so answering does not raise the same card again.
+    const commit = work.sha ?? "";
+    const did = openDecision({ ...meta, kind: "worktree" }, {
+      status: "needs_decision",
+      summary: `${res.summary}${work.error ? `\n\nCommit failed: ${work.error}` : ""}\n\n🌿 ${tree.branch} · ${commit}${work.diff ? ` · ${work.diff}` : ""}`,
+      question: L(`改动已提交到 ${tree.branch}，接下来怎么做？`, `Committed on ${tree.branch}. What next?`),
+      options: [
+        L(`A: 提 PR 到 ${tree.base} — 推送 ${tree.branch} 并开 PR，不合并`, `A: Open a PR to ${tree.base} — push ${tree.branch}, open a PR, do not merge`),
+        L(`B: 继续在这个 worktree 上修改 — 分支和目录都保留，之后在任务里继续说就行`, `B: Keep working in this worktree — the branch and checkout stay; continue by messaging this task`),
+      ],
+      recommendation: "A",
+    }, host);
+    writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...done, status: "needs_decision", decision: did, worktree_asked_commit: commit }, body + runNote);
+    journal(host, `⏸ ${meta.id} worktree ${tree.branch} → ${did}: keep iterating or open a PR`);
     pendingRoute.push(did);
   } else {
     const folder = res.status === "done" ? "done" : "failed";
@@ -699,6 +783,11 @@ For each task decide:
   simulators or screenshots; "os:windows"; "" when any host will do). Only require what the work cannot be done without.
 - cli: "claude" for engineering, debugging, design, UI or judgement; "codex" for routine triage, monitoring, reports, first-pass reviews.
 - difficulty: "hard" or "normal".
+- worktree: only for tasks with a repository ("repo" below). "worktree" when the change is a feature or otherwise likely
+  to touch several files, take real time, or conflict with other work in that repo; "main" for a small, self-contained
+  fix (one file, a typo, wording, docs). "" when the task has no repository. Honour an explicit owner request for a
+  worktree or a new branch.
+- worktree_why: one short sentence in the owner's language saying why; it is shown on the task page.
 
 ${channelPrompt()}
 
@@ -706,9 +795,9 @@ Online hosts:
 ${hosts || "(unknown)"}
 
 Tasks:
-${todo.map((t) => `- ${t.meta.id} [agent ${t.meta.agent}${t.meta.requires ? `, already requires ${t.meta.requires}` : ""}]: ${t.meta.title} — ${t.body.slice(0, 500).replace(/\s+/g, " ")}`).join("\n")}
+${todo.map((t) => `- ${t.meta.id} [agent ${t.meta.agent}${t.meta.requires ? `, already requires ${t.meta.requires}` : ""}${t.meta.repo ? `, repo ${t.meta.repo}` : ""}]: ${t.meta.title} — ${t.body.slice(0, 500).replace(/\s+/g, " ")}`).join("\n")}
 
-Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude", "difficulty": "normal", "channels": []}, ...}`,
+Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": "claude", "difficulty": "normal", "channels": [], "worktree": "main", "worktree_why": ""}, ...}`,
     cfg, P("logs", "runs", `plan-${Date.now()}.log`));
   if (!r || typeof r !== "object") return; // planner unavailable: tasks run unplanned after plan_wait_minutes
   await locked(async () => {
@@ -719,9 +808,12 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
       const req = [...new Set([...(t.meta.requires ?? "").split(","), ...String(v.requires ?? "").split(",").filter((r) => !t.meta.project_id || !r.trim().startsWith("host:"))].map((x) => x.trim()).filter(Boolean))].join(",");
       const pinned = t.meta.cli && t.meta.cli !== "auto";
       const channelSlugs = [...new Set([...(t.meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(v.channels)])].join(",");
+      // the owner's own instruction (createOwnerTask) or an earlier run's record wins over the planner
+      const wt = v.worktree === "worktree" ? "worktree" : v.worktree === "main" ? "main" : "";
+      const wtPlan = wt && !t.meta.worktree_mode && t.meta.repo ? { worktree_mode: wt, worktree_why: String(v.worktree_why ?? "").replace(/\s+/g, " ").slice(0, 200) } : {};
       writeDoc(t.p, { ...readDoc(t.p).meta, channels: channelSlugs, requires: req, ...(pinned ? {} : { cli: v.cli === "codex" ? "codex" : "claude" }),
-        ...(v.difficulty === "hard" ? { difficulty: "hard" } : {}), planned: now() }, t.body);
-      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${pinned ? t.meta.cli : v.cli}`);
+        ...(v.difficulty === "hard" ? { difficulty: "hard" } : {}), ...wtPlan, planned: now() }, t.body);
+      journal(host, `🧭 ${t.meta.id} planned: ${req || "any host"} · ${pinned ? t.meta.cli : v.cli}${wt ? ` · ${wt}` : ""}`);
     }
     await _commitPush(`[${host}] plan ${todo.length} tasks`);
   });
@@ -828,8 +920,10 @@ async function daemon(cfg: Cfg) {
     const cont = prevFile && prev ? `\nThis continues ${prev} (${prevFile.split("/").slice(-2, -1)[0]}): read tasks/${prevFile.split("/").slice(-2).join("/")} for what was done and how. If the owner is correcting that result, fix it; if they say to remember something (${L(`"note this", "always do this"`, `"记录下来", "以后都这样"`)}), write it as a durable rule/memory for the agent and kind of work it concerns, not just in this task.\n` : "";
     // said inside a channel: the task belongs to it and its results go back there
     const assignedChannels = [...new Set([...(m?.channel ? [m.channel] : []), ...resolveChannels(op.channels)])].join(",");
+    // an explicit ask for a worktree is honoured even if the planner would have kept a small change on main
+    const wantsWorktree = /\bworktree\b|工作树/i.test(`${op.title}\n${op.details ?? ""}\n${m?.text ?? ""}`);
     const id = newTask(op.title.slice(0, 80), `${asked}${op.details ? `\n## What the chat understood\n${op.details}\n` : ""}${op.repo ? `\nRepo: ${op.repo}\n` : ""}${context}${cont}\nHandle it like a capable chief of staff (see your profile: "Owner requests").`,
-      { agent: op.agent ?? "lead", source: m ? "owner@chat" : "owner@mcp", priority: "high", extra: { origin: "owner", ...(projectId ? { project_id: projectId } : {}), ...(m?.channel ? { origin_channel: m.channel } : {}), ...(assignedChannels ? { channels: assignedChannels } : {}), ...(op.repo ? { repo: op.repo } : {}), ...(prevFile && prev ? { follows: prev } : {}) } });
+      { agent: op.agent ?? "lead", source: m ? "owner@chat" : "owner@mcp", priority: "high", extra: { origin: "owner", ...(projectId ? { project_id: projectId } : {}), ...(m?.channel ? { origin_channel: m.channel } : {}), ...(assignedChannels ? { channels: assignedChannels } : {}), ...(op.repo ? { repo: op.repo } : {}), ...(prevFile && prev ? { follows: prev } : {}), ...(wantsWorktree ? { worktree_mode: "worktree", worktree_why: L("You asked for a worktree", "你在需求里要求用 worktree") } : {}) } });
     journal(host, `💬 ${id} from owner ${m ? "chat" : "MCP"}${prevFile ? ` (follows ${prev})` : ""}: ${op.title.slice(0, 80)}`);
     await _commitPush(`[${host}] chat ${id}`);
     // plan it now and wake the loop, so an idle machine starts it within seconds instead of after the next tick or two
@@ -1000,7 +1094,7 @@ const HELP = `OnlyOne — your own AI team
 
   onlyone daemon                 run forever (tick every host.tick_seconds)
   onlyone tick                   one cycle: pull → routines → replies → judge → run tasks → push
-  onlyone add "title" [-b body] [-a agent] [-r os:linux (hard)] [--prefer os:macos (soft)] [-w heavy] [--host name] [--repo ~/work/x] [-p high] [--cli claude|codex]
+  onlyone add "title" [-b body] [-a agent] [-r os:linux (hard)] [--prefer os:macos (soft)] [-w heavy] [--host name] [--repo ~/work/x] [--worktree] [-p high] [--cli claude|codex]
   onlyone decide D-0001 "A"      answer a decision from the terminal
   onlyone status                 queue / decision / accounts / resources overview
   onlyone learn [--full] [--dry]  learn the CEO from local Claude/Codex sessions (digest stays local; principles go to memory)
@@ -1071,12 +1165,15 @@ async function main() {
       const { values, positionals } = parseArgs({
         args: rest, allowPositionals: true, options: {
           body: { type: "string", short: "b" }, agent: { type: "string", short: "a" }, requires: { type: "string", short: "r" }, prefer: { type: "string" }, weight: { type: "string", short: "w" },
-          host: { type: "string" }, repo: { type: "string" }, priority: { type: "string", short: "p" }, cli: { type: "string" },
+          host: { type: "string" }, repo: { type: "string" }, priority: { type: "string", short: "p" }, cli: { type: "string" }, worktree: { type: "boolean" },
         },
       });
       await pull();
-      const id = newTask(positionals.join(" "), values.body ?? "", { ...values, source: `owner@${host}` });
-      journal(host, `＋ ${id} by owner: ${positionals.join(" ")}`);
+      const { worktree, ...task } = values;
+      // --worktree: run this requirement on its own branch even if the planner would keep it on main
+      const id = newTask(positionals.join(" "), values.body ?? "", { ...task, source: `owner@${host}`,
+        ...(worktree ? { extra: { worktree_mode: "worktree", worktree_why: L("You asked for a worktree", "你要求用 worktree") } } : {}) });
+      journal(host, `＋ ${id} by owner${worktree ? " (worktree)" : ""}: ${positionals.join(" ")}`);
       await commitPush(`[${host}] add ${id}`);
       return console.log(id);
     }

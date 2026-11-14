@@ -1756,6 +1756,30 @@ function TaskDetail(props: { onlyone: OnlyOne; id: string; wide: boolean; onFold
                 t()!.state === "active" ? L(`Running for ${since(t()!.started)}`, `已运行 ${since(t()!.started)}`) : t()!.finished ? L(`Took ${since(t()!.started, t()!.finished)}`, `用时 ${since(t()!.started, t()!.finished)}`) : "",
                 Number(t()!.attempt ?? 1) > 1 ? L(`Attempt ${t()!.attempt}`, `第 ${t()!.attempt} 次`) : ""].filter(Boolean).join(" · ")}
             </Text>
+            {/* where this requirement lives: its branch, and the worktree when it has one */}
+            <If when={!!(t()!.branch || t()!.worktree)}>
+              <View testID="task-worktree" style={{ marginTop: 6, gap: 3 }}>
+                <View style={{ flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 }}>
+                  <Text style={{ fontSize: 13, color: colors.muted }}>{t()!.worktree ? L("Worktree", "Worktree") : L("Branch", "分支")}</Text>
+                  <Text style={{ userSelect: "text", fontFamily: MONO, fontSize: 12.5, color: colors.text }}>{t()!.branch ?? "—"}</Text>
+                  <If when={!!t()!.commit}>
+                    <Text style={{ userSelect: "text", fontFamily: MONO, fontSize: 12.5, color: colors.muted }}>{t()!.commit}</Text>
+                  </If>
+                  <If when={!!t()!.diff}>
+                    <Text style={{ fontSize: 12.5, color: colors.faint }}>{t()!.diff}</Text>
+                  </If>
+                  <If when={!!t()!.pr}>
+                    <Text role="link" onPress={() => void openUrl(t()!.pr!).catch(() => {})} style={{ fontSize: 12.5, color: linkColor() }}>PR</Text>
+                  </If>
+                </View>
+                <If when={!!t()!.worktree}>
+                  <Text style={{ userSelect: "text", fontFamily: MONO, fontSize: 12, color: colors.muted, numberOfLines: 1 }}>{t()!.worktree}</Text>
+                </If>
+                <If when={!!t()!.worktree_why}>
+                  <Text style={{ fontSize: 12.5, lineHeight: 18, color: colors.faint }}>{t()!.worktree_why}</Text>
+                </If>
+              </View>
+            </If>
           </PageHeader>
           <If when={t()!.state === "active" ? activityLine(t()!.activity) : null}>
             {(a) => (
