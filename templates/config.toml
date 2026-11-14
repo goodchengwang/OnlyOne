@@ -68,6 +68,10 @@ quiet_hours = "23:30-08:30"           # no menus at night (tasks keep running)
 # cli = "codex"
 # name = "chatgpt-pro"   # isolated CODEX_HOME
 
+[worktree]                            # requirement-level git worktrees (one requirement per branch, parallel work)
+enabled = true
+push = true                           # every auto-commit is pushed to origin, worktree branches included
+
 [medic]                               # AI self-repair (onlyone fix; auto on install/update/daemon failures)
 enabled = true
 push = true                           # framework fixes → branch + PR on the OnlyOne repo

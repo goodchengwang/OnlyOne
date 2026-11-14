@@ -160,7 +160,7 @@ export function taskView(path: string, state: string, log: string[]) {
     finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, request, runs, steps,
     // where the requirement lives: its branch, the worktree when it has one, why, and what was committed there
     branch: m.branch, worktree: m.worktree, worktree_mode: m.worktree_mode, worktree_why: m.worktree_why, base_branch: m.base_branch,
-    commit: m.commit, diff: m.diff, pr: m.pr, worktree_error: m.worktree_error };
+    commit: m.commit, diff: m.diff, pr: m.pr, worktree_error: m.worktree_error, pushed: m.pushed, push_error: m.push_error };
 }
 
 type TaskView = ReturnType<typeof taskView>;

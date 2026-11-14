@@ -13,7 +13,7 @@ import {
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
-import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, type WorkInfo, type Worktree } from "./worktree";
+import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, pushBranch, type WorkInfo, type Worktree } from "./worktree";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
@@ -198,11 +198,17 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     meta = { ...meta, worktree_mode: "main", worktree_ran: "main", ...(current ? { branch: current } : {}),
       ...(treeError ? { worktree_error: treeError.slice(0, 300), worktree_why: `${wt.why || L("A worktree was planned", "原计划用 worktree")}${L(`; creating it failed (${treeError}), ran on the main branch instead`, `；创建失败（${treeError}），改在主分支执行`)}` } : wt.why ? { worktree_why: wt.why } : {}) };
     // a checkout left by another machine is not this task's: do not point the page at a path that does not exist here
-    delete meta.worktree; delete meta.base_branch; delete meta.commit; delete meta.diff;
+    delete meta.worktree; delete meta.base_branch; delete meta.commit; delete meta.diff; delete meta.pushed; delete meta.push_error;
   }
+  // a run that stays on the checkout's own branch may commit its own work: remember where it started, so what it
+  // commits can be pushed instead of being left on this machine only
+  const repoNow = !tree && meta.repo ? gitRepo(meta.repo) : null;
+  const headBefore = repoNow ? headSha(repoNow.root) : "";
   const worktreeNote = tree
-    ? `\n## Worktree\nThis run works in its own git worktree: \`${tree.path}\` on branch \`${tree.branch}\` (base \`${tree.base}\`). Keep every edit inside it. The executor commits whatever is left uncommitted when you finish; the owner then decides whether to keep iterating here or open a PR. Do not push or open a PR unless this run's task text says to.\n`
-    : "";
+    ? `\n## Worktree\nThis run works in its own git worktree: \`${tree.path}\` on branch \`${tree.branch}\` (base \`${tree.base}\`). Keep every edit inside it. The executor commits whatever is left uncommitted when you finish and pushes \`${tree.branch}\` to origin; the owner then decides whether to keep iterating here or open a PR. Do not push or open a PR yourself unless this run's task text says to.\n`
+    : repoNow
+      ? `\n## Branch\nThis run works directly in \`${repoNow.root}\` on branch \`${repoNow.branch}\`. Commit the work you do there (\`Agent: ${agent}\` trailer). The executor pushes whatever this run committed to origin when you finish, so never leave finished work uncommitted.\n`
+      : "";
   const promptBody = `${meta.requeue_note ? `${body}\n\n> ${meta.requeue_note}\n` : body}${worktreeNote}`;
   let cli = acct.cli, out = "", res!: ReturnType<typeof parseResult>;
   for (let hop = 0; ; hop++) { // quota / login trouble: switch account or CLI on this host instead of waiting it out
@@ -267,11 +273,19 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     return;
   }
   // Commit the run's work on its own branch before anything is reported: the owner decides what happens to it next.
+  // Both this auto-commit and a commit the run made on the plain branch are pushed, so work never sits on one machine.
   let work: WorkInfo | null = null;
   if (tree) {
-    work = commitWorktree(tree.path, { taskId: meta.id, title: meta.title, agent, base: tree.base });
+    work = commitWorktree(tree.path, { taskId: meta.id, title: meta.title, agent, base: tree.base, push: cfg.worktree?.push !== false });
     meta = { ...meta, worktree: tree.path, branch: tree.branch, base_branch: tree.base, worktree_mode: "worktree",
-      ...(work.sha ? { commit: work.sha } : {}), ...(work.diff ? { diff: work.diff } : {}), ...(work.error ? { worktree_error: work.error.slice(0, 300) } : {}) };
+      ...(work.sha ? { commit: work.sha } : {}), ...(work.diff ? { diff: work.diff } : {}), ...(work.error ? { worktree_error: work.error.slice(0, 300) } : {}),
+      ...(work.pushed ? { pushed: work.pushed } : {}), ...(work.push_error ? { push_error: work.push_error } : {}) };
+  } else if (repoNow) {
+    const headNow = headSha(repoNow.root);
+    if (headNow && headNow !== headBefore) { // this run committed on its branch: send it to origin
+      const sent = cfg.worktree?.push === false ? {} : pushBranch(repoNow.root, repoNow.branch);
+      meta = { ...meta, commit: headNow, ...(sent.pushed ? { pushed: sent.pushed } : {}), ...(sent.push_error ? { push_error: sent.push_error } : {}) };
+    }
   }
   await locked(async () => {
   await _pull();
@@ -279,7 +293,12 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   remember(agent, res.lessons, meta.id, meta.project_id);
   if (tree && work) {
     const what = work.committed ? L(`committed ${work.sha}`, `提交 ${work.sha}`) : L(`no new commit (head ${work.sha ?? "-"})`, `没有新提交（HEAD ${work.sha ?? "-"}）`);
-    journal(host, `🌿 ${meta.id} ${what} · ${tree.branch}${work.diff ? ` · ${work.diff}` : ""}`);
+    const sent = work.pushed ? L(` · pushed ${work.pushed}`, ` · 已推送 ${work.pushed}`) : work.push_error ? L(` · push failed: ${work.push_error}`, ` · 推送失败：${work.push_error}`) : "";
+    journal(host, `🌿 ${meta.id} ${what} · ${tree.branch}${work.diff ? ` · ${work.diff}` : ""}${sent}`);
+  } else if (meta.pushed || meta.push_error) {
+    journal(host, meta.pushed
+      ? L(`⬆️ ${meta.id} pushed ${meta.pushed} (${meta.branch ?? ""})`, `⬆️ ${meta.id} 已推送 ${meta.pushed}（${meta.branch ?? ""}）`)
+      : L(`⚠️ ${meta.id} push failed (${meta.branch ?? ""}): ${meta.push_error}`, `⚠️ ${meta.id} 推送失败（${meta.branch ?? ""}）：${meta.push_error}`));
   }
   const depth = Number(meta.depth ?? 0) + 1;
   const maxDepth = cfg.fleet?.max_followup_depth ?? 4;
@@ -296,9 +315,11 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   const prUrl = (res.summary.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/) ?? [])[0];
   const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined,
     ...(prUrl ? { pr: prUrl } : {}) };
-  const workLine = tree && work
+  const pushLine = work ? (work.pushed ? `\n**Pushed:** ${work.pushed}` : work.push_error ? `\n**Push failed:** ${work.push_error}` : "")
+    : meta.pushed ? `\n**Pushed:** ${meta.pushed}` : meta.push_error ? `\n**Push failed:** ${meta.push_error}` : "";
+  const workLine = (tree && work
     ? `\n**Worktree:** \`${tree.branch}\` (base \`${tree.base}\`) at \`${tree.path}\`${work.sha ? ` · commit ${work.sha}` : ""}${work.diff ? ` · ${work.diff}` : ""}${work.error ? `\n**Commit failed:** ${work.error}` : ""}\n`
-    : "";
+    : "") + pushLine + (pushLine ? "\n" : "");
   const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n${workLine}`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
   const latest = existsSync(path) ? readDoc(path).body : body;
@@ -332,12 +353,13 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     // The work sits committed on its own branch: keep iterating there or turn it into a PR? The owner decides.
     // Asked once per commit, so answering does not raise the same card again.
     const commit = work.sha ?? "";
+    const sent = work.pushed ? L(` · pushed ${work.pushed}`, ` · 已推送 ${work.pushed}`) : work.push_error ? L(` · push failed: ${work.push_error}`, ` · 推送失败：${work.push_error}`) : "";
     const did = openDecision({ ...meta, kind: "worktree" }, {
       status: "needs_decision",
-      summary: `${res.summary}${work.error ? `\n\nCommit failed: ${work.error}` : ""}\n\n🌿 ${tree.branch} · ${commit}${work.diff ? ` · ${work.diff}` : ""}`,
+      summary: `${res.summary}${work.error ? `\n\nCommit failed: ${work.error}` : ""}\n\n🌿 ${tree.branch} · ${commit}${work.diff ? ` · ${work.diff}` : ""}${sent}`,
       question: L(`改动已提交到 ${tree.branch}，接下来怎么做？`, `Committed on ${tree.branch}. What next?`),
       options: [
-        L(`A: 提 PR 到 ${tree.base} — 推送 ${tree.branch} 并开 PR，不合并`, `A: Open a PR to ${tree.base} — push ${tree.branch}, open a PR, do not merge`),
+        L(`A: 提 PR 到 ${tree.base} — 分支已推送，直接开 PR，不合并`, `A: Open a PR to ${tree.base} — the branch is already pushed, open a PR, do not merge`),
         L(`B: 继续在这个 worktree 上修改 — 分支和目录都保留，之后在任务里继续说就行`, `B: Keep working in this worktree — the branch and checkout stay; continue by messaging this task`),
       ],
       recommendation: "A",

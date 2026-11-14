@@ -79,10 +79,31 @@ export function ensureWorktree(o: { repo: string; taskId: string; title: string;
   return { path, branch, base, repo: repo.root };
 }
 
-export type WorkInfo = { sha?: string; diff?: string; commits: number; committed: boolean; error?: string };
+export type WorkInfo = { sha?: string; diff?: string; commits: number; committed: boolean; error?: string; pushed?: string; push_error?: string };
 
-/** Commit whatever the run left uncommitted, then describe the branch against its base (files, +/−, commits). */
-export function commitWorktree(path: string, o: { taskId: string; title: string; agent: string; base: string }): WorkInfo {
+/** A commit that exists on one machine only is not delivered work. Push the branch to origin; a repo with no
+ *  remote is simply local (no error), a refused push is reported so the task page can show why. */
+export function pushBranch(path: string, branch: string): { pushed?: string; push_error?: string } {
+  if (!branch) return {};
+  if (!git(path, ["remote", "get-url", "origin"]).ok) return {};
+  const up = git(path, ["rev-parse", "--abbrev-ref", `${branch}@{upstream}`]);
+  if (up.ok && up.out) {
+    const ahead = git(path, ["rev-list", "--count", `${up.out}..${branch}`]);
+    if (ahead.ok && (Number(ahead.out) || 0) === 0) return { pushed: up.out }; // origin already has it
+  }
+  const p = git(path, ["push", "-u", "origin", branch]);
+  if (p.ok) return { pushed: `origin/${branch}` };
+  return { push_error: (p.err || p.out).split("\n").filter(Boolean).slice(-2).join(" ").slice(0, 300) };
+}
+
+/** The commit a checkout is on right now, so a run's own commits can be told apart from what was already there. */
+export function headSha(path: string): string {
+  const h = git(path, ["rev-parse", "--short", "HEAD"]);
+  return h.ok ? h.out : "";
+}
+
+/** Commit whatever the run left uncommitted, push the branch, then describe it against its base (files, +/−, commits). */
+export function commitWorktree(path: string, o: { taskId: string; title: string; agent: string; base: string; push?: boolean }): WorkInfo {
   const stat = () => {
     const d = git(path, ["diff", "--shortstat", `${o.base}...HEAD`]);
     const line = (d.ok ? d.out : git(path, ["diff", "--shortstat", o.base]).out).replace(/\s+/g, " ").trim();
@@ -103,8 +124,11 @@ export function commitWorktree(path: string, o: { taskId: string; title: string;
     committed = true;
   }
   const head = git(path, ["rev-parse", "--short", "HEAD"]);
+  const on = git(path, ["symbolic-ref", "--quiet", "--short", "HEAD"]);
   const s = stat();
-  return { sha: head.ok ? head.out : undefined, ...s, committed };
+  // the owner wants the work on the remote, not only on this machine: every auto-commit is pushed
+  const sent = o.push === false || s.commits === 0 ? {} : pushBranch(path, on.ok ? on.out : "");
+  return { sha: head.ok ? head.out : undefined, ...s, committed, ...sent };
 }
 
 /** Should this task work on its own branch? Planner decisions win; otherwise a busy repo or a previous worktree does. */

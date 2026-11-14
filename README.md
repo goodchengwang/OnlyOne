@@ -36,10 +36,12 @@ repository gets its own branch (`agent/<task id>-<slug>`) and checkout under `~/
 on one repository then progress in parallel without blocking each other. The task page shows the branch, the worktree
 path, the reason it was chosen, the commit and the diff.
 
-When the agent finishes, the executor commits whatever the run left uncommitted on that branch, then asks the owner
-whether to keep iterating in the worktree or open a PR to the base branch. The owner always makes that choice (the
-judge does not answer it), and the agent never merges. Saying “use a worktree” in the request, or
-`onlyone add --worktree`, forces one; `[worktree] enabled = false` in `config.toml` turns the behaviour off.
+When the agent finishes, the executor commits whatever the run left uncommitted on that branch and pushes it to
+`origin`, so the work never sits on one machine; a commit the run made on the plain branch is pushed the same way. It
+then asks the owner whether to keep iterating in the worktree or open a PR to the base branch. The owner always makes
+that choice (the judge does not answer it), and the agent never merges. The task page also shows where the commit was
+pushed, or why a push was refused. Saying “use a worktree” in the request, or `onlyone add --worktree`, forces one;
+`[worktree] enabled = false` in `config.toml` turns the behaviour off, `push = false` keeps auto-commits local.
 
 ## Install the CLI with npm
 

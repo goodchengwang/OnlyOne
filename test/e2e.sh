@@ -92,7 +92,9 @@ grep -q "Results from delegated subtasks" tasks/done/$SPL.md
 # A requirement-level worktree: its own branch and checkout, the run committed there, then the owner asked whether
 # to keep iterating or open a PR. Nothing touches the main checkout.
 REPO="$W/repo"; mkdir -p "$REPO"
+git init -q --bare -b main "$W/repo-origin.git"
 git -C "$REPO" init -q -b main
+git -C "$REPO" remote add origin "$W/repo-origin.git"
 echo hello > "$REPO/README.md"
 git -C "$REPO" add -A
 git -C "$REPO" -c user.name=e2e -c user.email=e2e@e2e commit -qm init
@@ -110,6 +112,8 @@ test -f "$WTDIR/change.txt"                                  # the agent worked 
 test -z "$(git -C "$REPO" status --porcelain)"               # the main checkout is untouched
 test "$(git -C "$REPO" rev-list --count "main..$BR")" -ge 1  # the run's work is committed on the branch
 git -C "$WTDIR" log -1 --format=%B | grep -q "Agent: lead"
+grep -q "^pushed: origin/$BR$" tasks/blocked/$WT.md                 # the auto-commit went to origin, not only local
+test "$(git -C "$W/repo-origin.git" rev-parse "$BR")" = "$(git -C "$REPO" rev-parse "$BR")"
 onlyone decide "$D" A
 tick_until "test -f tasks/done/$WT.md"
 test -f tasks/done/$WT.md

@@ -1768,6 +1768,12 @@ function TaskDetail(props: { onlyone: OnlyOne; id: string; wide: boolean; onFold
                   <If when={!!t()!.diff}>
                     <Text style={{ fontSize: 12.5, color: colors.faint }}>{t()!.diff}</Text>
                   </If>
+                  <If when={!!t()!.pushed}>
+                    <Text testID="task-pushed" style={{ fontSize: 12.5, color: colors.muted }}>{L(`Pushed ${t()!.pushed}`, `已推送 ${t()!.pushed}`)}</Text>
+                  </If>
+                  <If when={!!t()!.push_error}>
+                    <Text testID="task-push-error" style={{ fontSize: 12.5, color: colors.warn }}>{L(`Push failed: ${t()!.push_error}`, `推送失败：${t()!.push_error}`)}</Text>
+                  </If>
                   <If when={!!t()!.pr}>
                     <Text role="link" onPress={() => void openUrl(t()!.pr!).catch(() => {})} style={{ fontSize: 12.5, color: linkColor() }}>PR</Text>
                   </If>

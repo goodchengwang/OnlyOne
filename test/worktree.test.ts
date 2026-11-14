@@ -5,9 +5,10 @@ import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { HOME_DIR } from "../src/core";
-import { branchName, commitWorktree, decideWorktree, ensureWorktree, gitRepo, slugTitle, worktreePath } from "../src/worktree";
+import { branchName, commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, pushBranch, slugTitle, worktreePath } from "../src/worktree";
 
 let repo = "";
+let origin = "";
 const git = (args: string[]) => {
   const p = Bun.spawnSync(["git", "-C", repo, ...args], { stdout: "pipe", stderr: "pipe" });
   if (p.exitCode !== 0) throw new Error(p.stderr.toString() || p.stdout.toString());
@@ -15,13 +16,17 @@ const git = (args: string[]) => {
 };
 
 beforeAll(() => {
+  origin = mkdtempSync(join(tmpdir(), "onlyone-wt-origin-"));
+  const init = Bun.spawnSync(["git", "init", "-q", "--bare", "-b", "main", origin], { stdout: "pipe", stderr: "pipe" });
+  if (init.exitCode !== 0) throw new Error(init.stderr.toString());
   repo = mkdtempSync(join(tmpdir(), "onlyone-wt-"));
   git(["init", "-b", "main"]);
+  git(["remote", "add", "origin", origin]);
   writeFileSync(join(repo, "README.md"), "hello\n");
   git(["add", "-A"]);
   git(["-c", "user.name=test", "-c", "user.email=test@test", "commit", "-m", "init"]);
 });
-afterAll(() => rmSync(repo, { recursive: true, force: true }));
+afterAll(() => { rmSync(repo, { recursive: true, force: true }); rmSync(origin, { recursive: true, force: true }); });
 
 test("gitRepo reads the root, current branch and base branch", () => {
   const r = gitRepo(repo)!;
@@ -72,6 +77,51 @@ test("commitWorktree commits the run's work against its base and describes it", 
   expect(second.commits).toBe(1);
   // the commit carries the agent trailer
   expect(git(["log", "-1", "--format=%B", wt.branch])).toContain("Agent: lead");
+});
+
+test("every auto-commit is pushed to the branch on origin", () => {
+  const wt = ensureWorktree({ repo, taskId: "T-0104", title: "Push me" });
+  if ("error" in wt) throw new Error(wt.error);
+  writeFileSync(join(wt.path, "pushed.txt"), "on the remote\n");
+  const work = commitWorktree(wt.path, { taskId: "T-0104", title: "Push me", agent: "lead", base: wt.base });
+  expect(work.committed).toBe(true);
+  expect(work.pushed).toBe(`origin/${wt.branch}`);
+  expect(work.push_error).toBeUndefined();
+  // origin now really has the commit, so the work exists beyond this machine
+  const remote = Bun.spawnSync(["git", "-C", origin, "rev-parse", wt.branch], { stdout: "pipe", stderr: "pipe" });
+  expect(remote.exitCode).toBe(0);
+  expect(remote.stdout.toString().trim()).toBe(git(["rev-parse", wt.branch]));
+  // the next run has nothing new to send and is not pushed again as a fresh branch
+  const again = commitWorktree(wt.path, { taskId: "T-0104", title: "Push me", agent: "lead", base: wt.base });
+  expect(again.committed).toBe(false);
+  expect(again.pushed).toBe(`origin/${wt.branch}`);
+});
+
+test("push can be turned off, and a repo without a remote is simply local", () => {
+  const wt = ensureWorktree({ repo, taskId: "T-0105", title: "Stay local" });
+  if ("error" in wt) throw new Error(wt.error);
+  writeFileSync(join(wt.path, "local.txt"), "local only\n");
+  const work = commitWorktree(wt.path, { taskId: "T-0105", title: "Stay local", agent: "lead", base: wt.base, push: false });
+  expect(work.committed).toBe(true);
+  expect(work.pushed).toBeUndefined();
+  expect(work.push_error).toBeUndefined();
+  // a repo with no origin is not an error: nothing to push to, the commit stays local
+  const bare = mkdtempSync(join(tmpdir(), "onlyone-wt-noremote-"));
+  try {
+    Bun.spawnSync(["git", "-C", bare, "init", "-q", "-b", "main"], { stdout: "pipe", stderr: "pipe" });
+    expect(pushBranch(bare, "main")).toEqual({});
+  } finally { rmSync(bare, { recursive: true, force: true }); }
+});
+
+test("a commit this run made on the plain branch is pushed too", () => {
+  const before = headSha(repo);
+  writeFileSync(join(repo, "direct.txt"), "committed on main\n");
+  git(["add", "-A"]);
+  git(["-c", "user.name=test", "-c", "user.email=test@test", "commit", "-m", "direct"]);
+  expect(headSha(repo)).not.toBe(before); // the executor only pushes when this run moved HEAD
+  expect(pushBranch(repo, "main").pushed).toBe("origin/main");
+  const remote = Bun.spawnSync(["git", "-C", origin, "rev-parse", "main"], { stdout: "pipe", stderr: "pipe" });
+  expect(remote.stdout.toString().trim()).toBe(git(["rev-parse", "main"]));
 });
 
 test("decideWorktree: planner wins, a busy repo gets a worktree, routines and small tasks stay on main", () => {

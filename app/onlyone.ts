@@ -69,6 +69,8 @@ export type TaskInfo = {
   /** Where the requirement lives: its branch, the worktree it runs in (when it has one), why, and what was committed. */
   branch?: string; worktree?: string; worktree_mode?: string; worktree_why?: string; base_branch?: string;
   commit?: string; diff?: string; pr?: string; worktree_error?: string;
+  /** where the auto-commit was pushed (origin/branch), or why the push was refused. */
+  pushed?: string; push_error?: string;
   /** state "active": its agent's latest sign of life. */
   activity?: Activity;
   runs?: { ts: string; host: string; cli: string; status: string; summary: string }[];
