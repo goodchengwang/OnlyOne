@@ -78,11 +78,15 @@ when it exists. If the user service manager is unavailable, run `sudo loginctl e
 reconnect over SSH and retry. Systems without user systemd can run `onlyone daemon` in the foreground;
 it must remain supervised to keep running after logout. Logs: `journalctl --user -u onlyone -f` on Linux, `~/.onlyone/cli/daemon.log` on macOS/Windows.
 
-To build publishable packages locally: `bun run package:npm 0.1.1` (or invoke
-`bun scripts/package-npm.ts 0.1.1 dist/npm linux-x64` for one platform). Only whitelisted generated files
+To build publishable packages locally: `bun run package:npm 0.1.3` (or invoke
+`bun scripts/package-npm.ts 0.1.3 dist/npm linux-x64` for one platform). Only whitelisted generated files
 are packed. The npm workflow tests actual tarball installs on all five platforms, publishes platform packages
-first and the main package last for a `vX.Y.Z` tag. Configure npm trusted publishing for all six package names,
-or the repository's `NPM_TOKEN`, before publishing. These commands become publicly installable only after that release is published. The native App workflow and its pinned NSH version are separate.
+first and the main package last for a `vX.Y.Z` tag: `v0.1.3` publishes npm version `0.1.3`.
+Each of the six packages must trust GitHub Actions repository `goodchengwang/OnlyOne`, workflow `npm.yml`,
+with **Allow npm publish** enabled and no environment name. Publishing uses OIDC, without `NPM_TOKEN`.
+Pushes without a tag, pull requests and manual runs on branches only build and test.
+Published npm versions cannot be overwritten, including after unpublishing; the existing platform packages already occupy `0.1.0`, `0.1.1` and `0.1.2`.
+The native App workflow and its pinned NSH version are separate.
 
 ## Install from local source
 

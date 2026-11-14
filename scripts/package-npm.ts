@@ -34,6 +34,6 @@ export async function packageNpm(version: string, out: string, platform?: string
   }
 }
 if (import.meta.main) {
-  const [version = "0.1.1", out = "dist/npm", platform] = process.argv.slice(2);
+  const [version = "0.1.3", out = "dist/npm", platform] = process.argv.slice(2);
   await packageNpm(version, resolve(out), platform);
 }

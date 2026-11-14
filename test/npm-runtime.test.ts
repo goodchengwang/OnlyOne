@@ -95,7 +95,7 @@ test.skipIf(process.platform === "win32" || node.includes(" "))("service confirm
     try {
       for (let i = 0; i < 100; i++) {
         const state = JSON.parse(readFileSync(current, "utf8"));
-        if (healthy ? state.pending === false : state.version === "0.1.0") break;
+        if (healthy ? state.pending === false : state.version === "0.1.0" && existsSync(join(home, "update-rejected"))) break;
         await Bun.sleep(50);
       }
       const state = JSON.parse(readFileSync(current, "utf8"));
