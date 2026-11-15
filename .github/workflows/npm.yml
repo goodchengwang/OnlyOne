@@ -8,6 +8,8 @@ on:
       - src/**
       - cloud/src/**
       - scripts/package-npm.ts
+      - scripts/publish-npm.ts
+      - test/publish-npm.test.ts
       - scripts/test-npm-install.mjs
       - scripts/test-npm-service.mjs
       - test/npm-*.test.ts
@@ -16,10 +18,16 @@ on:
       - app/executor-command.ts
       - .github/workflows/npm.yml
   workflow_dispatch:
+    inputs:
+      resume_run:
+        description: 'Resume publishing the verified artifacts from a tag-triggered npm run'
+        type: string
+        required: false
 permissions:
   contents: read
 jobs:
   package:
+    if: inputs.resume_run == ''
     strategy:
       fail-fast: false
       matrix:
@@ -57,7 +65,7 @@ jobs:
           path: dist/npm/
           if-no-files-found: error
   publish:
-    if: github.ref_type == 'tag'
+    if: always() && ((github.event_name == 'push' && github.ref_type == 'tag' && needs.package.result == 'success') || (github.event_name == 'workflow_dispatch' && inputs.resume_run != ''))
     needs: package
     runs-on: ubuntu-24.04
     concurrency:
@@ -65,8 +73,25 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
+      actions: read
       id-token: write
     steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Validate resumed publication source
+        if: inputs.resume_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESUME_RUN: ${{ inputs.resume_run }}
+        run: |
+          [[ "$RESUME_RUN" =~ ^[0-9]+$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN" > "$RUNNER_TEMP/source-run.json"
+          jq -e '.event == "push" and .path == ".github/workflows/npm.yml" and (.head_branch | test("^v[0-9]+[.][0-9]+[.][0-9]+$"))' "$RUNNER_TEMP/source-run.json"
+          ref=$(jq -r .head_branch "$RUNNER_TEMP/source-run.json")
+          sha=$(jq -r .head_sha "$RUNNER_TEMP/source-run.json")
+          test "$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)" = "$sha"
+          test "$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RESUME_RUN/jobs" --jq '[.jobs[] | select((.name | startswith("package (")) and .conclusion == "success")] | length')" = 5
+          echo "EXPECTED_NPM_VERSION=${ref#v}" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
@@ -76,6 +101,8 @@ jobs:
           pattern: npm-*
           path: dist/npm
           merge-multiple: true
+          run-id: ${{ inputs.resume_run || github.run_id }}
+          github-token: ${{ github.token }}
       # Each package trusts goodchengwang/OnlyOne's npm.yml through OIDC; no npm token is used.
       - name: Check trusted-publishing prerequisites before publishing any package
         run: |
@@ -87,8 +114,4 @@ jobs:
             fi
           done
       - name: Publish platform packages, then the main package
-        run: |
-          for package in dist/npm/onlyone-*; do
-            (cd "$package" && npm publish --access public --provenance)
-          done
-          (cd dist/npm/onlyonecli && npm publish --access public --provenance)
+        run: bun scripts/publish-npm.ts dist/npm
