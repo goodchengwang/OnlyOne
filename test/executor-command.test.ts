@@ -4,6 +4,12 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { executorCommand } from "../app/executor-command";
 
+test("windows command survives spawner re-quoting: no embedded double quotes", () => {
+  const command = executorCommand("windows", "C:\\not-a-source-checkout", false);
+  expect(command.command).toBe("cmd.exe");
+  expect([command.command, ...command.args].join("\n")).not.toContain('"');
+});
+
 test.skipIf(process.platform === "win32")("release desktop invokes installed onlyonecli, never a source fallback, and sends the session only on stdin", async () => {
   const home = mkdtempSync(join(tmpdir(), "onlyone app command "));
   try {
