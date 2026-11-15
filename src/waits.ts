@@ -22,12 +22,23 @@ export const CHECKED_FALLBACK_MIN = 120;
 export const MAX_WAKES = 6;
 export const tooManyWakes = (wakes: number) => wakes > MAX_WAKES;
 
-/** A human wait has no deadline: it wakes only on an event (its wait_check changes, the owner answers or writes). */
+/** A human wait wakes on an event (its wait_check changes, the owner answers or writes), not on the clock. */
 export function waitMeta(res: { wait_kind?: string; waiting_on?: string; wait_minutes?: number; wait_check?: string }, now = Date.now()) {
   const kind = waitKind(res);
   if (kind === "human") return { kind, wake_at: undefined as string | undefined, minutes: 0 };
   const minutes = Math.min(120, Math.max(5, Number(res.wait_minutes) || 15));
   return { kind, wake_at: new Date(now + minutes * 60_000).toISOString(), minutes };
+}
+
+/** After this long unanswered, a human wait is woken ONCE to wrap up truthfully instead of staying parked forever (D-0004). */
+export const HUMAN_WAIT_MAX_HOURS = 24;
+export function humanWaitExpired(
+  meta: { wait_kind?: string; parked_at?: string; waiting_since?: string; human_wait_expired?: string },
+  now = Date.now(),
+): boolean {
+  if (meta.wait_kind !== "human" || meta.human_wait_expired) return false;
+  const since = Date.parse(meta.parked_at || meta.waiting_since || "") || 0;
+  return since > 0 && now - since > HUMAN_WAIT_MAX_HOURS * 3_600_000;
 }
 
 /** Merge cards are never answered by the judge: its answer cannot open the merge gate, so the owner clicks anyway. */

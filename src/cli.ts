@@ -15,7 +15,7 @@ import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, pushBranch, type WorkInfo, type Worktree } from "./worktree";
 import { writeRules } from "./rules";
-import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
+import { backoffMinutes, CHECKED_FALLBACK_MIN, HUMAN_WAIT_MAX_HOURS, humanWaitExpired, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -587,7 +587,16 @@ function wakeParents(host: string, ready = new Set<string>()) {
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta, body } = readDoc(p);
     if (meta.wait_kind === "human" && !meta.wake_at) { // waits on a person: only an event wakes it, never the clock
-      if (!ready.has(meta.id)) continue;
+      if (!ready.has(meta.id)) {
+        if (!humanWaitExpired(meta)) continue;
+        // The owner never answered: wake it once to wrap up truthfully. A task parked behind an unanswered card used to stay
+        // parked forever, which is exactly what the owner rejected (D-0004 C: record the real state and end, nothing hangs).
+        writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, status: undefined, claimed_by: undefined, resumed: "yes", human_wait_expired: "yes" },
+          `${body}\nHuman wait expired: ${meta.waiting_on ?? "?"} was not answered within ${HUMAN_WAIT_MAX_HOURS}h. Finish what you can, state in your final summary exactly what is unfinished/unverified and where it stopped, and end — do not return "waiting" for this same item again.\n`);
+        unlinkSync(p);
+        journal(host, L(`⏳ ${meta.id} waited ${HUMAN_WAIT_MAX_HOURS}h on a person, woken to wrap up`, `⏳ ${meta.id} 等人超过 ${HUMAN_WAIT_MAX_HOURS} 小时，唤醒收尾`));
+        continue;
+      }
     }
     if (meta.wake_at || meta.wait_kind) { // parked on something slow: back to the queue once the time is up, or as soon as its check changes
       if (meta.wake_at && Date.parse(meta.wake_at) > Date.now() && !ready.has(meta.id)) continue;

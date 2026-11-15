@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { backoffMinutes, isMergeCard, isNoChangeRoutine, mergeHeadline, tooManyWakes, waitKind, waitMeta } from "../src/waits";
+import { backoffMinutes, HUMAN_WAIT_MAX_HOURS, humanWaitExpired, isMergeCard, isNoChangeRoutine, mergeHeadline, tooManyWakes, waitKind, waitMeta } from "../src/waits";
 
 test("CI wait_check backs off 5 → 10 → 20 → 40 minutes", () => {
   expect([0, 1, 2, 3, 4, 9].map(backoffMinutes)).toEqual([5, 10, 20, 40, 40, 40]);
@@ -19,6 +19,16 @@ test("human waits get no timed wake-up; CI waits do", () => {
 test("more than 6 wake-ups blocks the task", () => {
   expect(tooManyWakes(6)).toBe(false);
   expect(tooManyWakes(7)).toBe(true);
+});
+
+test("an unanswered human wait is woken once after 24h to wrap up, never twice", () => {
+  const parked = new Date("2026-11-14T21:45:00Z").getTime();
+  const meta = { wait_kind: "human", parked_at: new Date(parked).toISOString() };
+  expect(humanWaitExpired(meta, parked + 3 * 3_600_000)).toBe(false); // young human waits still wake only on events
+  expect(humanWaitExpired(meta, parked + (HUMAN_WAIT_MAX_HOURS + 1) * 3_600_000)).toBe(true);
+  expect(humanWaitExpired({ ...meta, human_wait_expired: "yes" }, parked + 999 * 3_600_000)).toBe(false); // only once
+  expect(humanWaitExpired({ wait_kind: "ci", parked_at: meta.parked_at }, parked + 999 * 3_600_000)).toBe(false);
+  expect(humanWaitExpired({ wait_kind: "human" }, parked + 999 * 3_600_000)).toBe(false); // no timestamp: no deadline
 });
 
 test("D: merge cards are recognised and lead with the PR link", () => {
