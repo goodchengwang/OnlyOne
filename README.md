@@ -150,7 +150,10 @@ nsh package app --target macos
 ```
 
 Install the generated app for your platform. iOS requires your own signing configuration and the SDK check
-documented in AGENTS.md. Local clients are updated by rebuilding and installing again.
+documented in AGENTS.md. New native clients trust signed update manifests from this repository's GitHub Releases.
+Install one new full app first if your existing copy was built without an updater. Desktop updates replace the full
+app, including the Mac executor; Android links to the release APK, and iOS still requires signing and installation.
+See [release packaging](CONTRIBUTING.md#packaging-the-client-apps) for signing and OTA limits.
 To fetch a published web client, explicitly set `ONLYONE_CLIENT_BASE_URL` to your release-assets URL;
 archives are checked against that source's `sha256sums`.
 

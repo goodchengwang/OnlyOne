@@ -48,5 +48,14 @@
       ]
     }
   },
-  "icon": "icon.png"
+  "icon": "icon.png",
+  "updater": {
+    "github": "goodchengwang/OnlyOne",
+    "publicKey": "6tDnb1j73Ae9sKMx0XYQmEXa+zdiiYYAN7MicRcGN+U=",
+    "packages": {
+      "roots": [
+        "yQB5SrgJaufMrxr4i8ibtqIpLinMEURAqNsF0RdavAM="
+      ]
+    }
+  }
 }
