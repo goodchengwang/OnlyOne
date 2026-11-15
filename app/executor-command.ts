@@ -1,15 +1,14 @@
 // These commands contain no credentials: the request goes over stdin.
 export function executorCommand(os: string, directory: string, development: boolean) {
   if (os === "windows") return {
-    command: "powershell.exe",
-    args: ["-NoProfile", "-NonInteractive", "-Command", `
-      $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-      $env:PATH = $env:APPDATA + '\\npm;' + $env:ProgramFiles + '\\nodejs;' + $env:PATH
-      $command = Get-Command onlyone.cmd -ErrorAction SilentlyContinue
-      if ($null -eq $command) { exit 127 }
-      $input | & $command.Source app
-      exit $LASTEXITCODE
-    `],
+    // One argv element, re-quoted by the spawner with backslashes; neither
+    // cmd.exe nor powershell.exe parses a backslash as an escape, so the
+    // script stays quote-free. The launcher also has to pass the child's
+    // stdout through byte for byte: a PowerShell launcher line-buffers native
+    // output and appends a trailing newline, which the desktop client's stream
+    // does not expect.
+    command: "cmd.exe",
+    args: ["/d", "/s", "/c", "set PATH=%APPDATA%\\npm;%ProgramFiles%\\nodejs;%PATH% & where onlyone.cmd >nul 2>nul & if errorlevel 1 (exit /b 127) else (onlyone.cmd app)"],
   };
   return {
     command: "/bin/sh",

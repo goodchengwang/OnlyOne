@@ -6,11 +6,10 @@ import { executorCommand } from "../app/executor-command";
 
 test("windows command survives spawner re-quoting: no embedded double quotes", () => {
   const command = executorCommand("windows", "C:\\not-a-source-checkout", false);
-  expect(command.command).toBe("powershell.exe");
   // The whole script is one argv element that the spawner may re-quote for
   // Windows with backslashes; neither cmd.exe nor powershell.exe treats a
-  // backslash as an escape, so a double quote inside the script would change
-  // what the shell receives. Keep the command quote-free.
+  // backslash as an escape, so a double quote anywhere in the launched command
+  // changes what the shell receives. Keep it quote-free whatever the launcher.
   expect([command.command, ...command.args].join("\n")).not.toContain('"');
 });
 
