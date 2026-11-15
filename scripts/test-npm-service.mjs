@@ -12,7 +12,14 @@ const root = resolve(process.argv[2] || 'dist/npm');
 const home = mkdtempSync(join(tmpdir(), 'onlyone native service '));
 const label = 'onlyone-' + createHash('sha256').update(resolve(home)).digest('hex').slice(0, 12);
 const cli = join(root, 'onlyonecli/bin/onlyone.cjs');
-const platform = `onlyone-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
+// Resolve declared OS/CPU metadata so this fixture does not depend on package spelling.
+const platform = Object.keys(JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).optionalDependencies).find(name => {
+  const file = join(root, name, 'package.json');
+  if (!existsSync(file)) return false;
+  const pkg = JSON.parse(readFileSync(file, 'utf8'));
+  return pkg.os?.includes(process.platform) && pkg.cpu?.includes(process.arch);
+});
+assert(platform, 'Native platform package missing');
 // Resolve native packages without contacting a registry or adding dev tools to the service's PATH.
 const modules = join(root, 'onlyonecli/node_modules'); mkdirSync(modules, { recursive: true });
 const { symlinkSync } = await import('node:fs');
