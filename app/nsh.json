@@ -10,8 +10,8 @@
   },
   "capabilities": {
     "process": {
-      "execute": ["/bin/sh", "cmd.exe"],
-      "env": ["APPDATA", "ProgramFiles", "ONLYONE_HOME"]
+      "execute": ["/bin/sh", "powershell.exe"],
+      "env": ["APPDATA", "ProgramFiles", "ONLYONE_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
     },
     "clipboard": true,
     "statusBar": true,

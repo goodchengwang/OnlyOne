@@ -2,7 +2,9 @@
 
 Release apps on macOS, Windows and Linux invoke the npm-installed `onlyone app` command. They contain no executor
 binary and never fall back to a bundled binary or source checkout. Install Node.js 22+ and `onlyonecli` first; a
-missing or older CLI gets an installation/update message in the app. No global npm install runs silently.
+missing or older CLI gets an installation/update message in the app. Windows resolves the npm cmd shim through
+system PowerShell (without a profile); Unix uses the installed command through sh. Linux retains the user-bus
+environment so App launches use the same systemd user service as the terminal. No global npm install runs silently.
 
 `onlyone app` reads `{action: "start" | "stop" | "status", url, session?}` on stdin and returns a final JSON line
 `{protocol: 1, running, stopping, mode}`. Sessions never enter command lines, service definitions or saved config.
