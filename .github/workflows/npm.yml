@@ -25,7 +25,6 @@ jobs:
           - { platform: linux-arm64, runner: ubuntu-24.04-arm }
           - { platform: darwin-x64, runner: macos-15-intel }
           - { platform: darwin-arm64, runner: macos-15 }
-          - { platform: win32-x64, runner: windows-latest }
     runs-on: ${{ matrix.runner }}
     defaults:
       run:

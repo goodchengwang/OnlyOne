@@ -80,12 +80,12 @@ it must remain supervised to keep running after logout. Logs: `journalctl --user
 
 To build publishable packages locally: `bun run package:npm 0.1.3` (or invoke
 `bun scripts/package-npm.ts 0.1.3 dist/npm linux-x64` for one platform). Only whitelisted generated files
-are packed. The npm workflow tests actual tarball installs on all five platforms, publishes platform packages
+are packed. The npm workflow tests actual tarball installs on every packaged platform, publishes platform packages
 first and the main package last for a `vX.Y.Z` tag: `v0.1.3` publishes npm version `0.1.3`.
-Each of the six packages must trust GitHub Actions repository `goodchengwang/OnlyOne`, workflow `npm.yml`,
+Each of the five packages must trust GitHub Actions repository `goodchengwang/OnlyOne`, workflow `npm.yml`,
 with **Allow npm publish** enabled and no environment name. Publishing uses OIDC, without `NPM_TOKEN`.
 Pushes without a tag, pull requests and manual runs on branches only build and test.
-The publish job checks that all six packages exist before publishing any of them. `onlyone-win32-x64` is currently unavailable in the public registry; complete its first publication and trusted publisher setup before tagging a release.
+The publish job checks that all five packages exist before publishing any of them; one missing package fails the release. The packages cover Linux and macOS on x64 and arm64. Windows x64 is not published yet: the CLI cannot run there until `onlyone-win32-x64` has its first publication and trusted publisher configured, and only then may it be added back to `platforms` in `scripts/package-npm.ts` and to the npm workflow matrix.
 Published npm versions cannot be overwritten, including after unpublishing; the existing platform packages already occupy `0.1.0`, `0.1.1` and `0.1.2`.
 The native App workflow and its pinned NSH version are separate.
 
