@@ -1,12 +1,15 @@
 // These commands contain no credentials: the request goes over stdin.
 export function executorCommand(os: string, directory: string, development: boolean) {
   if (os === "windows") return {
-    // The whole script is one argv element that the spawner re-quotes for
-    // Windows with backslashes; cmd.exe has no backslash escape, so any double
-    // quote inside the script makes `set "PATH=..."` fail and `where` fall
-    // through to 127. Keep this command quote-free.
-    command: "cmd.exe",
-    args: ["/d", "/s", "/c", "set PATH=%APPDATA%\\npm;%ProgramFiles%\\nodejs;%PATH% & where onlyone.cmd >nul 2>nul & if errorlevel 1 (exit /b 127) else (onlyone.cmd app)"],
+    command: "powershell.exe",
+    args: ["-NoProfile", "-NonInteractive", "-Command", `
+      $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+      $env:PATH = $env:APPDATA + '\\npm;' + $env:ProgramFiles + '\\nodejs;' + $env:PATH
+      $command = Get-Command onlyone.cmd -ErrorAction SilentlyContinue
+      if ($null -eq $command) { exit 127 }
+      $input | & $command.Source app
+      exit $LASTEXITCODE
+    `],
   };
   return {
     command: "/bin/sh",
