@@ -82,12 +82,12 @@ async function waitReady() {
   throw new Error('Executor did not become ready');
 }
 try {
-  assert.deepEqual(await invokeApp('status'), { protocol: 1, running: false, stopping: false, mode: null });
+  assert.deepEqual(await invokeApp('status'), { protocol: 1, running: false, stopping: false, mode: null, cli: { version: JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).version } });
   let serviceAvailable = true;
   if (process.platform === 'linux') serviceAvailable = await exec('systemctl', ['--user', 'show-environment']).then(() => true, () => false);
   if (process.platform === 'darwin') serviceAvailable = await exec('launchctl', ['print', `gui/${process.getuid()}`]).then(() => true, () => false);
   if (serviceAvailable) {
-    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
+    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release', cli: { version: JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).version } });
     assert.equal(joins, 1);
     const saved = readFileSync(config, 'utf8');
     assert(saved.includes('test-machine') && !saved.includes('owner-session'));
@@ -96,13 +96,13 @@ try {
     await invoke([]);
     assert.equal(await waitReady(), pid, 'Reopening must reuse the existing daemon');
     const profile = join(home, 'cli/service.json'), stamp = statSync(profile).mtimeMs;
-    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
+    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release', cli: { version: JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).version } });
     assert.equal(statSync(profile).mtimeMs, stamp, 'Connecting the App must not rewrite CLI service configuration');
     assert.equal(await waitReady(), pid, 'The desktop App must reuse the terminal CLI daemon');
-    assert.deepEqual(await invokeApp('stop'), { protocol: 1, running: false, stopping: false, mode: null });
+    assert.deepEqual(await invokeApp('stop'), { protocol: 1, running: false, stopping: false, mode: null, cli: { version: JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).version } });
     await delay(1500);
     assert(!existsSync(ready), 'An explicit App stop must not respawn');
-    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
+    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release', cli: { version: JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).version } });
     await waitReady();
     assert.equal(joins, 1, 'Reopening must not re-enroll the CLI');
     console.log(`Native CLI/App service passed: ${platform}, shared home, repeated start, graceful stop and restart`);

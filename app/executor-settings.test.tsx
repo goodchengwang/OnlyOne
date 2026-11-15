@@ -16,3 +16,17 @@ test("background service control waits for tasks, then shows stopped and starts 
   await app.waitFor("id:executor-error");
   expect(app.shows("Please retry")).toBe(true);
 });
+
+test("checks CLI updates and downloads a new version from settings", async () => {
+  const app = await open("./executor-settings.fixture.tsx", { platform: "macos", width: 800, height: 700 });
+  await app.press("id:executor-toggle"); await app.press("id:finish-task");
+  await app.press("id:executor-toggle"); await app.press("id:finish-task");
+  await app.press("id:cli-check-update");
+  await app.waitFor("Checking CLI updates…");
+  await app.press("id:finish-task");
+  await app.waitFor("CLI 0.1.3 · 0.1.4 available");
+  await app.press("id:cli-update");
+  await app.waitFor("Downloading and verifying CLI; running tasks finish before switching…");
+  await app.press("id:finish-task");
+  await app.waitFor("CLI 0.1.4 · up to date");
+});

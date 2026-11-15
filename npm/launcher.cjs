@@ -9,7 +9,7 @@ function write(file, value) {
   fs.renameSync(file + '.next', file);
 }
 function platformBinary(root) {
-  const name = `onlyone-${process.platform}-${process.arch}`;
+  const name = `onlyone-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
   if (!['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64'].includes(`${process.platform}-${process.arch}`))
     throw new Error(`OnlyOne does not support ${process.platform}/${process.arch}`);
   if (process.platform === 'linux' && !process.report.getReport().header.glibcVersionRuntime)

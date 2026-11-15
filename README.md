@@ -62,8 +62,9 @@ Linux uses a systemd user service. Without user systemd, run `onlyone daemon` in
 user systemd before retrying `onlyone install`. If enabling linger needs permission, setup prints the command
 needed to keep the service running after logout. macOS uses launchd; Windows uses the current user's logon
 scheduled task, which requires that user to be logged in. These services do not keep a suspended computer online.
-Windows x64 packaging is implemented, but its platform package is pending npm review and the CLI cannot run on Windows until that package is approved. Alpine/musl and Windows ARM64 are not included in the initial packages.
+Windows x64 uses the npm platform package `onlyone-windows-x64` (with `os: ["win32"]`); it must be published before Windows installation is available. Alpine/musl and Windows ARM64 are not included in the initial packages.
 
+Settings → Background service provides **Check CLI updates** and **Download and update CLI** for this computer.
 `onlyone update`, or **Update all machines** in the app, downloads the latest stable npm release into
 `~/.onlyone/cli/releases/`. It checks the version and startup before waiting for current tasks to finish,
 switching versions and restarting. The global npm installation is never modified by remote updates.
@@ -85,8 +86,8 @@ first and the main package last for a `vX.Y.Z` tag: `v0.1.3` publishes npm versi
 Each of the six packages must trust GitHub Actions repository `goodchengwang/OnlyOne`, workflow `npm.yml`,
 with **Allow npm publish** enabled and no environment name. Publishing uses OIDC, without `NPM_TOKEN`.
 Pushes without a tag, pull requests and manual runs on branches only build and test.
-The publish job checks that all six packages exist before publishing any of them. `onlyone-win32-x64` is currently unavailable in the public registry; complete its first publication and trusted publisher setup before tagging a release.
-Published npm versions cannot be overwritten, including after unpublishing; the existing platform packages already occupy `0.1.0`, `0.1.1` and `0.1.2`.
+Platform packages are named `onlyone-linux-x64`, `onlyone-linux-arm64`, `onlyone-darwin-x64`, `onlyone-darwin-arm64` and `onlyone-windows-x64`; the main package remains `onlyonecli`. The publish job checks that all six packages exist before publishing any of them. Complete the first publication and trusted publisher setup for `onlyone-windows-x64` before tagging a release.
+Published npm versions cannot be overwritten, including after unpublishing; the main package and the old platform packages already occupy `0.1.0`, `0.1.1` and `0.1.2`.
 The native App workflow and its pinned NSH version are separate.
 
 ## Install from local source

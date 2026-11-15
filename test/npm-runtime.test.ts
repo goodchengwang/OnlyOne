@@ -1,11 +1,24 @@
 import { expect, test } from "bun:test";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createRequire } from "node:module";
+import { runInNewContext } from "node:vm";
 
 const node = Bun.which("node")!;
 const runtime = join(import.meta.dir, "../src/npm-runtime.ts");
 const launcher = join(import.meta.dir, "../npm/launcher.cjs");
+test("Windows launcher resolves the windows package name while Node reports win32", () => {
+  const root = mkdtempSync(join(tmpdir(), "onlyone-windows-package-"));
+  const directory = join(root, "node_modules/onlyone-windows-x64");
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, "package.json"), '{"name":"onlyone-windows-x64"}');
+  const module = { exports: {} as { platformBinary: (root: string) => string } };
+  try {
+    runInNewContext(readFileSync(launcher, "utf8"), { module, require: createRequire(import.meta.url), process: { platform: "win32", arch: "x64" } });
+    expect(module.exports.platformBinary(realpathSync(root))).toBe(join(realpathSync(directory), "bin/onlyone.exe"));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
 const script = (file: string, body: string) => { writeFileSync(file, `#!${node}\n${body}\n`); chmodSync(file, 0o700); };
 async function runStage(home: string, npm: string, action = "stage") {
   const code = `import { stageNpmUpdate, activateNpmUpdate } from ${JSON.stringify(runtime)}; console.log(${action === "stage" ? "await stageNpmUpdate()" : "activateNpmUpdate()"});`;
@@ -27,6 +40,8 @@ else {if(!a.includes('--ignore-scripts')||!a.includes('--include=optional')||!a.
 const prefix=a[a.indexOf('--prefix')+1], main=p.join(prefix,'node_modules/onlyonecli'),dir=p.join(prefix,'node_modules/onlyone-'+process.platform+'-'+process.arch,'bin'); fs.mkdirSync(main,{recursive:true}); fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(p.join(main,'package.json'),JSON.stringify({version:'0.2.0'})); fs.writeFileSync(p.join(dir,'onlyone'), ${JSON.stringify(`#!${node}\nif(process.argv[2]==='--version')console.log('0.2.0');else if(process.argv[2]==='--self-check')process.exit(${0});\n`)});fs.chmodSync(p.join(dir,'onlyone'),0o700);}`);
   try {
     writeFileSync(join(home, "latest"), "0.1.0");
+    expect((await runStage(home, npm)).out.trim()).toBe("false");
+    writeFileSync(join(home, "latest"), "0.0.9");
     expect((await runStage(home, npm)).out.trim()).toBe("false");
     writeFileSync(join(home, "latest"), "0.2.0");
     const staged = await runStage(home, npm);
@@ -120,4 +135,12 @@ else {const prefix=a[a.indexOf('--prefix')+1],main=p.join(prefix,'node_modules/o
     expect(result.err).toContain("failed startup self-check");
     expect(readFileSync(current, "utf8")).toBe(original);
   } finally { rmSync(home, { recursive: true, force: true }); }
+});
+
+ test("CLI latest comparison refuses downgrades", async () => {
+  const { newerCliVersion } = await import("../src/npm-runtime");
+  expect(newerCliVersion("0.1.4", "0.1.3")).toBe(true);
+  expect(newerCliVersion("0.1.2", "0.1.3")).toBe(false);
+  expect(newerCliVersion("0.1.3", "0.1.3")).toBe(false);
+  expect(() => newerCliVersion("bad", "0.1.3")).toThrow();
 });

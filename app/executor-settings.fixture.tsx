@@ -1,10 +1,10 @@
 import { mount, signal, View } from "nsh";
 import { Button } from "./ui";
 import { ExecutorSettings, type ExecutorControl } from "./executor-settings";
-import type { DesktopStatus } from "../src/desktop-status";
+import type { DesktopStatus, ExecutorAction } from "../src/desktop-status";
 
 const state = signal<DesktopStatus | null>({ running: true, stopping: false, mode: "development" });
-const busy = signal<"start" | "stop" | null>(null);
+const busy = signal<ExecutorAction | null>(null);
 const error = signal("");
 let finish: (() => void) | undefined;
 const service: ExecutorControl = {
@@ -13,7 +13,9 @@ const service: ExecutorControl = {
     busy.set(action);
     error.set("");
     await new Promise<void>((resolve) => { finish = resolve; });
-    state.set({ running: action === "start", stopping: false, mode: action === "start" ? "release" : null });
+    if (action === "check-update") state.set({ running: true, stopping: false, mode: "release", cli: { version: "0.1.3", latest: "0.1.4", available: true } });
+    else if (action === "update") state.set({ running: true, stopping: false, mode: "release", cli: { version: "0.1.4", latest: "0.1.4", available: false } });
+    else state.set({ running: action === "start", stopping: false, mode: action === "start" ? "release" : null });
     busy.set(null);
     return true;
   },

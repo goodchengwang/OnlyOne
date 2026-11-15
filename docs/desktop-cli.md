@@ -6,8 +6,8 @@ missing or older CLI gets an installation/update message in the app. Windows res
 system PowerShell (without a profile); Unix uses the installed command through sh. Linux retains the user-bus
 environment so App launches use the same systemd user service as the terminal. No global npm install runs silently.
 
-`onlyone app` reads `{action: "start" | "stop" | "status", url, session?}` on stdin and returns a final JSON line
-`{protocol: 1, running, stopping, mode}`. Sessions never enter command lines, service definitions or saved config.
+`onlyone app` reads `{action: "start" | "stop" | "status" | "check-update" | "update", url, session?}` on stdin and returns a final JSON line
+`{protocol: 1, running, stopping, mode, cli: {version, latest?, available?, pending?}}`. Sessions never enter command lines, service definitions or saved config.
 The command is available only through onlyonecli's npm launcher. The npm manifest declares `onlyoneAppProtocol: 1`.
 CLI publication must precede App distribution; the App tag workflow verifies that protocol declaration and the
 actual availability of each desktop platform package before building;
@@ -36,3 +36,9 @@ Status and already-running starts each add 0 requests and 0 written rows; no new
 Validate request/binding and stop behavior in Bun tests, then exercise npm tarball installs and the actual
 OS service via `scripts/test-npm-service.mjs` on all five CLI platforms. Release packaging must assert that native
 archives contain no `onlyone-executor`. Keep App updates and onlyonecli's npm update/rollback as separate lifecycles.
+
+The settings view offers explicit CLI checks and downloads. Checks query npm latest once; they do not install or
+contact the Worker. Update downloads into the existing private npm runtime, validates version and startup, drains
+the running service, then activates and confirms the candidate. A failed candidate rolls back through the existing
+launcher. A stopped service stays stopped; its selected update is confirmed on its next start. No update polling is
+added. A registry version older than the selected CLI never causes a downgrade.

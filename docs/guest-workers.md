@@ -25,7 +25,7 @@ your OnlyOne deployment.
    ```
 
    If OnlyOne is already installed, skip the npm command. Enrollment needs no owner login or machine key.
-   The Windows npm platform package is currently pending npm review; use a supported Linux or macOS machine meanwhile.
+   The renamed `onlyone-windows-x64` npm platform package must be published first; use a supported Linux or macOS machine meanwhile.
    `onlyone guest install` starts a per-account background service (systemd user unit, launchd agent, or
    a hidden process from the account's Run key on Windows; no admin rights). `onlyone guest install` / `uninstall` add or
    remove it by hand, and `onlyone guest run` runs it in the foreground instead. Install and log in to `claude` (or

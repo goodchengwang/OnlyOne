@@ -45,7 +45,7 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
-import { executor, hasExecutor, type DesktopStatus } from "./executor";
+import { executor, hasExecutor, type ExecutorAction, type DesktopStatus } from "./executor";
 import { ExecutorSettings, type ExecutorControl } from "./executor-settings";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf as memberAvatar } from "./avatars";
@@ -5483,20 +5483,20 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
   const onlyone = createOnlyOne(props.config);
   const executorError = signal("");
   const executorState = signal<DesktopStatus | null>(null);
-  const executorBusy = signal<"start" | "stop" | null>(null);
-  let retryAction: "start" | "stop" = "start";
+  const executorBusy = signal<ExecutorAction | null>(null);
+  let retryAction: ExecutorAction = "start";
   const refreshExecutor = () => {
     if (!hasExecutor || untracked(executorBusy)) return;
     executor("status", props.config).then((s) => { if (!untracked(executorBusy)) executorState.set(s); }).catch(() => { if (!untracked(executorError)) executorError.set(L("Could not read the background service status. Please retry.", "无法读取后台服务状态，请重试。")); });
   };
-  const runExecutor = async (action: "start" | "stop"): Promise<boolean> => {
+  const runExecutor = async (action: ExecutorAction): Promise<boolean> => {
     if (untracked(executorBusy)) return false;
     retryAction = action;
     executorError.set("");
     executorBusy.set(action);
     try { executorState.set(await executor(action, props.config)); return true; }
     catch (error) { executorError.set(error instanceof Error ? error.message : L("Could not change the background service. Please retry.", "后台服务操作未完成，请重试。")); return false; }
-    finally { executorBusy.set(null); refreshExecutor(); }
+    finally { executorBusy.set(null); if (action === "start" || action === "stop") refreshExecutor(); }
   };
   const service: ExecutorControl = { state: executorState, busy: executorBusy, error: executorError, run: runExecutor, refresh: refreshExecutor };
   if (hasExecutor) {

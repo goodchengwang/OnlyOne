@@ -6,10 +6,14 @@ import { dirname, join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
 const root = resolve(process.argv[2] || 'dist/npm');
+const manifest = JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8'));
+assert.deepEqual(manifest.optionalDependencies, Object.fromEntries(
+  ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'windows-x64'].map(platform => [`onlyone-${platform}`, manifest.version])
+));
 const npm = process.env.npm_execpath || [join(dirname(process.execPath), 'node_modules/npm/bin/npm-cli.js'), resolve(dirname(process.execPath), '../lib/node_modules/npm/bin/npm-cli.js')].find(existsSync);
 assert(npm, 'npm-cli.js must be available');
 const home = mkdtempSync(join(tmpdir(), 'onlyone npm install '));
-const platform = `onlyone-${process.platform}-${process.arch}`;
+const platform = `onlyone-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 const packs = join(home, 'packs'); mkdirSync(packs);
 function execute(command, args, opts = {}) {
   const result = spawnSync(command, args, { encoding: 'utf8', timeout: 120_000, ...opts });
@@ -40,7 +44,7 @@ try {
   else assert.equal(execute(shim, ['--version'], { env }).trim(), version);
   assert.match(execute(node, [cli, '--help'], { env }), /OnlyOne/);
   const status = JSON.parse(execute(node, [cli, 'app'], { env, input: JSON.stringify({ action: 'status', url: 'https://example.com' }) }).trim());
-  assert.deepEqual(status, { protocol: 1, running: false, stopping: false, mode: null });
+  assert.deepEqual(status, { protocol: 1, running: false, stopping: false, mode: null, cli: { version: JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).version } });
   assert.equal(execute(node, [cli, '--self-check'], { env }).trim(), 'ok');
   const setup = spawnSync(node, [cli], { env, encoding: 'utf8', timeout: 15_000, input: '' });
   assert.equal(setup.status, 1);

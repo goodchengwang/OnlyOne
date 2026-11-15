@@ -50,15 +50,26 @@ async function npmCommand(args: string[]) {
   } finally { clearTimeout(timer); }
 }
 
+export function newerCliVersion(latest: string, current: string) {
+  if (!/^\d+\.\d+\.\d+$/.test(latest)) throw new Error("npm latest did not return a stable OnlyOne version");
+  const a = latest.split(".").map(Number), b = current.split(".").map(Number);
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i]! > b[i]!;
+  return false;
+}
+export async function checkNpmUpdate() {
+  const version: unknown = JSON.parse(await npmCommand(["view", "onlyonecli@latest", "version", "--json"]));
+  if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("npm latest did not return a stable OnlyOne version");
+  return { version, available: newerCliVersion(version, existsSync(currentPath()) ? currentRelease().version : CLI_VERSION) };
+}
+
 export async function stageNpmUpdate() {
   if (!existsSync(currentPath())) ensureNpmRuntime();
   const unlock = lockDaemon(join(runtimeDir(), "update"));
   try {
     const current = currentRelease();
     if (current.next || current.pending) throw new Error("An OnlyOne update is already waiting for restart");
-    const version: unknown = JSON.parse(await npmCommand(["view", "onlyonecli@latest", "version", "--json"]));
-    if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error("npm latest did not return a stable OnlyOne version");
-    if (version === current.version) return false;
+    const { version, available } = await checkNpmUpdate();
+    if (!available) return false;
     const dir = join(runtimeDir(), "releases", version);
     // Never overwrite a binary that another process (especially Windows) may still be running.
     const attempt = join(dir, `install-${Date.now()}-${process.pid}`);
@@ -67,7 +78,7 @@ export async function stageNpmUpdate() {
       await npmCommand(["install", "--prefix", attempt, "--ignore-scripts", "--no-audit", "--no-fund", "--include=optional", "--save-exact", `onlyonecli@${version}`]);
       const manifest = JSON.parse(readFileSync(join(attempt, "node_modules", "onlyonecli", "package.json"), "utf8"));
       if (manifest.version !== version) throw new Error("Downloaded OnlyOne version does not match the requested version");
-      const binary = join(attempt, "node_modules", `onlyone-${process.platform}-${process.arch}`, "bin", process.platform === "win32" ? "onlyone.exe" : "onlyone");
+      const binary = join(attempt, "node_modules", `onlyone-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`, "bin", process.platform === "win32" ? "onlyone.exe" : "onlyone");
       for (const args of [["--version"], ["--self-check"]]) {
         const result = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "pipe", timeout: 30_000 });
         if (result.exitCode !== 0 || (args[0] === "--version" && result.stdout.toString().trim() !== version)) throw new Error("Downloaded OnlyOne failed startup self-check");

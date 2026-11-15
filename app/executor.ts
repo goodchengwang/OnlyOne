@@ -7,11 +7,12 @@ import * as updater from "nsh/updater";
 import { executorCommand } from "./executor-command";
 
 import type { DesktopStatus } from "../src/desktop-status";
-export type { DesktopStatus } from "../src/desktop-status";
+import type { ExecutorAction } from "../src/desktop-status";
+export type { ExecutorAction, DesktopStatus } from "../src/desktop-status";
 export const hasExecutor = ["macos", "windows", "linux"].includes(platform.os) && !!process.dataDir;
 
 let pending: Promise<unknown> = Promise.resolve();
-export function executor(action: "start" | "stop" | "status", config: { url: string; token: string }): Promise<DesktopStatus | null> {
+export function executor(action: ExecutorAction | "status", config: { url: string; token: string }): Promise<DesktopStatus | null> {
   if (action === "status") return invokeExecutor(action, config);
   const next = pending.then(() => invokeExecutor(action, config));
   pending = next.catch(() => {});
@@ -19,12 +20,12 @@ export function executor(action: "start" | "stop" | "status", config: { url: str
 }
 
 // launchd owns the executor, so closing the window or hot reloading never kills a task.
-async function invokeExecutor(action: "start" | "stop" | "status", config: { url: string; token: string }): Promise<DesktopStatus | null> {
+async function invokeExecutor(action: ExecutorAction | "status", config: { url: string; token: string }): Promise<DesktopStatus | null> {
   if (!hasExecutor) return null;
   const directory = decodeURIComponent(new URL(".", import.meta.url).pathname);
   const info = (updater as { shellInfo?: () => { version?: string | null } }).shellInfo?.();
   const development = platform.os === "macos" && info?.version == null;
-  const launch = executorCommand(platform.os, directory, development);
+  const launch = executorCommand(platform.os, directory, development && !["check-update", "update"].includes(action));
   const child = process.spawn(launch.command, launch.args, { stdin: "pipe" });
   let output = "";
   child.on("stdout", (text) => { output = (output + text).slice(-4096); });
@@ -36,6 +37,7 @@ async function invokeExecutor(action: "start" | "stop" | "status", config: { url
       else if ((result.code === 127 || result.code === 9009)) reject(new Error(L("Install Node.js 22+ and onlyonecli (npm install -g onlyonecli), then retry.", "请先安装 Node.js 22+ 和 onlyonecli（npm install -g onlyonecli），然后重试。")));
       else if (/connected to another server/.test(diagnostic)) reject(new Error(L("onlyonecli is connected to another server. Switch its server before retrying.", "本机 onlyonecli 已连接其他服务器，请先切换 CLI 的服务器再重试。")));
       else if (/Install or update onlyonecli/.test(diagnostic)) reject(new Error(L("Update onlyonecli with npm and run onlyone update, then retry.", "请通过 npm 更新 onlyonecli，并运行 onlyone update 后重试。")));
+      else if (action === "update" || action === "check-update") reject(new Error(L("CLI update did not complete. Your existing version is retained or restored; retry checking the update.", "CLI 更新未完成，现有版本会保留或恢复，请重新检查更新。")));
       else {
         console.error("OnlyOne executor:", diagnostic);
         reject(new Error(L("The local executor could not start. Please try again.", "本机执行服务未能启动，请重试")));
@@ -53,6 +55,6 @@ async function invokeExecutor(action: "start" | "stop" | "status", config: { url
     try { state = JSON.parse(output.trim().split("\n").at(-1)!); } catch {}
     if (!state || (!development && state.protocol !== 1) || typeof state.running !== "boolean" || typeof state.stopping !== "boolean" || ![null, "release", "development"].includes(state.mode))
       throw new Error(L("Update onlyonecli (npm install -g onlyonecli, then onlyone update) and retry.", "请更新 onlyonecli（npm install -g onlyonecli，然后运行 onlyone update），再重试。"));
-    return { running: state.running, stopping: state.stopping, mode: state.mode };
+    return { running: state.running, stopping: state.stopping, mode: state.mode, ...(state.cli ? { cli: state.cli } : {}) };
   } finally { child.dispose(); }
 }
