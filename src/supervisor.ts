@@ -178,6 +178,13 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
     } else verdicts.push(v);
   }
   for (const x of sweepPlatform(tasks, verdicts)) verdicts.push(x);
+  // A menu card still open after HUMAN_WAIT_MAX_HOURS expires even when no task points at it any more: an orphaned card
+  // would otherwise block every future menu, because an open menu card counts as the live offer.
+  for (const p of list(P("decisions", "open"))) {
+    const { meta } = readDoc(p);
+    if (meta.kind !== "menu" || t - Date.parse(meta.created ?? "") < HUMAN_WAIT_MAX_HOURS * 3_600_000) continue;
+    if (expireDecision(meta.id, host)) counts.expire++;
+  }
   const cards = (["open", "closed"] as const).flatMap((f) => list(P("decisions", f)).map((p) => readDoc(p).meta));
   const byId = new Map(tasks.map((x) => [x.meta.id, x]));
   for (const [cause, vs] of groupByCause(verdicts)) {

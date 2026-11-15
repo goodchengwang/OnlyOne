@@ -122,6 +122,15 @@ test("supervise(): an expired menu is archived unanswered and its task wakes to 
   expect(t.body).toContain("Do not open another menu card");
 });
 
+test("supervise(): an old menu card with no task left still expires, so it cannot block future menus forever", () => {
+  mkdirSync(P("journal"), { recursive: true });
+  mkdirSync(P("decisions", "open"), { recursive: true }); mkdirSync(P("decisions", "closed"), { recursive: true });
+  writeDoc(P("decisions", "open", "D-9102.md"), { id: "D-9102", task: "T-0399", kind: "menu", created: new Date(Date.now() - 30 * H).toISOString() }, "c");
+  expect(supervise({ supervisor: {}, fleet: {} }, "lb").expire).toBe(1);
+  expect(existsSync(P("decisions", "open", "D-9102.md"))).toBe(false);
+  expect(readDoc(P("decisions", "closed", "D-9102.md")).meta.answered_by).toBe("expired");
+});
+
 test("closeDecision on a supervisor card never sets gate_override", () => {
   writeDoc(P("decisions", "open", "D-9001.md"), { id: "D-9001", task: "T-0201", tasks: "T-0201,T-0202", supervisor_cause: "no-wait", question: "q" }, "c");
   for (const id of ["T-0201", "T-0202"]) writeDoc(P("tasks", "blocked", `${id}.md`), { id, title: id, decision: "D-9001" }, "b");
