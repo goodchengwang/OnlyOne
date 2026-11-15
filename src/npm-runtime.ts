@@ -1,5 +1,5 @@
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { CLI_VERSION } from "./release";
 import { HOME_DIR, DATA } from "./core";
 import { lockDaemon } from "./daemon-lock";
@@ -32,7 +32,7 @@ export function ensureNpmRuntime() {
   }
   writeFileSync(join(runtimeDir(), "launcher.cjs"), launcher, { mode: 0o600 });
   writeFileSync(join(runtimeDir(), "service.json"), JSON.stringify({
-    ONLYONE_HOME: HOME_DIR, ONLYONE_DATA_DIR: DATA, ONLYONE_CONF: process.env.ONLYONE_CONF || join(HOME_DIR, "onlyone.toml"),
+    ONLYONE_HOME: HOME_DIR, ONLYONE_DATA_DIR: DATA, ONLYONE_CONF: resolve(process.env.ONLYONE_CONF || join(HOME_DIR, "onlyone.toml")),
     ONLYONE_NODE: node, ONLYONE_NPM_CLI: npm, PATH: process.env.PATH || "",
   }), { mode: 0o600 });
   return [node, join(runtimeDir(), "launcher.cjs"), "--service"];

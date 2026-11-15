@@ -8,11 +8,15 @@ environment so App launches use the same systemd user service as the terminal. N
 
 `onlyone app` reads `{action: "start" | "stop" | "status", url, session?}` on stdin and returns a final JSON line
 `{protocol: 1, running, stopping, mode}`. Sessions never enter command lines, service definitions or saved config.
-The command is available only through onlyonecli's npm launcher. CLI publication must precede App distribution;
-the public Windows platform package still requires the separate npm registry approval described in README.md.
+The command is available only through onlyonecli's npm launcher. The npm manifest declares `onlyoneAppProtocol: 1`.
+CLI publication must precede App distribution; the App tag workflow verifies that protocol declaration and the
+actual availability of each desktop platform package before building;
+the renamed Windows platform package requires first publication and trusted publisher setup as described in README.md.
 
-The App and terminal share `ONLYONE_HOME` (default `~/.onlyone`), the npm runtime's current version and OS service:
-launchd on macOS, systemd user services on Linux, and the current user's logon task on Windows. Opening an App
+The App and terminal share `ONLYONE_HOME` (default `~/.onlyone`), the npm runtime's current version and OS service.
+The App control command also reuses the saved CLI profile's data/config paths, Node/npm and PATH, even when the
+GUI does not inherit the terminal's environment. It does not rewrite that profile when merely reconnecting.
+The service uses launchd on macOS, systemd user services on Linux, and the current user's logon task on Windows. Opening an App
 reuses the CLI service; closing its window leaves the service running. Stopping writes the CLI's local stop marker;
 the daemon receives a filesystem notification, stops taking work, drains tasks and flushes results. Only then is the
 OS service disabled. The launcher respects that marker and does not respawn a stopped daemon or mistake an explicit

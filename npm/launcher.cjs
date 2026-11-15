@@ -41,6 +41,12 @@ async function run(args, root) {
     env.ONLYONE_NODE = process.execPath;
     const npm = npmCli();
     if (npm) env.ONLYONE_NPM_CLI = npm;
+    const profile = path.join(home, 'cli/service.json');
+    if (args[0] === 'app' && fs.existsSync(profile)) {
+      const saved = read(profile);
+      if (path.resolve(saved.ONLYONE_HOME || home) !== home) throw new Error('CLI service profile belongs to another home');
+      env = { ...env, ...saved };
+    }
   }
   const stoppedFile = path.join(home, 'cli/stopped');
   if (service && fs.existsSync(stoppedFile)) return;

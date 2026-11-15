@@ -79,7 +79,10 @@ the shared build number (the installed Mac baseline was build 1 when this pipeli
 reuse a smaller build for an OTA release. Tag versions must increase. Keep the same workflow counter for any future OTA path.
 
 The workflow keeps `NSH_REF` pinned and caches the CLI and runtime; a cold source build can take tens of minutes.
-It checks these repository secrets before building on manual and tag runs:
+Before a tag release builds, it verifies the public latest `onlyonecli` declares `onlyoneAppProtocol: 1` and all
+four desktop platform dependencies exist at their exact versions. This prevents a new App being distributed before
+a compatible CLI. Manual CI builds skip that publication gate so unpublished code can still be verified.
+It also checks these repository secrets before building on manual and tag runs:
 
 - `NSH_UPDATE_KEY`: the secret corresponding to `updater.publicKey`; signs `latest.json` into `latest.json.sig`.
 - `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS`, `ANDROID_KEYSTORE_PASSWORD`: the persistent Android signing key.

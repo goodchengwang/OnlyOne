@@ -47,12 +47,12 @@ async function run(args: string[], env = process.env) {
 }
 
 /** Only a fresh binding calls join + init (3 requests); later app opens are entirely local. */
-export async function enrollDesktop(binding: ReturnType<typeof desktopBinding> & { data?: string }, session: string, cli = command()) {
+export async function enrollDesktop(binding: ReturnType<typeof desktopBinding> & { data?: string; conf?: string }, session: string, cli = command()) {
   const { home, url } = binding;
   const data = binding.data ?? join(home, "data");
   mkdirSync(home, { recursive: true, mode: 0o700 });
   chmodSync(home, 0o700);
-  const cfgPath = join(home, "onlyone.toml");
+  const cfgPath = binding.conf ?? join(home, "onlyone.toml");
   const saved = existsSync(cfgPath) ? Bun.TOML.parse(readFileSync(cfgPath, "utf8")) as any : {};
   if (saved.cloud?.url && saved.cloud.url !== url) throw new Error("This executor belongs to another cloud");
   const env = { ...process.env, ONLYONE_HOME: home, ONLYONE_DATA_DIR: data, ONLYONE_CONF: cfgPath, ONLYONE_SYNC: "", ONLYONE_SYNC_FAKE: "", ONLYONE_NO_MEDIC: "1" };
@@ -65,6 +65,7 @@ export async function enrollDesktop(binding: ReturnType<typeof desktopBinding> &
     const body = await response.json() as { token?: string };
     if (!response.ok || typeof body.token !== "string" || !body.token) throw new Error(`Machine registration failed (${response.status})`);
     // Persist only the machine credential, even if the first pull is interrupted.
+    mkdirSync(dirname(cfgPath), { recursive: true, mode: 0o700 });
     writeFileSync(cfgPath, `[cloud]\nurl = ${JSON.stringify(url)}\n[server]\ntoken = ${JSON.stringify(body.token)}\n`, { mode: 0o600 });
   }
   if (!existsSync(join(data, "config.toml"))) {
@@ -86,7 +87,8 @@ export async function desktop(options: { root?: string; cli?: string[] } = {}) {
   const source = desktopBinding(input.url, options.root ?? HOME_DIR);
   const home = source.home;
   const data = options.root ? join(home, "data") : DATA;
-  const binding = { ...source, home, data };
+  const { onlyoneTomlPath } = await import("./sync");
+  const binding = { ...source, home, data, conf: options.root ? join(home, "onlyone.toml") : onlyoneTomlPath() };
   const { label, url } = binding;
   const saved = existsSync(join(home, "onlyone.toml")) ? Bun.TOML.parse(readFileSync(join(home, "onlyone.toml"), "utf8")) as any : {};
   if (saved.cloud?.url && desktopBinding(saved.cloud.url).url !== url) throw new Error("onlyonecli is connected to another server; local data was kept");

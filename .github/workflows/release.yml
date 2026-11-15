@@ -13,6 +13,7 @@ on:
       - app/executor.ts
       - app/executor-command.ts
       - scripts/check-app-release.ts
+      - scripts/check-published-cli.ts
       - scripts/check-ios-sdk.sh
       - app/build-web.sh
   workflow_dispatch:
@@ -38,6 +39,13 @@ jobs:
   preflight:
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+      - uses: oven-sh/setup-bun@v2
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+      - name: Require published desktop CLI support before releasing clients
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: bun scripts/check-published-cli.ts
       - name: Check signing prerequisites
         if: github.event_name != 'pull_request'
         env:

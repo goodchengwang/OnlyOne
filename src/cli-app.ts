@@ -7,7 +7,7 @@ import { lockDaemon } from "./daemon-lock";
 import { installNpmService, npmServiceStatus, stopNpmService } from "./npm-service";
 import { currentPath } from "./npm-runtime";
 import { npmBuild } from "./release";
-import { readOnlyOneToml } from "./sync";
+import { onlyoneTomlPath, readOnlyOneToml } from "./sync";
 
 export function appRequest(text: string) {
   let input: any;
@@ -28,7 +28,7 @@ export async function cliApp() {
   const input = appRequest(await Bun.stdin.text());
   if (!npmBuild || !process.env.ONLYONE_NPM_ROOT || !process.env.ONLYONE_NODE)
     throw new Error("Install or update onlyonecli with npm, then run onlyone app through the onlyone command");
-  const binding = { ...desktopBinding(input.url, HOME_DIR), data: DATA };
+  const binding = { ...desktopBinding(input.url, HOME_DIR), data: DATA, conf: onlyoneTomlPath() };
   const reply = () => console.log(JSON.stringify({ protocol: 1, ...npmServiceStatus() }));
   checkAppBinding(input.url, readOnlyOneToml());
   if (input.action === "status") return reply();

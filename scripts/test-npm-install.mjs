@@ -30,7 +30,9 @@ try {
   const node = join(tools, process.platform === 'win32' ? 'node.exe' : 'node');
   if (process.platform === 'win32') copyFileSync(process.execPath, node); else symlinkSync(process.execPath, node);
   const env = { ...process.env, PATH: tools, ONLYONE_HOME: join(home, 'private home'), ONLYONE_DATA_DIR: '', ONLYONE_CONF: '', ONLYONE_SYNC: '', ONLYONE_SYNC_FAKE: '', ONLYONE_NO_MEDIC: '1', npm_execpath: npm };
-  const version = JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8')).version;
+  const manifest = JSON.parse(readFileSync(join(root, 'onlyonecli/package.json'), 'utf8'));
+  assert.equal(manifest.onlyoneAppProtocol, 1);
+  const version = manifest.version;
   assert.equal(execute(node, [cli, '--version'], { env }).trim(), version);
   const shim = join(prefix, 'node_modules/.bin', process.platform === 'win32' ? 'onlyone.cmd' : 'onlyone');
   assert(existsSync(shim), 'npm must install the onlyone command');

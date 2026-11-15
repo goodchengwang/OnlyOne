@@ -12,7 +12,7 @@ const root = resolve(process.argv[2] || 'dist/npm');
 const home = mkdtempSync(join(tmpdir(), 'onlyone native service '));
 const label = 'onlyone-' + createHash('sha256').update(resolve(home)).digest('hex').slice(0, 12);
 const cli = join(root, 'onlyonecli/bin/onlyone.cjs');
-const platform = `onlyone-${process.platform}-${process.arch}`;
+const platform = `onlyone-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`;
 // Resolve native packages without contacting a registry or adding dev tools to the service's PATH.
 const modules = join(root, 'onlyonecli/node_modules'); mkdirSync(modules, { recursive: true });
 const { symlinkSync } = await import('node:fs');
@@ -21,7 +21,8 @@ const createdLink = !existsSync(link);
 if (createdLink) symlinkSync(join(root, platform), link, process.platform === 'win32' ? 'junction' : 'dir');
 const npm = process.env.npm_execpath || [join(process.execPath, '../node_modules/npm/bin/npm-cli.js'), resolve(process.execPath, '../../lib/node_modules/npm/bin/npm-cli.js')].find(existsSync);
 assert(npm, 'npm-cli.js missing');
-const env = { ...process.env, ONLYONE_HOME: home, ONLYONE_DATA_DIR: '', ONLYONE_CONF: '', ONLYONE_SYNC: '', ONLYONE_SYNC_FAKE: '', ONLYONE_NO_MEDIC: '1', npm_execpath: npm };
+const config = join(home, 'settings', 'onlyone.toml');
+const env = { ...process.env, ONLYONE_HOME: home, ONLYONE_DATA_DIR: join(home, 'private mirror'), ONLYONE_CONF: config, ONLYONE_SYNC: '', ONLYONE_SYNC_FAKE: '', ONLYONE_NO_MEDIC: '1', npm_execpath: npm };
 const files = new Map(); let rev = 1, foreground, joins = 0;
 const content = Buffer.from('[fleet]\nprimary = "another-machine"\n[host]\nname = "npm-smoke"\n[server]\nenabled = false\n[resources]\ndisk_min_gb = 0\ndisk_min_pct = 0\n[medic]\nenabled = false\n');
 files.set('config.toml', { path: 'config.toml', rev, version: 1, deleted: false, content: content.toString('base64'), hash: createHash('sha256').update(content).digest('hex') });
@@ -50,7 +51,12 @@ const url = `http://127.0.0.1:${server.address().port}`;
 const ready = join(home, 'service-ready');
 const invoke = args => exec(process.execPath, [cli, ...args], { env, timeout: 45_000 });
 const invokeApp = (action, worker = url, session = "owner-session") => new Promise((resolve, reject) => {
-  const child = spawn(process.execPath, [cli, 'app'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  const appEnv = { ...env };
+  if (existsSync(join(home, 'cli/service.json'))) {
+    // A GUI need not inherit the terminal's custom data/config environment.
+    appEnv.ONLYONE_DATA_DIR = ''; appEnv.ONLYONE_CONF = '';
+  }
+  const child = spawn(process.execPath, [cli, 'app'], { env: appEnv, stdio: ['pipe', 'pipe', 'pipe'] });
   let out = '', err = '';
   child.stdout.on('data', b => { out += b; }); child.stderr.on('data', b => { err += b; });
   child.once('error', reject);
@@ -76,7 +82,7 @@ try {
   if (serviceAvailable) {
     assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
     assert.equal(joins, 1);
-    const saved = readFileSync(join(home, 'onlyone.toml'), 'utf8');
+    const saved = readFileSync(config, 'utf8');
     assert(saved.includes('test-machine') && !saved.includes('owner-session'));
     await assert.rejects(invokeApp('start', 'https://another.example.com'), /another server/);
     const pid = await waitReady();
@@ -97,7 +103,7 @@ try {
     const failure = await invokeApp('start').then(() => null, error => error);
     assert(failure, 'Unavailable service manager must not report success');
     assert.equal(joins, 1);
-    assert(existsSync(join(home, 'onlyone.toml')), 'A service failure keeps the CLI binding');
+    assert(existsSync(config), 'A service failure keeps the CLI binding');
     const binary = join(root, platform, 'bin', process.platform === 'win32' ? 'onlyone.exe' : 'onlyone');
     foreground = spawn(binary, ['daemon'], { env, stdio: 'ignore' });
     await waitReady();

@@ -18,7 +18,7 @@ export async function packageNpm(version: string, out: string, platform?: string
   };
   const dependencies = Object.fromEntries(platforms.map(p => [`onlyone-${p.os}-${p.cpu}`, version]));
   const main = join(out, "onlyonecli");
-  write(main, { name: "onlyonecli", version, description: "Your own AI team on your computers", license: "MIT", engines: { node: ">=22" }, bin: { onlyone: "bin/onlyone.cjs" }, files: ["bin/onlyone.cjs", "launcher.cjs"], optionalDependencies: dependencies });
+  write(main, { name: "onlyonecli", version, onlyoneAppProtocol: 1, description: "Your own AI team on your computers", license: "MIT", engines: { node: ">=22" }, bin: { onlyone: "bin/onlyone.cjs" }, files: ["bin/onlyone.cjs", "launcher.cjs"], optionalDependencies: dependencies });
   mkdirSync(join(main, "bin"), { recursive: true });
   copyFileSync("npm/bin/onlyone.cjs", join(main, "bin/onlyone.cjs"));
   copyFileSync("npm/launcher.cjs", join(main, "launcher.cjs"));

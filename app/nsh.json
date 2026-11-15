@@ -11,7 +11,7 @@
   "capabilities": {
     "process": {
       "execute": ["/bin/sh", "powershell.exe"],
-      "env": ["APPDATA", "ProgramFiles", "ONLYONE_HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
+      "env": ["APPDATA", "ProgramFiles", "ONLYONE_HOME", "ONLYONE_DATA_DIR", "ONLYONE_CONF", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
     },
     "clipboard": true,
     "statusBar": true,
