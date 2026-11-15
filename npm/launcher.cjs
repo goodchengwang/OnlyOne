@@ -42,6 +42,8 @@ async function run(args, root) {
     const npm = npmCli();
     if (npm) env.ONLYONE_NPM_CLI = npm;
   }
+  const stoppedFile = path.join(home, 'cli/stopped');
+  if (service && fs.existsSync(stoppedFile)) return;
   let stopping = false, child;
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
     stopping = true;
@@ -77,6 +79,7 @@ async function run(args, root) {
     });
     clearInterval(timer);
     if (!service) { process.exitCode = code; return; }
+    if (fs.existsSync(stoppedFile)) return;
     // Only an unconfirmed candidate rolls back. Ordinary daemon failures use the service retry delay.
     const latest = read(currentFile);
     let rolledBack = false;

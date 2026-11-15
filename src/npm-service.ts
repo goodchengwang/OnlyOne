@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { DATA, HOME_DIR, P } from "./core";
-import { ensureNpmRuntime, runtimeDir } from "./npm-runtime";
+import { currentPath, ensureNpmRuntime, runtimeDir } from "./npm-runtime";
 import { readOnlyOneToml } from "./sync";
 import { plistEscape } from "./desktop";
+import { lockDaemon } from "./daemon-lock";
 
 export const systemdQuote = (value: string, command = true) => '"' + value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/%/g, "%%").replace(/\$/g, () => command ? "$$" : "$").replace(/\n/g, "\\n").replace(/\r/g, "\\r") + '"';
 const xml = (s: string) => plistEscape(s);
@@ -83,10 +84,28 @@ export function serviceReady() {
   } catch { return false; }
 }
 
-export async function installNpmService() {
+async function withServiceLock<T>(action: () => Promise<T>): Promise<T> {
+  let unlock: () => void;
+  for (;;) {
+    try { unlock = lockDaemon(join(runtimeDir(), "service-control")); break; }
+    catch (e) {
+      if (!(e instanceof Error) || !/already using|executor is starting/.test(e.message)) throw e;
+      await Bun.sleep(100);
+    }
+  }
+  try { return await action(); } finally { unlock(); }
+}
+
+export const installNpmService = () => withServiceLock(installService);
+async function installService() {
   if (!readOnlyOneToml().server?.token || !existsSync(P("config.toml"))) throw new Error("Finish device setup first: onlyone init <worker-url>");
   const name = serviceName();
+  if (npmServiceStatus().running && npmServiceStatus().mode === "development")
+    throw new Error("Stop the development executor before starting onlyonecli");
+  rmSync(join(HOME_DIR, "dev-source"), { force: true });
   const command = ensureNpmRuntime();
+  rmSync(join(runtimeDir(), "stopped"), { force: true });
+  if (serviceReady()) return;
   const definition = serviceDefinition(process.platform, command, HOME_DIR);
   if (process.platform === "linux") {
     const file = join(homedir(), `.config/systemd/user/${name}.service`);
@@ -122,4 +141,48 @@ export async function installNpmService() {
     await Bun.sleep(250);
   }
   throw new Error(`Device is bound, but the service did not become ready. Check service logs; retry: onlyone install`);
+}
+
+export function npmServiceStatus() {
+  let pid = 0;
+  try {
+    pid = Number(readFileSync(P(".daemon-lock/pid"), "utf8"));
+    if (!(pid > 0)) return { running: false, stopping: false, mode: null } as const;
+    process.kill(pid, 0);
+  } catch { return { running: false, stopping: false, mode: null } as const; }
+  const development = existsSync(join(HOME_DIR, "dev-source"));
+  return { running: true, stopping: development ? !existsSync(join(HOME_DIR, "enabled")) : existsSync(join(runtimeDir(), "stopped")), mode: development ? "development" : "release" } as const;
+}
+
+/** File notifications also drain Windows tasks; terminating its process would discard running work. */
+export function watchNpmStop(stop: () => void) {
+  mkdirSync(runtimeDir(), { recursive: true, mode: 0o700 });
+  const check = () => { if (existsSync(join(runtimeDir(), "stopped"))) stop(); };
+  const watcher = watch(runtimeDir(), check);
+  check();
+  return () => watcher.close();
+}
+
+export const stopNpmService = () => withServiceLock(stopService);
+async function stopService() {
+  if (npmServiceStatus().running && (!existsSync(currentPath()) || npmServiceStatus().mode === "development")) throw new Error("A source executor is using the CLI home; stop it before connecting onlyonecli");
+  if (!existsSync(runtimeDir())) return;
+  writeFileSync(join(runtimeDir(), "stopped"), "", { mode: 0o600 });
+  while (npmServiceStatus().running) await Bun.sleep(100);
+  const name = serviceName();
+  if (process.platform === "darwin") {
+    const job = `gui/${process.getuid!()}/dev.${name}.daemon`;
+    if (!(await serviceRun(["launchctl", "print", job])).code) {
+      await checked(["launchctl", "disable", job]);
+      await checked(["launchctl", "bootout", job]);
+    }
+  } else if (process.platform === "linux") {
+    if (existsSync(join(homedir(), `.config/systemd/user/${name}.service`)))
+      await checked(["systemctl", "--user", "disable", "--now", `${name}.service`]);
+  } else if (process.platform === "win32") {
+    if (!(await serviceRun(["schtasks", "/Query", "/TN", name])).code) {
+      await checked(["schtasks", "/Change", "/TN", name, "/Disable"]);
+      await serviceRun(["schtasks", "/End", "/TN", name]);
+    }
+  }
 }

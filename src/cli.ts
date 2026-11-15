@@ -842,13 +842,18 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
 }
 
 async function daemon(cfg: Cfg) {
-  if (!existsSync(P("config.toml"))) throw new Error("OnlyOne is not initialized. Sign in from the Mac app, or run: onlyone init <cloud-url>");
+  if (!existsSync(P("config.toml"))) throw new Error("OnlyOne is not initialized. Sign in from the desktop app, or run: onlyone init <cloud-url>");
   const unlock = lockDaemon(ROOT);
   process.once("exit", unlock);
   mkdirSync(P("journal"), { recursive: true });
   const readyFile = P("..", "service-ready");
   process.once("exit", () => { try { unlinkSync(readyFile); } catch {} });
   for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void drainAndExit("stop", hostName(cfg)));
+  if (npmBuild) {
+    const { watchNpmStop } = await import("./npm-service");
+    const close = watchNpmStop(() => void drainAndExit("stop", hostName(cfg)));
+    process.once("exit", close);
+  }
   const host = hostName(cfg);
   const development = !Bun.argv[1]?.startsWith("/$bunfs/") && existsSync(P("..", "dev-source"));
   const every = (cfg.host?.tick_seconds ?? 60) * 1000;
@@ -1144,6 +1149,7 @@ async function main() {
     console.log(`Execution tools: ${["claude", "codex"].map(c => `${c}: ${Bun.which(c) ? "installed (sign in separately)" : "missing"}`).join("; ")}`);
     return;
   }
+  if (cmd === "app") return (await import("./cli-app")).cliApp();
   if (cmd === "desktop") return (await import("./desktop")).desktop();
   if (cmd === "guest") return guestCmd(rest, loadConfig); // a guest machine has no onlyone config at all
   const cfg = loadConfig();

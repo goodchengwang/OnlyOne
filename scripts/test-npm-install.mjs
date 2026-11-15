@@ -37,6 +37,8 @@ try {
   if (process.platform === 'win32') assert.match(readFileSync(shim, 'utf8'), /onlyone\.cjs/);
   else assert.equal(execute(shim, ['--version'], { env }).trim(), version);
   assert.match(execute(node, [cli, '--help'], { env }), /OnlyOne/);
+  const status = JSON.parse(execute(node, [cli, 'app'], { env, input: JSON.stringify({ action: 'status', url: 'https://example.com' }) }).trim());
+  assert.deepEqual(status, { protocol: 1, running: false, stopping: false, mode: null });
   assert.equal(execute(node, [cli, '--self-check'], { env }).trim(), 'ok');
   const setup = spawnSync(node, [cli], { env, encoding: 'utf8', timeout: 15_000, input: '' });
   assert.equal(setup.status, 1);

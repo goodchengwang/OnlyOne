@@ -11,6 +11,9 @@ on:
       - scripts/test-npm-install.mjs
       - scripts/test-npm-service.mjs
       - test/npm-*.test.ts
+      - test/cli-app.test.ts
+      - test/executor-command.test.ts
+      - app/executor-command.ts
       - .github/workflows/npm.yml
   workflow_dispatch:
 permissions:
@@ -38,7 +41,7 @@ jobs:
           node-version: '24'
       - run: bun install --frozen-lockfile
       - run: bunx tsc --noEmit
-      - run: bun test test/npm-setup.test.ts test/npm-runtime.test.ts
+      - run: bun test test/npm-setup.test.ts test/npm-runtime.test.ts test/cli-app.test.ts test/executor-command.test.ts
       - name: Build native package
         env:
           PLATFORM: ${{ matrix.platform }}

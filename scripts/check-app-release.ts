@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { strict as assert } from "node:assert";
 
-/** Check the final bytes, after executors and signatures have been added to the apps. */
+/** Check the final bytes, after the native apps have been packaged. */
 export function checkAppRelease(directory: string, app: { id: string; version: string; updater: { publicKey: string } }) {
   const bytes = readFileSync(join(directory, "latest.json"));
   const key = createPublicKey({
@@ -16,7 +16,7 @@ export function checkAppRelease(directory: string, app: { id: string; version: s
   const manifest = JSON.parse(bytes.toString());
   assert.equal(manifest.id, app.id);
   assert.equal(manifest.version, app.version);
-  assert.equal(manifest.package, undefined, "Full-app releases must not offer an OTA package ahead of the executor");
+  assert.equal(manifest.package, undefined, "Native-shell releases must not offer a separate OTA package");
   assert.deepEqual(Object.keys(manifest.platforms).sort(), ["android", "linux-x86_64", "macos-aarch64", "macos-x86_64", "windows-x86_64"]);
   for (const platform of ["linux-x86_64", "macos-aarch64", "macos-x86_64", "windows-x86_64"]) {
     const asset = manifest.platforms[platform];

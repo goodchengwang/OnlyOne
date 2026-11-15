@@ -12,7 +12,7 @@ export function ExecutorSettings(props: { service: ExecutorControl }) {
     : s.busy() === "start" ? L("Starting or switching; running tasks will finish first…", "正在启动或切换，等待当前任务结束…")
     : s.state()?.running ? (s.state()?.mode === "development" ? L("Development executor running", "开发版执行器运行中") : L("Release executor running", "正式版执行器运行中"))
     : L("Background service stopped", "后台服务已关闭");
-  return <Group title={L("Background service on this Mac", "本机后台服务")} hint={L("Opening a version switches to its executor after running tasks finish. Closing the window keeps the service running.", "打开哪个版本就切到对应执行器，切换和关闭服务都会等待当前任务结束。关闭窗口后服务继续运行。")}>
+  return <Group title={L("Background service on this computer", "本机后台服务")} hint={L("Release apps use onlyonecli on this computer. Closing the window keeps it running; stopping waits for tasks to finish.", "正式桌面端使用本机 onlyonecli。关闭窗口后服务继续运行，关闭服务会等待当前任务结束。")}>
     <View style={{ gap: 10, padding: 16 }}>
       <Text testID="executor-status" style={{ fontSize: 14, color: colors.muted }}>{label()}</Text>
       <If when={s.error()}><Text testID="executor-error" style={{ color: colors.danger }}>{s.error()}</Text></If>

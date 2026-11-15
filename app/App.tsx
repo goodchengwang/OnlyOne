@@ -5487,7 +5487,7 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
   let retryAction: "start" | "stop" = "start";
   const refreshExecutor = () => {
     if (!hasExecutor || untracked(executorBusy)) return;
-    executor("status", props.config).then((s) => { if (!untracked(executorBusy)) executorState.set(s); }).catch(() => executorError.set(L("Could not read the background service status. Please retry.", "无法读取后台服务状态，请重试。")));
+    executor("status", props.config).then((s) => { if (!untracked(executorBusy)) executorState.set(s); }).catch(() => { if (!untracked(executorError)) executorError.set(L("Could not read the background service status. Please retry.", "无法读取后台服务状态，请重试。")); });
   };
   const runExecutor = async (action: "start" | "stop"): Promise<boolean> => {
     if (untracked(executorBusy)) return false;
@@ -5495,7 +5495,7 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
     executorError.set("");
     executorBusy.set(action);
     try { executorState.set(await executor(action, props.config)); return true; }
-    catch { executorError.set(L("Could not change the background service. Please retry.", "后台服务操作未完成，请重试。")); return false; }
+    catch (error) { executorError.set(error instanceof Error ? error.message : L("Could not change the background service. Please retry.", "后台服务操作未完成，请重试。")); return false; }
     finally { executorBusy.set(null); refreshExecutor(); }
   };
   const service: ExecutorControl = { state: executorState, busy: executorBusy, error: executorError, run: runExecutor, refresh: refreshExecutor };

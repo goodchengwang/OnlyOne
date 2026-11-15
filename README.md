@@ -110,14 +110,14 @@ This builds the web client and deploys the Worker, custom domain, secrets and in
 Open the printed HTTPS address from any device and sign in with the 8-character email code. Cloud provides the interface and login independently of execution computers.
 Verify the sender domain in Resend before deployment. Only the configured owner email can sign in.
 
-On macOS, open the locally built desktop app and sign in to that address. The app automatically registers this Mac,
-downloads the team's configuration and starts its executor. Opening the app again reuses the service; no separate
-`init` or `daemon` command is needed. Tasks keep running after the app quits. Signing out stops new work and lets
-the current work finish. Each cloud origin has its own private mirror under `~/.onlyone/app/`, separate from CLI data.
-The installed Mac client includes its execution runtime; Claude Code / Codex still need to be installed and signed in.
+On macOS, Windows and Linux, install Node.js 22+ and `onlyonecli`, then open the native desktop App and sign in.
+The App asks that CLI to register the computer and start its background service. App and terminal share
+`~/.onlyone` (or `ONLYONE_HOME`), one runtime version and one service. Reopening reuses it; closing the App leaves
+tasks running. Signing out stops new work and waits for current tasks to finish. No executor is bundled in any
+formal desktop App. Claude Code / Codex still need to be installed and signed in separately.
 Web and mobile clients manage the team without starting a local executor.
 
-For a headless computer, or on Linux, install the npm CLI and follow its binding prompts:
+For a headless computer, install and start the same CLI directly:
 
 ```bash
 npm install -g onlyonecli
@@ -151,14 +151,16 @@ nsh package app --target macos
 
 Install the generated app for your platform. iOS requires your own signing configuration and the SDK check
 documented in AGENTS.md. New native clients trust signed update manifests from this repository's GitHub Releases.
-Install one new full app first if your existing copy was built without an updater. Desktop updates replace the full
-app, including the Mac executor; Android links to the release APK, and iOS still requires signing and installation.
+Desktop updates replace the native client; `onlyonecli` updates its executor independently through npm.
+Android links to the release APK, and iOS still requires signing and installation.
 See [release packaging](CONTRIBUTING.md#packaging-the-client-apps) for signing and OTA limits.
 To fetch a published web client, explicitly set `ONLYONE_CLIENT_BASE_URL` to your release-assets URL;
 archives are checked against that source's `sha256sums`.
 
-A raw `nsh package` creates only the UI. For a Mac app with a bundled executor, run
-`bash scripts/package-executor.sh <path-to-OnlyOne.app>` afterwards to add the executor and renew the signature.
+All three release desktop clients use the npm-installed `onlyone` command (`onlyonecli`, Node.js 22+).
+They contain no executor and share the terminal CLI's home, service, updates and rollback. Install onlyonecli before
+opening the desktop App; missing or outdated CLIs produce an actionable message. See [desktop CLI control](docs/desktop-cli.md).
+No old desktop package migration is provided.
 
 ## Use
 

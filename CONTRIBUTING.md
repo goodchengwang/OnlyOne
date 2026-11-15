@@ -29,18 +29,16 @@ Keep fixes focused on the existing behavior. A bug fix, security fix, or perform
 
 For the Mac app, run `bun run dev` from the repository root to use the project-local signed development host
 with system notifications. To use `nsh run app` directly, follow the runtime setup in [README.md](README.md#development).
-UI changes hot reload. Sign in with the server address
-and email code: the app binds this Mac to that cloud and starts the executor through launchd, using this checkout
-and the installed Bun. No manual `init` or background-service installation is required. Other platforms remain
-management clients. Opening either the development or packaged Mac app selects its executor automatically: the
-old executor stops accepting work, finishes its running tasks, then the matching service is loaded. Opening the same
-version again reuses it. Settings → Version has a local background-service start/stop button; stopping also waits
-for running tasks without signing out. Closing the app leaves the executor running; signing out drains its work and disables it.
-Service status and unchanged-version opens make zero Worker requests. The budget reserves two user-triggered
-switches or stop/start cycles per machine/day: 96 requests and 192 indexed row writes across three Macs
-(16 requests / 32 indexed rows per idle lifecycle change); task-result writes retain their existing budget.
-There is no new unattended polling or cloud timer.
-Executor logs are `~/.onlyone/app/<origin-hash>/executor.log`; its private configuration and data are beside that log.
+UI changes hot reload. The Mac development host can run this checkout's source executor through Bun;
+release desktops on all three platforms invoke the npm-installed onlyonecli. They share `ONLYONE_HOME`, data
+and credentials. Switching between source development and onlyonecli drains the current service first.
+Opening another release App reuses the CLI rather than selecting a different executor build.
+Settings has a local background-service toggle. Closing a window leaves the CLI service running; sign-out waits
+for tasks and stops it. Status and reopening add zero Worker requests or rows. Two explicit lifecycle cycles per
+day on three machines retain the 96-request / 192-indexed-write allowance; there are no new cloud timers.
+CLI logs are `~/.onlyone/cli/daemon.log` (or the systemd journal); source development logs are
+`~/.onlyone/executor.log`. Private data and configuration are shared under `~/.onlyone`, not inside the App.
+
 The source executor also watches its code: valid saves in `src/` and shared `cloud/src/` dependencies trigger a
 graceful restart automatically, without the daemon's minute-long tick delay. Saves are debounced; unchanged builds
 and invalid source keep the current process running. Busy tasks finish before the new code takes over. Packaged
@@ -68,12 +66,11 @@ The `web/` and `app/web/` directories are application assets.
 ## Packaging the client apps
 
 Use `nsh package app --target macos` (or `linux`, `windows`, `ios`, `android`).
-For macOS, follow it with `bash scripts/package-executor.sh <output>/OnlyOne.app` to include the self-contained
-Bun executor and sign the resulting app again. The local installer and release workflow already do this.
-The optional second argument selects Bun's compilation target; the default matches the build Mac.
-The local installers build and install from this checkout. An explicit `ONLYONE_CLIENT_BASE_URL` selects verified release assets.
+All release desktop apps (macOS, Windows and Linux) call the npm-installed `onlyone app` protocol and never bundle
+or compile an executor. `onlyonecli` must be published with that command before the new desktop App is distributed.
+The terminal and App share the CLI's private home, service, update staging and rollback. There is no old desktop
+package compatibility or data migration. See [desktop CLI control](docs/desktop-cli.md) for the contract and budget.
 Native apps trust the `goodchengwang/OnlyOne` release source in `app/nsh.json`; the app id remains `dev.onlyone.app`.
-Existing apps built without that source and its trusted public keys need one full reinstall before they can update.
 
 [release.yml](.github/workflows/release.yml) packages all platforms. Manual runs build and verify artifacts without
 publishing; a `vX.Y.Z` tag publishes a draft only after all packages and the signed update manifest pass validation,
@@ -95,9 +92,8 @@ The update source is GitHub, so these checks add no Worker requests or timers. T
 pass the SDK 27 check. Mac apps are ad hoc signed; public Gatekeeper distribution additionally needs Developer ID
 signing and notarization before final archives and their update manifest are generated.
 
-Full-app releases intentionally contain **no OTA package entry**: replacing the Mac app must also replace its bundled
-`onlyone-executor`. `scripts/package-executor.sh` rebuilds versioned archives after adding and signing that executable.
-The existing package-first client behavior must not hide an executor or runtime upgrade behind a TSX-only package.
+This workflow publishes native shells, without an OTA entry. App shell releases and onlyonecli's npm releases
+are independent. Packaging verifies that neither Mac architecture contains a bundled `onlyone-executor`.
 
 OnlyOne has its own OTA trust root and a release certificate scoped to `dev.onlyone.app`. The private signing material
 is outside the checkout in `~/.onlyone/release-keys` (directory 0700, files 0600). Move `root.secret` to encrypted offline
@@ -112,8 +108,8 @@ nsh publish app --key <release.secret> --cert <release.cert> --app-version <vers
 nsh verify <package.nshpkg> --root <root.pub>
 ```
 
-Do not add that package to a release manifest until the installed Mac executor can be located and started from an
-OTA run and real desktop/mobile update checks pass. OTA cannot change the executor, NSH runtime, platform permissions,
+Do not add that package to a release manifest until real desktop/mobile update checks pass, including calling
+onlyonecli from an OTA run. OTA cannot change onlyonecli, the NSH runtime, platform permissions,
 update source or trusted keys; those require a full app. It also does not deploy the Worker or update npm executors.
 
 Do not run tests against a production Worker or a live `DATA` directory.

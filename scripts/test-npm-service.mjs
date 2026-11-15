@@ -22,12 +22,15 @@ if (createdLink) symlinkSync(join(root, platform), link, process.platform === 'w
 const npm = process.env.npm_execpath || [join(process.execPath, '../node_modules/npm/bin/npm-cli.js'), resolve(process.execPath, '../../lib/node_modules/npm/bin/npm-cli.js')].find(existsSync);
 assert(npm, 'npm-cli.js missing');
 const env = { ...process.env, ONLYONE_HOME: home, ONLYONE_DATA_DIR: '', ONLYONE_CONF: '', ONLYONE_SYNC: '', ONLYONE_SYNC_FAKE: '', ONLYONE_NO_MEDIC: '1', npm_execpath: npm };
-const files = new Map(); let rev = 1, foreground;
+const files = new Map(); let rev = 1, foreground, joins = 0;
 const content = Buffer.from('[fleet]\nprimary = "another-machine"\n[host]\nname = "npm-smoke"\n[server]\nenabled = false\n[resources]\ndisk_min_gb = 0\ndisk_min_pct = 0\n[medic]\nenabled = false\n');
 files.set('config.toml', { path: 'config.toml', rev, version: 1, deleted: false, content: content.toString('base64'), hash: createHash('sha256').update(content).digest('hex') });
 const server = createServer(async (req, res) => {
   const url = new URL(req.url, 'http://localhost');
   const reply = (body, status = 200) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(body)); };
+  if (url.pathname === '/api/host/join' && req.headers.authorization === 'Bearer owner-session') {
+    joins++; return reply({ token: 'test-machine', primary: 'another-machine' });
+  }
   if (req.headers.authorization !== 'Bearer test-machine') return reply({}, 401);
   if (url.pathname === '/api/host/security') return reply({ primary: 'another-machine' });
   if (url.pathname === '/api/files/changes') return reply({ rev, more: false, files: [...files.values()].filter(f => f.rev > Number(url.searchParams.get('since') || 0)) });
@@ -46,6 +49,17 @@ await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const url = `http://127.0.0.1:${server.address().port}`;
 const ready = join(home, 'service-ready');
 const invoke = args => exec(process.execPath, [cli, ...args], { env, timeout: 45_000 });
+const invokeApp = (action, worker = url, session = "owner-session") => new Promise((resolve, reject) => {
+  const child = spawn(process.execPath, [cli, 'app'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+  let out = '', err = '';
+  child.stdout.on('data', b => { out += b; }); child.stderr.on('data', b => { err += b; });
+  child.once('error', reject);
+  child.once('exit', code => {
+    if (code) return reject(new Error(err || out));
+    try { resolve(JSON.parse(out.trim().split('\n').at(-1))); } catch (e) { reject(e); }
+  });
+  child.stdin.end(JSON.stringify({ action, url: worker, session }));
+});
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function waitReady() {
   for (let i = 0; i < 100; i++) {
@@ -55,21 +69,33 @@ async function waitReady() {
   throw new Error('Executor did not become ready');
 }
 try {
-  await invoke(['init', url, '--token', 'test-machine']);
+  assert.deepEqual(await invokeApp('status'), { protocol: 1, running: false, stopping: false, mode: null });
   let serviceAvailable = true;
   if (process.platform === 'linux') serviceAvailable = await exec('systemctl', ['--user', 'show-environment']).then(() => true, () => false);
   if (process.platform === 'darwin') serviceAvailable = await exec('launchctl', ['print', `gui/${process.getuid()}`]).then(() => true, () => false);
   if (serviceAvailable) {
-    const first = await invoke([]);
-    assert.match(first.stdout, /service is running/);
+    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
+    assert.equal(joins, 1);
+    const saved = readFileSync(join(home, 'onlyone.toml'), 'utf8');
+    assert(saved.includes('test-machine') && !saved.includes('owner-session'));
+    await assert.rejects(invokeApp('start', 'https://another.example.com'), /another server/);
     const pid = await waitReady();
     await invoke([]);
     assert.equal(await waitReady(), pid, 'Reopening must reuse the existing daemon');
-    console.log(`Native service passed: ${platform}, custom home with spaces, repeated start, background readiness`);
+    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
+    assert.equal(await waitReady(), pid, 'The desktop App must reuse the terminal CLI daemon');
+    assert.deepEqual(await invokeApp('stop'), { protocol: 1, running: false, stopping: false, mode: null });
+    await delay(1500);
+    assert(!existsSync(ready), 'An explicit App stop must not respawn');
+    assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
+    await waitReady();
+    assert.equal(joins, 1, 'Reopening must not re-enroll the CLI');
+    console.log(`Native CLI/App service passed: ${platform}, shared home, repeated start, graceful stop and restart`);
   } else {
-    const failure = await invoke([]).then(() => null, error => error);
+    const failure = await invokeApp('start').then(() => null, error => error);
     assert(failure, 'Unavailable service manager must not report success');
-    assert(!failure.stdout?.includes('service is running'));
+    assert.equal(joins, 1);
+    assert(existsSync(join(home, 'onlyone.toml')), 'A service failure keeps the CLI binding');
     const binary = join(root, platform, 'bin', process.platform === 'win32' ? 'onlyone.exe' : 'onlyone');
     foreground = spawn(binary, ['daemon'], { env, stdio: 'ignore' });
     await waitReady();

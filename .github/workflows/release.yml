@@ -10,7 +10,8 @@ on:
       - .github/workflows/release.yml
       - .github/actions/setup-nsh/**
       - app/nsh.json
-      - scripts/package-executor.sh
+      - app/executor.ts
+      - app/executor-command.ts
       - scripts/check-app-release.ts
       - scripts/check-ios-sdk.sh
       - app/build-web.sh
@@ -68,8 +69,6 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        if: matrix.target == 'macos'
       - uses: ./.github/actions/setup-nsh
         with:
           ref: ${{ env.NSH_REF }}
@@ -107,7 +106,6 @@ jobs:
             exit 0
           fi
           (cd app && nsh package --target "$TARGET" -o "$out" "${args[@]}")
-          if [ "$TARGET" = macos ]; then bash scripts/package-executor.sh "$out/OnlyOne.app"; fi
           case "$TARGET" in
             linux) mv "$out/OnlyOne.tar.gz" "assets/$ASSET"; mv "$out"/OnlyOne-*.tar.gz assets/ ;;
             windows) mv "$out/OnlyOne.zip" "assets/$ASSET"; mv "$out"/OnlyOne-*.zip assets/ ;;
@@ -131,6 +129,7 @@ jobs:
           ditto -x -k "assets/$ASSET" "$RUNNER_TEMP/verify"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
           lipo "$app/Contents/MacOS/$executable" -verify_arch arm64
+          test ! -e "$app/Contents/MacOS/onlyone-executor"
           codesign --verify --deep --strict "$app"
 
       # Reuse this ARM runner for Intel after packaging and testing the native app.
@@ -151,13 +150,13 @@ jobs:
           mkdir -p assets-intel
           # The Intel CLI runs through Rosetta and also names OTA archives macos-x86_64.
           (cd app && nsh package --target macos -o "$out" "${args[@]}")
-          bash scripts/package-executor.sh "$out/OnlyOne.app" bun-darwin-x64
           ditto -c -k --keepParent "$out/OnlyOne.app" assets-intel/onlyone-macos-x86_64.zip
           mv "$out"/OnlyOne-*-macos-x86_64.tar.gz assets-intel/
           app="$RUNNER_TEMP/verify-x86_64/OnlyOne.app"
           ditto -x -k assets-intel/onlyone-macos-x86_64.zip "$RUNNER_TEMP/verify-x86_64"
           executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
           lipo "$app/Contents/MacOS/$executable" -verify_arch x86_64
+          test ! -e "$app/Contents/MacOS/onlyone-executor"
           codesign --verify --deep --strict "$app"
 
       - name: Upload Intel macOS package
@@ -207,7 +206,7 @@ jobs:
           key="$RUNNER_TEMP/update.secret"
           trap 'rm -f "$key"' EXIT
           (umask 077 && printf '%s\n' "$NSH_UPDATE_KEY" > "$key")
-          # Full-app releases must update the bundled executor; no OTA package takes precedence.
+          # This workflow publishes native shells; CLI runtime releases belong to npm.yml.
           nsh update-manifest assets/onlyone-"$version"-*.tar.gz assets/onlyone-"$version"-*.zip \
             --entry app --out assets --key "$key" \
             --link "android=https://github.com/$GITHUB_REPOSITORY/releases/download/v$version/onlyone-android.apk"

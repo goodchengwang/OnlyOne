@@ -10,7 +10,8 @@
   },
   "capabilities": {
     "process": {
-      "execute": ["/bin/sh"]
+      "execute": ["/bin/sh", "cmd.exe"],
+      "env": ["APPDATA", "ProgramFiles", "ONLYONE_HOME"]
     },
     "clipboard": true,
     "statusBar": true,

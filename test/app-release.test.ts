@@ -35,7 +35,7 @@ test("a full-app release verifies final archive bytes and refuses tampering or O
     writeFileSync(archive, original);
     manifest.package = { url: "onlyone.nshpkg" };
     save();
-    expect(() => checkAppRelease(directory, app)).toThrow("must not offer an OTA");
+    expect(() => checkAppRelease(directory, app)).toThrow("must not offer a separate OTA");
     delete manifest.package;
     save();
     writeFileSync(join(directory, "latest.json"), "{}");

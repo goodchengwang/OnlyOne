@@ -1,4 +1,4 @@
-// Replaced at compile time for npm builds; Mac app executors keep their existing bootstrap.
+// Replaced at compile time for onlyonecli platform packages.
 declare const ONLYONE_BUILD_VERSION: string;
 export const CLI_VERSION = typeof ONLYONE_BUILD_VERSION === "undefined" ? "dev" : ONLYONE_BUILD_VERSION;
 export const npmBuild = CLI_VERSION !== "dev";

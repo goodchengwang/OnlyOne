@@ -3,7 +3,7 @@
 ## Architecture
 
 ```
-  app (NSH: web / macOS / Linux / mobile) ── HTTPS ──┐
+  app (NSH: web / macOS / Windows / Linux / mobile) ── HTTPS ──┐
                                                      ▼
             Owner's Cloudflare Worker + Durable Object (SQLite)
             files + history · chat feed · inbox · status · media
@@ -15,16 +15,17 @@
 ```
 
 - Machines never accept inbound connections; they call the Worker.
-- The Mac app uses its email login session once to register a local executor. Credentials cross the native process
-  boundary on stdin; only the machine credential is stored in the executor's 0600 bootstrap file. An origin hash
-  selects a private 0700 home under `~/.onlyone/app/`, so changing servers cannot sync a previous team's data.
-  launchd owns the executor, survives app exit and restarts, and uses a separate label for each origin. A data-directory
-  lock prevents duplicate executors. Sign-out disables the service and sends SIGTERM: the bridge finishes its current
-  message, leaves later messages queued, and running tasks drain. Mobile and web clients never spawn processes.
-  Only first enrollment adds cloud traffic: email start/verify plus join, credential validation and initial pull are
-  five requests (at most the existing six-request / 100-written-row allowance per machine, 18 / 300 for three).
-  Reopening an already bound app adds no enrollment requests or rows; idle execution uses the existing budgeted
-  WebSocket, lazy-heartbeat and sync pacing. No new cloud timers are introduced.
+- Release desktop apps invoke the npm-installed `onlyone app` command over stdin/stdout on macOS, Windows and Linux.
+  They contain no execution binary, use no source fallback, and share the terminal CLI's private home, version pointer
+  and OS service. Existing CLI bindings are reused and a different Worker is rejected. This is a fresh App architecture,
+  with no compatibility or migration for old desktop packages. See [desktop CLI control](desktop-cli.md).
+  Only the machine credential is saved to a 0600 bootstrap file; the owner session never enters argv or service files.
+  Status and reopening cost zero extra requests and rows. First enrollment after email login uses the existing join,
+  credential validation and initial pull: five requests including email login, inside the existing six-request /
+  100-written-row allowance per machine (18 / 300 for three). The daemon is owned by launchd, systemd or Task Scheduler
+  and survives App exit. Explicit stop uses a local file notification so Windows also drains work before its process
+  ends; the supervisor respects the stop marker, then the OS service is disabled. No new Worker timers are introduced.
+  Mac development can run this checkout instead; the source and npm services drain before switching and share data.
   In source development, filesystem events are debounced and validated locally; only a changed, valid bundle asks
   the existing daemon drain to restart. No files changed means zero extra requests or writes, even with the app closed.
   Development startup/reload messages stay in the local log, and a source reload does not force lazy heartbeat/journal
