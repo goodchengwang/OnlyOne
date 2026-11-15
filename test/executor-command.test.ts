@@ -4,6 +4,13 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { executorCommand } from "../app/executor-command";
 
+test("Windows desktop hands stdin to the npm shim instead of piping it through PowerShell", () => {
+  const command = executorCommand("windows", "C:\\not-a-source-checkout", false);
+  // PowerShell re-emits whatever it pipes into a native command and appends a line terminator,
+  // so the request must reach the shim through inherited stdin on every platform.
+  expect(command.args.join(" ")).not.toContain("$input");
+});
+
 test.skipIf(process.platform === "win32")("release desktop invokes installed onlyonecli, never a source fallback, and sends the session only on stdin", async () => {
   const home = mkdtempSync(join(tmpdir(), "onlyone app command "));
   try {
