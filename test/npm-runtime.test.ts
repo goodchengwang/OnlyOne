@@ -37,7 +37,7 @@ test.skipIf(process.platform === "win32" || node.includes(" "))("npm updates sta
   writeFileSync(npm, `const fs=require('fs'),p=require('path'); const a=process.argv.slice(2); fs.appendFileSync(${JSON.stringify(join(home, "npm.log"))},JSON.stringify(a)+'\\n');
 if(a[0]==='view'){console.log(JSON.stringify(fs.readFileSync(${JSON.stringify(join(home, "latest"))},'utf8')));}
 else {if(!a.includes('--ignore-scripts')||!a.includes('--include=optional')||!a.includes('onlyonecli@0.2.0'))process.exit(4);
-const prefix=a[a.indexOf('--prefix')+1], main=p.join(prefix,'node_modules/onlyonecli'),dir=p.join(prefix,'node_modules/onlyone-'+process.platform+'-'+process.arch,'bin'); fs.mkdirSync(main,{recursive:true}); fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(p.join(main,'package.json'),JSON.stringify({version:'0.2.0'})); fs.writeFileSync(p.join(dir,'onlyone'), ${JSON.stringify(`#!${node}\nif(process.argv[2]==='--version')console.log('0.2.0');else if(process.argv[2]==='--self-check')process.exit(${0});\n`)});fs.chmodSync(p.join(dir,'onlyone'),0o700);}`);
+const prefix=a[a.indexOf('--prefix')+1], main=p.join(prefix,'node_modules/onlyonecli'),dir=p.join(prefix,'node_modules/onlyone-'+process.platform+'-'+process.arch,'bin'); fs.mkdirSync(main,{recursive:true}); fs.mkdirSync(dir,{recursive:true}); fs.writeFileSync(p.join(main,'package.json'),JSON.stringify({version:'0.2.0'})); fs.writeFileSync(p.join(dir,'onlyone'), ${JSON.stringify(`#!${node}\nif(process.argv[2]==='--version')console.log('0.2.0');else if(process.argv[2]==='--self-check')process.exit(${0});\n`)});fs.chmodSync(p.join(dir,'onlyone'),0o644);}`);
   try {
     writeFileSync(join(home, "latest"), "0.1.0");
     expect((await runStage(home, npm)).out.trim()).toBe("false");

@@ -8,19 +8,19 @@ test("App publication requires a compatible public CLI and every desktop platfor
   const request = async (url: string) => {
     calls.push(url);
     const name = new URL(url).pathname.split("/")[1]!;
-    if (name === "onlyonecli") return Response.json({ version: "0.1.3", onlyoneAppProtocol: protocol,
-      optionalDependencies: Object.fromEntries(packages.map(name => [name, "0.1.3"])) });
+    if (name === "onlyonecli") return Response.json({ version: "0.1.5", onlyoneAppProtocol: protocol,
+      optionalDependencies: Object.fromEntries(packages.map(name => [name, "0.1.5"])) });
     const platform = name.replace('onlyone-', '').split('-');
-    return name === missing ? Response.json({}, { status: 404 }) : Response.json({ name, version: mismatch ? "0.1.2" : "0.1.3",
+    return name === missing ? Response.json({}, { status: 404 }) : Response.json({ name, version: mismatch ? "0.1.2" : "0.1.5",
       os: [platform[0] === "windows" ? "win32" : platform[0]], cpu: [platform[1]] });
   };
-  expect(await checkPublishedCli(request)).toBe("0.1.3");
+  expect(await checkPublishedCli(request)).toBe("0.1.5");
   expect(calls).toHaveLength(5);
   protocol = undefined; calls.length = 0;
   await expect(checkPublishedCli(request)).rejects.toThrow("app protocol 1");
   expect(calls).toHaveLength(1);
   protocol = 1; missing = "onlyone-windows-x64";
-  await expect(checkPublishedCli(request)).rejects.toThrow("onlyone-windows-x64@0.1.3 is not published");
+  await expect(checkPublishedCli(request)).rejects.toThrow("onlyone-windows-x64@0.1.5 is not published");
   missing = ""; mismatch = true;
   await expect(checkPublishedCli(request)).rejects.toThrow("Registry metadata mismatch");
 });

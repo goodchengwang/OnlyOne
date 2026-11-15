@@ -79,6 +79,7 @@ export async function stageNpmUpdate() {
       const manifest = JSON.parse(readFileSync(join(attempt, "node_modules", "onlyonecli", "package.json"), "utf8"));
       if (manifest.version !== version) throw new Error("Downloaded OnlyOne version does not match the requested version");
       const binary = join(attempt, "node_modules", `onlyone-${process.platform === "win32" ? "windows" : process.platform}-${process.arch}`, "bin", process.platform === "win32" ? "onlyone.exe" : "onlyone");
+      if (process.platform !== "win32") chmodSync(binary, 0o700);
       for (const args of [["--version"], ["--self-check"]]) {
         const result = Bun.spawnSync([binary, ...args], { stdout: "pipe", stderr: "pipe", timeout: 30_000 });
         if (result.exitCode !== 0 || (args[0] === "--version" && result.stdout.toString().trim() !== version)) throw new Error("Downloaded OnlyOne failed startup self-check");

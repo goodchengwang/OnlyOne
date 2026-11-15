@@ -104,6 +104,10 @@ jobs:
           run-id: ${{ inputs.resume_run || github.run_id }}
           github-token: ${{ github.token }}
       # Each package trusts goodchengwang/OnlyOne's npm.yml through OIDC; no npm token is used.
+      - name: Verify installation after restoring artifact permissions
+        run: |
+          bun -e 'import { prepareNpmPackage } from "./scripts/publish-npm"; import { readdirSync } from "node:fs"; for (const name of readdirSync("dist/npm")) prepareNpmPackage("dist/npm/" + name);'
+          node scripts/test-npm-install.mjs dist/npm
       - name: Check trusted-publishing prerequisites before publishing any package
         run: |
           for package in dist/npm/onlyone-* dist/npm/onlyonecli; do

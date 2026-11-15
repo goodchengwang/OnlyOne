@@ -1,3 +1,4 @@
+import { newerCliVersion } from "../src/npm-runtime";
 const desktopTargets: Array<[string, string]> = [["darwin", "arm64"], ["darwin", "x64"], ["linux", "x64"], ["win32", "x64"]];
 
 /** App and CLI versions are independent; the public CLI must implement the App's control protocol. */
@@ -10,6 +11,7 @@ export async function checkPublishedCli(request: (url: string) => Promise<Respon
   const cli = await get("onlyonecli", "latest");
   if (cli.onlyoneAppProtocol !== 1 || typeof cli.version !== "string" || !/^\d+\.\d+\.\d+$/.test(cli.version))
     throw new Error("Publish a stable onlyonecli with app protocol 1 before releasing desktop Apps");
+  if (newerCliVersion("0.1.5", cli.version)) throw new Error("Desktop releases require onlyonecli 0.1.5 or newer with executable npm runtimes");
   const platforms: Array<{ os: string[]; cpu: string[] }> = [];
   for (const [name, version] of Object.entries(cli.optionalDependencies ?? {})) {
     if (typeof version !== "string" || !/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`onlyonecli has no exact dependency: ${name}`);

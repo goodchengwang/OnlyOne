@@ -159,7 +159,7 @@ To fetch a published web client, explicitly set `ONLYONE_CLIENT_BASE_URL` to you
 archives are checked against that source's `sha256sums`.
 
 All three release desktop clients use the npm-installed `onlyone` command (`onlyonecli`, Node.js 22+).
-They contain no executor and share the terminal CLI's home, service, updates and rollback. Install onlyonecli before
+They require onlyonecli 0.1.5+ and contain no executor. They share the terminal CLI's home, service, updates and rollback. Install onlyonecli before
 opening the desktop App; missing or outdated CLIs produce an actionable message. See [desktop CLI control](docs/desktop-cli.md).
 No old desktop package migration is provided.
 
