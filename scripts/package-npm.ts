@@ -22,7 +22,7 @@ export async function packageNpm(version: string, out: string, platform?: string
   mkdirSync(join(main, "bin"), { recursive: true });
   copyFileSync("npm/bin/onlyone.cjs", join(main, "bin/onlyone.cjs"));
   copyFileSync("npm/launcher.cjs", join(main, "launcher.cjs"));
-  writeFileSync(join(main, "README.md"), "# OnlyOne\n\nInstall: `npm install -g onlyonecli` (Node.js 22+). Run `onlyone` and enter your deployed Worker URL, owner email and email code. The CLI registers this computer and starts its background executor. Claude Code / Codex must be installed and signed in separately.\n\nLinux requires glibc and user systemd; macOS uses launchd. Windows x64 requires the onlyone-windows-x64 platform package to be published before installation from npm. Windows service support uses a current-user logon task. `onlyone update` or the app’s Update all machines action stages and validates a new npm release before draining and restarting.\n");
+  writeFileSync(join(main, "README.md"), "# OnlyOne\n\nInstall: `npm install -g onlyonecli` (Node.js 22+). Run `onlyone` and enter your deployed Worker URL, owner email and email code. The CLI registers this computer and starts its background executor. Claude Code / Codex must be installed and signed in separately.\n\nLinux requires glibc and user systemd; macOS uses launchd. Windows x64 installs the onlyone-windows-x64 platform package. Windows service support uses a current-user logon task. `onlyone update` or the app’s Update all machines action stages and validates a new npm release before draining and restarting.\n");
   const selected = platform ? platforms.filter(p => `${p.os}-${p.cpu}` === platform) : platforms;
   if (!selected.length) throw new Error(`Unsupported platform: ${platform}`);
   for (const p of selected) {
@@ -34,6 +34,7 @@ export async function packageNpm(version: string, out: string, platform?: string
   }
 }
 if (import.meta.main) {
-  const [version = "0.1.3", out = "dist/npm", platform] = process.argv.slice(2);
+  const [version, out = "dist/npm", platform] = process.argv.slice(2);
+  if (!version) throw new Error("Pass the version to package, e.g. `bun run package:npm 0.1.5`; the script never infers one, so a stale default cannot ship old code under a new version.");
   await packageNpm(version, resolve(out), platform);
 }
