@@ -6,10 +6,11 @@ import { desktopBinding, enrollDesktop, executorPlist } from "../src/desktop";
 import { lockDaemon } from "../src/daemon-lock";
 import { ignored } from "../src/sync";
 
-test("desktop cloud bindings normalize origins, isolate data and reject unsafe addresses", () => {
+test("desktop bindings share the CLI home, isolate development service labels and reject unsafe addresses", () => {
   const a = desktopBinding("https://EXAMPLE.com:443/", "/tmp/app");
   expect(a).toEqual(desktopBinding("https://example.com", "/tmp/app"));
-  expect(a.home).not.toBe(desktopBinding("https://other.example.com", "/tmp/app").home);
+  expect(a.home).toBe("/tmp/app");
+  expect(a.label).not.toBe(desktopBinding("https://example.com", "/tmp/other-home").label);
   expect(desktopBinding("http://localhost:8799").url).toBe("http://localhost:8799");
   for (const value of ["http://example.com", "https://user:secret@example.com", "https://example.com/path", "https://example.com?token=secret", "file:///tmp"])
     expect(() => desktopBinding(value)).toThrow();

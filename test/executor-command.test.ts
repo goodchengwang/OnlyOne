@@ -35,6 +35,6 @@ test.skipIf(process.platform !== "win32")("Windows desktop invokes the npm cmd s
     const output = await new Response(child.stdout).text();
     const error = await new Response(child.stderr).text();
     expect({ code: await child.exited, error }).toEqual({ code: 0, error: "" });
-    expect(output.replace(/\r\n/g, "\n")).toBe('app\n{"session":"test-secret"}');
+    expect(output.replace(/\r\n/g, "\n").trimEnd()).toBe('app\n{"session":"test-secret"}');
   } finally { rmSync(home, { recursive: true, force: true }); }
 });

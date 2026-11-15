@@ -7,14 +7,15 @@ import { dirname, join, resolve } from "node:path";
 import { lockDaemon } from "./daemon-lock";
 import type { DesktopStatus } from "./desktop-status";
 
-export function desktopBinding(value: string, root = join(homedir(), ".onlyone", "app")) {
+export function desktopBinding(value: string, root = join(homedir(), ".onlyone")) {
   const url = new URL(value);
   if (!(["https:", "http:"].includes(url.protocol)) || url.username || url.password || url.pathname !== "/" || url.search || url.hash)
     throw new Error("Enter an OnlyOne server origin, without a path or credentials");
   if (url.protocol !== "https:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname))
     throw new Error("OnlyOne requires HTTPS except on localhost");
-  const key = createHash("sha256").update(url.origin).digest("hex").slice(0, 24);
-  return { url: url.origin, home: join(root, key), label: `dev.onlyone.development.${key}` };
+  const home = resolve(root);
+  const key = createHash("sha256").update(home + "\0" + url.origin).digest("hex").slice(0, 24);
+  return { url: url.origin, home, label: `dev.onlyone.development.${key}` };
 }
 
 export const plistEscape = (value: string) => value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
@@ -80,10 +81,10 @@ export async function desktop(options: { root?: string; cli?: string[] } = {}) {
   if (process.platform !== "darwin") throw new Error("Automatic execution is available on macOS");
   const input = JSON.parse(await Bun.stdin.text()) as { action?: string; url?: string; session?: string };
   if (typeof input.url !== "string" || !["start", "stop", "status"].includes(input.action ?? "")) throw new Error("Invalid executor request");
-  const source = desktopBinding(input.url, options.root);
   const { HOME_DIR, DATA } = await import("./core");
   const { npmServiceStatus, stopNpmService } = await import("./npm-service");
-  const home = options.root ? source.home : HOME_DIR;
+  const source = desktopBinding(input.url, options.root ?? HOME_DIR);
+  const home = source.home;
   const data = options.root ? join(home, "data") : DATA;
   const binding = { ...source, home, data };
   const { label, url } = binding;

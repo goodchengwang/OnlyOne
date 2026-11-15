@@ -44,9 +44,11 @@ async function invokeExecutor(action: "start" | "stop" | "status", config: { url
   });
   // A login session must never appear in a command line, plist or process listing.
   try {
-    child.write(JSON.stringify({ action, url: config.url, session: config.token }));
-    child.end();
+    let inputError: unknown;
+    try { child.write(JSON.stringify({ action, url: config.url, session: config.token })); child.end(); }
+    catch (error) { inputError = error; try { child.end(); } catch {} }
     await done;
+    if (inputError) throw inputError;
     let state: any;
     try { state = JSON.parse(output.trim().split("\n").at(-1)!); } catch {}
     if (!state || (!development && state.protocol !== 1) || typeof state.running !== "boolean" || typeof state.stopping !== "boolean" || ![null, "release", "development"].includes(state.mode))
