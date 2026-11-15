@@ -102,10 +102,11 @@ async function installService() {
   const name = serviceName();
   if (npmServiceStatus().running && npmServiceStatus().mode === "development")
     throw new Error("Stop the development executor before starting onlyonecli");
+  while (npmServiceStatus().running && existsSync(join(runtimeDir(), "stopped"))) await Bun.sleep(100);
+  if (serviceReady()) return;
   rmSync(join(HOME_DIR, "dev-source"), { force: true });
   const command = ensureNpmRuntime();
   rmSync(join(runtimeDir(), "stopped"), { force: true });
-  if (serviceReady()) return;
   const definition = serviceDefinition(process.platform, command, HOME_DIR);
   if (process.platform === "linux") {
     const file = join(homedir(), `.config/systemd/user/${name}.service`);

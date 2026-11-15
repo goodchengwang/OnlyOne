@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { execFile, spawn } from 'node:child_process';
@@ -82,7 +82,9 @@ try {
     const pid = await waitReady();
     await invoke([]);
     assert.equal(await waitReady(), pid, 'Reopening must reuse the existing daemon');
+    const profile = join(home, 'cli/service.json'), stamp = statSync(profile).mtimeMs;
     assert.deepEqual(await invokeApp('start'), { protocol: 1, running: true, stopping: false, mode: 'release' });
+    assert.equal(statSync(profile).mtimeMs, stamp, 'Connecting the App must not rewrite CLI service configuration');
     assert.equal(await waitReady(), pid, 'The desktop App must reuse the terminal CLI daemon');
     assert.deepEqual(await invokeApp('stop'), { protocol: 1, running: false, stopping: false, mode: null });
     await delay(1500);
