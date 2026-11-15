@@ -7,7 +7,7 @@ import {
 import { notify } from "./notify";
 import { ask, type Result } from "./runner";
 import { judgeMayDecide } from "./autonomy";
-import { isMergeCard, mergeHeadline } from "./waits";
+import { HUMAN_WAIT_MAX_HOURS, isMergeCard, mergeHeadline } from "./waits";
 
 /** A refreshed menu replaces the older unanswered one: keep one live card, no stacked duplicates.
  *  The old card keeps its full content in decisions/closed, and its menu task ends instead of being resumed. */
@@ -134,6 +134,21 @@ export function closeDecision(id: string, answer: string, by: string, note = "")
     unlinkSync(t);
   }
   }
+  return true;
+}
+
+/** A next-steps menu the owner never answered is not consent: after HUMAN_WAIT_MAX_HOURS it is archived unanswered,
+ *  so it stops holding its task blocked for days (D-0004 C) and stops blocking a fresh offer. The task is resumed by
+ *  the supervisor, which tells it to wrap up instead of asking the same question again. */
+export function expireDecision(id: string, host: string): boolean {
+  const src = P("decisions", "open", `${id}.md`);
+  if (!existsSync(src)) return false;
+  const { meta, body } = readDoc(src);
+  if (meta.kind !== "menu") return false;
+  writeDoc(P("decisions", "closed", `${id}.md`), { ...meta, answer: "未回答，超时归档", answered_by: "expired", answered: now() },
+    `${body}\n## Expired (${now()})\nNo answer within ${HUMAN_WAIT_MAX_HOURS}h. Archived unanswered — not consent, not a rejection.\n`);
+  unlinkSync(src);
+  journal(host, L(`⌛ ${id} menu expired unanswered after ${HUMAN_WAIT_MAX_HOURS}h`, `⌛ ${id} 菜单 ${HUMAN_WAIT_MAX_HOURS} 小时未回答，归档`));
   return true;
 }
 

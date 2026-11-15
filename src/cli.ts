@@ -696,15 +696,17 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
-  // Re-offer after the latest unanswered menu's cooldown, regardless of filename order.
-  const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta)
-    .filter((m) => m.kind === "menu")
-    .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
-  const cooldown = (cfg.idle?.cooldown_minutes ?? 180) * 60_000;
-  if (pendingMenu && Date.now() - Date.parse(pendingMenu.created) < cooldown) return;
+  // One live menu, not one per cooldown. While a card is unanswered — or a menu task is still on its way to a card
+  // (parked, blocked or queued) — the owner already has the offer; a second one is the same question again, and the
+  // "refresh after N hours" rule is exactly how D-0009/D-0010/D-0011 stacked up within four hours on 2026-11-15.
+  // Silence is not consent, but it is not forever either: the supervisor archives an unanswered menu card after
+  // HUMAN_WAIT_MAX_HOURS and wakes its task to wrap up, and only then can a fresh menu be raised.
+  const liveMenu = list(P("decisions", "open")).some((p) => readDoc(p).meta.kind === "menu")
+    || (["inbox", "waiting", "blocked"] as const).some((f) => list(P("tasks", f), /^T-.*\.md$/).some((p) => readDoc(p).meta.kind === "menu"));
+  if (liveMenu) return;
   if (state.last_menu && Date.now() - Date.parse(state.last_menu) < 15 * 60_000) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
-Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,
+Build the owner's next-action menu per your profile and return needs_decision.`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
   journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff drafting a next-steps menu`);

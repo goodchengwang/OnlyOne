@@ -4,14 +4,14 @@ import { tmpdir } from "node:os";
 import { DATA, P, list, readDoc, writeDoc } from "../src/core";
 import { maybeProposeNext } from "../src/cli";
 
-const dirs = ["tasks/inbox", "tasks/active", "decisions/open", "journal"];
-const cfg = { idle: { after_minutes: 20, cooldown_minutes: 180 } };
+const dirs = ["tasks/inbox", "tasks/active", "tasks/waiting", "tasks/blocked", "decisions/open", "journal"];
+const cfg = { idle: { after_minutes: 20 } };
 const now = Date.now();
 const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
 const state = () => ({ idle_since: ago(60), last_menu: ago(30) });
 const menu = (id: string, minutes: number, kind = "menu") =>
   writeDoc(P("decisions/open", `${id}.md`), { id, kind, created: ago(minutes) }, "pending");
-const tasks = () => list(P("tasks/inbox"));
+const tasks = () => [...list(P("tasks/inbox")), ...list(P("tasks/waiting")), ...list(P("tasks/blocked"))];
 
 beforeEach(() => {
   if (!DATA.startsWith(tmpdir())) throw new Error(`Refusing to use live DATA: ${DATA}`);
@@ -31,19 +31,25 @@ test("a recent pending menu suppresses another even when an older menu sorts fir
   expect(tasks()).toEqual([]);
 });
 
-test("cooldown expiry refreshes the latest menu by time, ignoring newer non-menu decisions", () => {
+test("an unanswered menu is never refreshed into a second card, however old it is", () => {
+  // D-0009/D-0010/D-0011 (2026-11-15): the 180-minute "re-offer" rule raised the same question three times in four
+  // hours. One live card is the offer; the supervisor expires it after HUMAN_WAIT_MAX_HOURS instead.
   const clock = spyOn(Date, "now").mockReturnValue(now);
   try {
-    menu("D-F0004", 180);
-    menu("D-F0014", 480);
-    menu("D-9999", 1, "decision");
+    menu("D-F0004", 480);
     maybeProposeNext(cfg, "test", state());
-    expect(tasks()).toHaveLength(1);
-    const task = readDoc(tasks()[0]);
-    expect(task.meta.kind).toBe("menu");
-    expect(task.body).toContain("An earlier menu D-F0004 is still unanswered");
-    expect(task.body).not.toContain("An earlier menu D-F0014");
+    expect(tasks()).toEqual([]);
   } finally { clock.mockRestore(); }
+});
+
+test("a menu task still on its way to a card also blocks a second menu", () => {
+  // T-0012 was parked waiting on CI when T-0013 started; both ended in needs_decision 27 seconds apart.
+  writeDoc(P("tasks/waiting/T-0002.md"), { id: "T-0002", agent: "chief-of-staff", kind: "menu", parked_at: ago(5) }, "menu");
+  maybeProposeNext(cfg, "test", state());
+  expect(list(P("tasks/inbox"))).toEqual([]);
+  writeDoc(P("tasks/blocked/T-0003.md"), { id: "T-0003", agent: "chief-of-staff", kind: "menu", status: "needs_decision" }, "menu");
+  maybeProposeNext(cfg, "test", state());
+  expect(list(P("tasks/inbox"))).toEqual([]);
 });
 
 test("without pending menus the existing 15-minute generation guard still applies", () => {
