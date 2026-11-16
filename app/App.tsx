@@ -3206,11 +3206,14 @@ function createSettings(onlyone: OnlyOne) {
     }
     return result;
   }
+  /** Routines this window just deleted: gone from the list before the team confirms it. */
+  const removed = signal<ReadonlySet<string>>(new Set());
   function displayed(v: SettingsView): SettingsView {
     const current = v.current as { clis?: { agents?: Record<string, string[]> }; autonomy?: { agents?: Record<string, string> }; routines?: Record<string, { enabled?: boolean; every?: string }>; host?: { max_parallel?: number } };
+    const gone = removed();
     return { ...v, effective: { ...v.effective,
       agents: v.effective.agents.map((a) => ({ ...a, clis: current.clis?.agents?.[a.id] ?? a.clis, autonomy: current.autonomy?.agents?.[a.id] ?? a.autonomy })),
-      routines: v.effective.routines.map((r) => ({ ...r, ...current.routines?.[r.name] })),
+      routines: v.effective.routines.filter((r) => !gone.has(r.name)).map((r) => ({ ...r, ...current.routines?.[r.name] })),
       max_parallel: current.host?.max_parallel ?? v.effective.max_parallel,
     } };
   }
@@ -3222,7 +3225,13 @@ function createSettings(onlyone: OnlyOne) {
   const load = () => {
     error.set("");
     const started = revision;
-    onlyone.settings().then((v) => { if (started === revision && !saving()) { confirmed = v; refresh(); } }, (e) => { if (started === revision && !saving()) error.set(String(e?.message ?? e)); });
+    onlyone.settings().then((v) => {
+      if (started !== revision || saving()) return;
+      confirmed = v;
+      // a name that came back (chat saved it again) shows again; one still absent stays hidden by the filter
+      removed.update((s) => new Set([...s].filter((n) => v.effective.routines.some((r) => r.name === n))));
+      refresh();
+    }, (e) => { if (started === revision && !saving()) error.set(String(e?.message ?? e)); });
   };
   let serverRevision: string | undefined;
   effect(() => {
@@ -3256,12 +3265,34 @@ function createSettings(onlyone: OnlyOne) {
       }
     }
   }
+  /**
+   * Delete a routine for good (the same delete the team does from chat: a tombstone in settings.json, never a switch
+   * off). The row leaves the list at once; a run it already created finishes and reports.
+   */
+  async function remove(name: string) {
+    error.set("");
+    toast.dismiss();
+    removed.update((s) => new Set(s).add(name));
+    refresh();
+    const r = await onlyone.api("POST", "/api/routines/delete", { name });
+    if (!r.ok) {
+      removed.update((s) => { const next = new Set(s); next.delete(name); return next; });
+      refresh();
+      error.set(r.status ? L(`Couldn’t delete the routine (${r.status})`, `删除失败（${r.status}）`) : L("Couldn’t reach the team; the routine is still there", "连不上团队，例行任务还在"));
+      return;
+    }
+    const inFlight = typeof r.data.in_flight === "string" ? r.data.in_flight : "";
+    toast.show(inFlight
+      ? L(`Deleted “${name}”; ${inFlight} keeps running and will report`, `已删除「${name}」；${inFlight} 已在运行，跑完照常汇报`)
+      : L(`Deleted “${name}”`, `已删除「${name}」`));
+    load();
+  }
   // the command being added in 常用指令 (kept here: the settings page may be laid out again while typing)
   /** The command editor: `editing` is undefined when closed, "" for a new command, else the name being edited. */
   const commandDraft = { name: signal(""), text: signal(""), editing: signal<string | undefined>(undefined), note: signal("") };
   /** The section the wide settings page shows (its sidebar picks it). */
   const tab = signal<SettingsTab>("notify");
-  return { view, error, toast, saving, load, save, commandDraft, tab };
+  return { view, error, toast, saving, load, save, remove, commandDraft, tab };
 }
 type Settings = ReturnType<typeof createSettings>;
 
@@ -3365,7 +3396,7 @@ function TeamSettings(props: { service: ExecutorControl; onlyone: OnlyOne; push:
               </If>
 
               <If when={on("routines")}>
-              <Group title={L("Routines", "例行任务")} hint={L("Rules that create tasks on a schedule: on/off and when they run", "定时生成任务的规则：开关和运行时间")}>
+              <Group title={L("Routines", "例行任务")} hint={L("Rules that create tasks on a schedule: on/off, when they run, and deleting one for good", "定时生成任务的规则：开关、运行时间，以及彻底删除")}>
                 <Each of={e().routines} key={(r) => r.name}>
                   {(r, i) => (
                     <SettingsItem first={i() === 0} style={{ flexDirection: "row", alignItems: "center" }}>
@@ -3394,6 +3425,7 @@ function TeamSettings(props: { service: ExecutorControl; onlyone: OnlyOne; push:
                         checked={r().enabled}
                         onChange={(on) => save(patches.routine(r().name, { enabled: on }))}
                       />
+                      <IconButton icon="trash" label={L("Delete", "删除")} onPress={() => void props.settings.remove(r().name)} testID={`routine-delete-${r().name}`} />
                     </SettingsItem>
                   )}
                 </Each>
@@ -4012,10 +4044,15 @@ function PhoneMember(props: { id: string; settings: Settings }) {
   );
 }
 
-/** A routine on a phone: on or off, and how often. */
-function PhoneRoutine(props: { name: string; settings: Settings }) {
-  const { view, save } = props.settings;
+/** A routine on a phone: on or off, how often, and deleting it for good. */
+function PhoneRoutine(props: { name: string; settings: Settings; onBack: () => void }) {
+  const { view, save, remove, error } = props.settings;
   const routine = () => view()?.effective.routines.find((r) => r.name === props.name);
+  // the page is gone once the routine is: deleting it goes back to the list, which no longer has it
+  const del = async () => {
+    await remove(props.name);
+    if (!error()) props.onBack();
+  };
   return (
     <Grouped testID="phone-routine" settings={props.settings}>
       <If when={routine()} else={<Text style={{ paddingHorizontal: 32, fontSize: 14, color: colors.faint }}>{L("No such routine", "没有这个例行任务")}</Text>}>
@@ -4034,6 +4071,16 @@ function PhoneRoutine(props: { name: string; settings: Settings }) {
                 choices={intervalsWith(r().every).map((iv) => ({ id: iv, label: everyLabel(iv), testID: `every-${props.name}-${iv}` }))}
                 selected={r().every}
                 onPick={(iv) => save(patches.routine(props.name, { every: iv }))}
+              />
+            </Section>
+            <Section hint={L("It leaves the list and never runs again. A run it already started finishes and reports.", "删除后它不再出现在列表里，也不再生成新的运行；已经生成的那次会跑完并照常汇报。")}>
+              <SetRow
+                first
+                tone="danger"
+                leading={<Icon name="trash" size={16} tint={colors.danger} />}
+                label={L("Delete this routine", "删除这个例行任务")}
+                onPress={() => void del()}
+                testID={`routine-delete-${props.name}`}
               />
             </Section>
           </>
@@ -5598,7 +5645,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
         );
       case "notify": return <PhoneNotify push={push} settings={settings} />;
       case "member": return <PhoneMember id={r.id} settings={settings} />;
-      case "routine": return <PhoneRoutine name={r.routine} settings={settings} />;
+      case "routine": return <PhoneRoutine name={r.routine} settings={settings} onBack={() => nav.pop()} />;
       case "rules": return <RulesList onlyone={onlyone} onOpen={(path) => nav.push({ name: "doc", path })} />;
       case "doc": return <RuleDoc onlyone={onlyone} path={r.path} wide={wide()} />;
     }
