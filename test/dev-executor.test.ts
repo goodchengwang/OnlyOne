@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { serveDevelopment } from "../src/dev-executor";
+import { killDevelopmentGroup, serveDevelopment } from "../src/dev-executor";
 import { lockDaemon } from "../src/daemon-lock";
 import { desktopBinding, plistEscape, stopDevelopmentDesktop } from "../src/desktop";
 
@@ -50,6 +50,24 @@ async function invoke(root: string, action: string, serverUrl = url) {
   return { code, error, state: output ? JSON.parse(output.trim()) : null };
 }
 const pidAt = (root: string, file = "service-ready") => Number(readFileSync(join(root, file), "utf8"));
+
+// The daemon is already reaped when cleanup runs, so its pid may be recycled. Darwin then answers
+// EPERM (not ESRCH) for a group that holds none of our children: that is "already gone", not a failure.
+// A real signal error must still surface, or teardown would fail silently.
+test("cleanup survives a recycled process group id", () => {
+  const real = process.kill;
+  const failWith = (code: string) => {
+    process.kill = (() => { throw Object.assign(new Error(`kill ${code}`), { code }); }) as typeof process.kill;
+  };
+  try {
+    for (const code of ["EPERM", "ESRCH"]) {
+      failWith(code);
+      expect(() => killDevelopmentGroup(4321)).not.toThrow();
+    }
+    failWith("EINVAL");
+    expect(() => killDevelopmentGroup(4321)).toThrow("EINVAL");
+  } finally { process.kill = real; }
+});
 
 test.skipIf(process.platform !== "darwin")("bun dev owns source reload, stop and all executor children without launchd", async () => {
   const f = fixture();
