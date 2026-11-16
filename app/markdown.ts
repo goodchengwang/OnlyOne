@@ -1,5 +1,11 @@
 /** A GFM table's delimiter row ("|---|:--:|", "--- | ---"): dashes with optional colons, cells split by pipes. */
 const TABLE_DELIMITER = /^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$/;
+/** An ATX heading ("## Context"): a line of its own, which a hard break cannot continue. */
+const ATX_HEADING = /^ {0,3}#{1,6}(?:[ \t]|$)/;
+/** A setext heading's underline under the line before it ("===", "---"): that line is a heading, not a paragraph. */
+const SETEXT_UNDERLINE = /^ {0,3}(?:=+|-+)$/;
+/** A line that is a rule of marks by itself: a hard break would turn it into text ("---\"). */
+const RULE_LINE = /^ {0,3}(?:=+|-+|\*[ \t]*(?:\*[ \t]*){2,}|_[ \t]*(?:_[ \t]*){2,})$/;
 
 /**
  * The offsets of the newlines onlyone text must keep plain because of a GFM table: the ones ending its lines (a header
@@ -22,7 +28,7 @@ function tableNewlines(text: string): Set<number> {
   return keep;
 }
 
-/** OnlyOne text keeps its line breaks: single newlines become hard breaks, outside code fences and tables. */
+/** OnlyOne text keeps its line breaks: single newlines become hard breaks, outside code fences, tables and headings. */
 export function onlyoneMarkdown(text: string): string {
   return text
     .split(/(^```[\s\S]*?^```)/m)
@@ -31,8 +37,17 @@ export function onlyoneMarkdown(text: string): string {
       // A "\\" ending a table row becomes part of its last cell, and on the delimiter row it ends the table.
       const table = tableNewlines(part);
       return part
-        // single newlines are hard breaks, except around list items (a "\\" there shows up literally)
-        .replace(/([^\n])\n(?!\n|\s*(?:[-*+]|\d+[.)])\s)/g, (m0, c, off, all) => table.has(off + 1) || /^\s*(?:[-*+]|\d+[.)])\s/.test(all.slice(all.lastIndexOf("\n", off) + 1, off + 1)) ? `${c}\n` : `${c}\\\n`)
+        // single newlines are hard breaks, except around list items and headings (a "\\" there shows up literally)
+        .replace(/([^\n])\n(?!\n|\s*(?:[-*+]|\d+[.)])\s)/g, (m0, c, off, all) => {
+          // a "\" cannot continue a heading: after an ATX heading it is text ("## Context\"), and under a line
+          // with a setext underline it would stop the line from being a heading at all, so those stay plain
+          const start = all.lastIndexOf("\n", off) + 1;
+          const nextEnd = all.indexOf("\n", off + 2);
+          const next = all.slice(off + 2, nextEnd < 0 ? all.length : nextEnd);
+          const line = all.slice(start, off + 1);
+          const heading = ATX_HEADING.test(line) || RULE_LINE.test(line) || SETEXT_UNDERLINE.test(next);
+          return table.has(off + 1) || heading || /^\s*(?:[-*+]|\d+[.)])\s/.test(line) ? `${c}\n` : `${c}\\\n`;
+        })
         // Bare URLs stop at CJK / full-width punctuation and spaces ("pull/1：让" links pull/1 only).
         .replace(/(?<![(<\[`])\bhttps?:\/\/[^\s<>()\[\]`\u3000-\u303f\uff00-\uffef\u2018-\u201f\u4e00-\u9fff]+[^\s<>()\[\]`.,;:!?'"\u3000-\u303f\uff00-\uffef\u2018-\u201f\u4e00-\u9fff]/g, "<$&>");
     })
