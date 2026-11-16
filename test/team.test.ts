@@ -101,6 +101,10 @@ test("bad ids, schedules and unknown agents cannot create invalid configuration"
     }
     for (const every of ["15m", "hourly", "daily 00:00", "weekdays 23:59", "weekly MON 09:00"]) expect(validSchedule(every)).toBe(true);
     expect((await runTool(st, "upsert_routine", { ...recurring, name: "__proto__" })).ok).toBe(false);
+    // deleting is validated against the routines that exist, including the built-in ones
+    expect(typeof writeOp("delete_routine", { name: "no-such-routine" }, st)).toBe("string");
+    expect(typeof writeOp("delete_routine", { name: "../x" }, st)).toBe("string");
+    expect(writeOp("delete_routine", { name: "security-check" }, st)).toMatchObject({ tool: "delete_routine", name: "security-check" });
     expect(avatarResponse(new TextEncoder().encode("<svg/>")).status).toBe(415);
     expect(avatarResponse(null).status).toBe(404);
   });
@@ -169,5 +173,64 @@ test("a saved routine becomes a scheduler task for the new member and respects d
     } finally {
       if (saved) writeFileSync(statePath, saved); else rmSync(statePath, { force: true });
     }
+  });
+});
+
+test("delete_routine removes a routine for good, reports a run still in flight, and saving it again restores it", async () => {
+  await fixture(async (st) => {
+    await runTool(st, "upsert_member", { ...member, generate_avatar: false });
+    await runTool(st, "upsert_routine", { ...recurring, every: "15m" });
+    const runId = "T-9801";
+    mkdirSync(P("tasks", "inbox"), { recursive: true });
+    writeFileSync(P("tasks", "inbox", `${runId}.md`), `---\nid: ${runId}\ntitle: ${routine}\nagent: ${id}\nsource: routine:${routine}\n---\nRun.\n`);
+    try {
+      const out = await runTool(st, "delete_routine", { name: routine });
+      expect(out.ok).toBe(true);
+      expect((out as any).data).toMatchObject({ ok: true, routine, in_flight: runId });
+      expect(listRoutines(st).some((r) => r.name === routine)).toBe(false);
+      expect(loadConfig().routine.some((r: any) => r.name === routine)).toBe(false); // the scheduler only runs loadConfig's routines
+      expect(JSON.parse(readFileSync(P("settings.json"), "utf8")).routines[routine].deleted).toBe(true);
+      // deleting the same routine again is a no-op, not an error
+      expect((await runTool(st, "delete_routine", { name: routine })).ok).toBe(true);
+      // saving it again brings it back with its old values, without asking for every field again
+      expect((await runTool(st, "upsert_routine", { name: routine, enabled: true })).ok).toBe(true);
+      expect(listRoutines(st).find((r) => r.name === routine)).toMatchObject({ agent: id, every: "15m", enabled: true });
+      expect(JSON.parse(readFileSync(P("settings.json"), "utf8")).routines[routine].deleted).toBeUndefined();
+    } finally { rmSync(P("tasks", "inbox", `${runId}.md`), { force: true }); }
+  });
+});
+
+test("deleting a code-defined routine tombstones it so config.toml and the built-in list cannot bring it back", async () => {
+  await fixture(async (st) => {
+    expect(listRoutines(st).map((r) => r.name)).toContain("security-check");
+    expect(loadConfig().routine.some((r: any) => r.name === "security-check")).toBe(true);
+    expect((await runTool(st, "delete_routine", { name: "security-check" })).ok).toBe(true);
+    expect(listRoutines(st).some((r) => r.name === "security-check")).toBe(false);
+    expect(loadConfig().routine.some((r: any) => r.name === "security-check")).toBe(false);
+    // the source still defines it, so the tombstone is what keeps it off
+    expect(JSON.parse(readFileSync(P("settings.json"), "utf8")).routines["security-check"]).toMatchObject({ deleted: true });
+  });
+});
+
+test("the chat brain deletes a routine before replying and says the run in flight still reports", async () => {
+  await fixture(async (st) => {
+    await runTool(st, "upsert_member", { ...member, generate_avatar: false });
+    await runTool(st, "upsert_routine", { ...recurring, every: "15m" });
+    const runId = "T-9802";
+    mkdirSync(P("tasks", "inbox"), { recursive: true });
+    writeFileSync(P("tasks", "inbox", `${runId}.md`), `---\nid: ${runId}\ntitle: ${routine}\nagent: ${id}\nsource: routine:${routine}\n---\nRun.\n`);
+    const posts: string[] = [];
+    // the model only ever asks for the delete: the last round must confirm it from the real result, never from the model's own wording
+    const model: Model = { open: async () => ({ send: async () => JSON.stringify({ calls: [{ tool: "delete_routine", args: { name: routine } }], reply: "unverified success" }), close() {} }) };
+    try {
+      const out = await think({ text: "把内容选题那个例行任务删掉" }, st, model, (reply) => posts.push(reply));
+      expect(out.calls.length).toBeGreaterThan(0);
+      expect(out.calls.every((c) => c.tool === "delete_routine" && c.ok)).toBe(true);
+      expect(posts).toHaveLength(1);
+      expect(posts[0]).toContain(`已删除例行任务${routine}`);
+      expect(posts[0]).toContain(runId);
+      expect(posts[0]).not.toContain("unverified success");
+      expect(listRoutines(st).some((r) => r.name === routine)).toBe(false);
+    } finally { rmSync(P("tasks", "inbox", `${runId}.md`), { force: true }); }
   });
 });

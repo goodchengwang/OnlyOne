@@ -16,6 +16,16 @@ test("routine schedule", () => {
   expect(due("daily 02:30", undefined, t)).toBe(false); // first run long after slot → wait for next slot
 });
 
+test.each([
+  ["15m", 15], ["30m", 30], ["1h", 60], ["2h", 120], ["6h", 360], ["1d", 1440], ["hourly", 60],
+] as const)("routine interval %s fires at its boundary", (every, minutes) => {
+  const t = new Date("2026-11-16T08:00:00Z");
+  const last = new Date(+t - minutes * 60_000).toISOString();
+  expect(due(every, undefined, t)).toBe(true);
+  expect(due(every, last, new Date(+t - 1))).toBe(false);
+  expect(due(every, last, t)).toBe(true);
+});
+
 test("capability matching", () => {
   const caps = ["os:linux", "host:pc", "gpu"];
   expect(matches({ requires: "os:linux" }, caps)).toBe(true);

@@ -886,7 +886,7 @@ describe("attachments", () => {
     await app.waitFor("text:1 / 2");
   });
 
-  test("the newest Markdown report opens in the reader pane, which zooms, closes and reopens", async () => {
+  test("the header button and the card open the newest Markdown report in the reader pane, which zooms and closes", async () => {
     const report = { id: "r1", ts: ts(8), from: "lead@mac", kind: "notice", text: "推送通知梳理完成", attachments: ["/media/1762650000000-push-notifications.md"] };
     const app = await open("./App.tsx", {
       ...desk,
@@ -894,7 +894,11 @@ describe("attachments", () => {
     });
     await app.waitFor("id:doc-attachment");
     expect(app.shows("text:push-notifications")).toBe(true);
-    // opened by itself, beside the chat on a wide window
+    // opening the conversation leaves its report closed
+    await app.wait(600);
+    expect(app.shows("id:doc-reader")).toBe(false);
+    await app.press("id:doc-reopen");
+    // beside the chat on a wide window
     await app.waitFor("id:doc-side");
     await app.waitUntil(() => app.shows("text:Push notifications"));
     expect(app.shows("text:MD · Reading")).toBe(true);
@@ -945,6 +949,8 @@ describe("attachments", () => {
       ...desk,
       network: { ...onlyone([], [report]), [`GET ${URL}/media/*`]: () => (++calls === 1 ? { status: 500, body: "" } : { body: "# Second try" }) },
     });
+    await app.waitFor("id:doc-reopen");
+    await app.press("id:doc-reopen");
     await app.waitFor("id:doc-retry");
     expect(app.shows("text:Couldn’t load (500)")).toBe(true);
     await app.press("id:doc-retry");
@@ -958,10 +964,34 @@ describe("attachments", () => {
       ...desk, width: 390, height: 844,
       network: { ...onlyone([], [report]), [`GET ${URL}/media/*`]: { body: "# Report" } },
     });
+    await app.waitFor("id:doc-attachment");
+    expect(app.shows("id:doc-sheet")).toBe(false);
+    await app.press("id:doc-attachment");
     await app.waitFor("id:doc-sheet");
     expect(app.shows("id:doc-expand")).toBe(false);
     await app.press("id:doc-close");
     await app.waitUntil(() => !app.shows("id:doc-sheet"));
+  });
+
+  test("opening a conversation never opens its reports; one that arrives while it is open opens by itself", async () => {
+    const arrival = { id: "r1", ts: new Date().toISOString(), from: "lead@mac", kind: "notice", text: "新报告", attachments: ["/media/1762650000001-new.md"] };
+    const report = { id: "r0", ts: ts(8), from: "lead@mac", kind: "notice", text: "旧报告", attachments: ["/media/1762650000000-old.md"] };
+    const later: unknown[] = [];
+    const app = await open("./App.tsx", {
+      ...desk,
+      network: {
+        ...onlyone([], [report]),
+        [`GET ${URL}/api/feed?*`]: () => ({ body: { events: later.splice(0) } }),
+        [`GET ${URL}/media/*`]: { body: "# 报告正文" },
+      },
+    });
+    await app.waitFor("id:doc-attachment");
+    await app.wait(1000); // a report already in the conversation stays closed
+    expect(app.shows("id:doc-reader")).toBe(false);
+    // one that arrives now is what the reader opens for
+    later.push(arrival);
+    await app.waitFor("id:doc-side", { timeout: 10000 });
+    await app.waitUntil(() => app.shows("text:报告正文"));
   });
 
   test("a picked image shows as a thumbnail, can be removed, and is sent with the text", async () => {

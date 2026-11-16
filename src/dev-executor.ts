@@ -7,10 +7,16 @@ import { desktopBinding, enrollDesktop, stopDevelopmentJobs } from "./desktop";
 import { npmServiceStatus, stopNpmService } from "./npm-service";
 import { onlyoneTomlPath } from "./sync";
 
-/** Development children get their own process group so agents cannot outlive bun dev. */
+/** Development children get their own process group so agents cannot outlive bun dev.
+ *  Cleanup also runs after the daemon is reaped, so by then the pid may already be recycled:
+ *  Darwin then answers EPERM for a group that holds none of our children. Both codes mean
+ *  "there is no group of ours left to kill"; only any other failure is a real error. */
 export function killDevelopmentGroup(pid: number) {
   try { process.kill(-pid, "SIGKILL"); }
-  catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error; }
+  catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code !== "ESRCH" && code !== "EPERM") throw error;
+  }
 }
 
 export function serveDevelopment(options: { root?: string; cli?: string[] } = {}) {
