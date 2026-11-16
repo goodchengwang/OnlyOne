@@ -21,7 +21,7 @@ import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
 import { init, install, selfUpdate } from "./setup";
 import { lockDaemon } from "./daemon-lock";
-import { watchDevelopment } from "./dev-reload";
+import { watchDevelopment, watchDevelopmentOwner } from "./dev-reload";
 import { computeMetrics } from "./metrics";
 import { writeUsageReport } from "./usage-report";
 import { supervise } from "./supervisor";
@@ -842,6 +842,7 @@ Reply with exactly one fenced json block: {"<task id>": {"requires": "", "cli": 
 }
 
 async function daemon(cfg: Cfg) {
+  watchDevelopmentOwner();
   if (!existsSync(P("config.toml"))) throw new Error("OnlyOne is not initialized. Sign in from the desktop app, or run: onlyone init <cloud-url>");
   const unlock = lockDaemon(ROOT);
   process.once("exit", unlock);

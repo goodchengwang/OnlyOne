@@ -25,10 +25,12 @@
   100-written-row allowance per machine (18 / 300 for three). The daemon is owned by launchd, systemd or Task Scheduler
   and survives App exit. Explicit stop uses a local file notification so Windows also drains work before its process
   ends; the supervisor respects the stop marker, then the OS service is disabled. No new Worker timers are introduced.
-  Mac development can run this checkout instead; the source and npm services drain before switching and share data.
+  Mac development runs this checkout under `bun dev`, sharing CLI data without installing a source service.
+  Its private Unix socket controls the child executor; ending development kills the executor and its process group.
+  A local owner check also handles SIGKILL. Existing release/obsolete development services drain before source starts.
   In source development, filesystem events are debounced and validated locally; only a changed, valid bundle asks
   the existing daemon drain to restart. No files changed means zero extra requests or writes, even with the app closed.
-  Development startup/reload messages stay in the local log, and a source reload does not force lazy heartbeat/journal
+  Development startup/reload messages stay in the terminal, and a source reload does not force lazy heartbeat/journal
   uploads. The last-push timestamp persists in sync.json so restarting cannot bypass lazy pacing. Task results still
   commit normally, and the next process retains unsent lazy changes in its mirror.
   Budget tests reserve eight requests / 16 indexed rows per reload: ten reloads/hour for eight hours on three Macs

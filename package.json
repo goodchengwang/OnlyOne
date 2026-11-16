@@ -6,7 +6,7 @@
     "onlyone": "src/cli.ts"
   },
   "scripts": {
-    "dev": "bash scripts/prepare-dev-runtime.sh && NSH_RUNTIME=\"$PWD/.nsh/dev-runtime\" nsh run app",
+    "dev": "bun scripts/dev.ts",
     "deploy:cloud": "bun cloud/deploy.ts",
     "daemon": "bun src/cli.ts daemon",
     "tick": "bun src/cli.ts tick",

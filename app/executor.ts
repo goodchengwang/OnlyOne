@@ -19,7 +19,7 @@ export function executor(action: ExecutorAction | "status", config: { url: strin
   return next;
 }
 
-// launchd owns the executor, so closing the window or hot reloading never kills a task.
+// Release services survive window close; the development executor belongs to bun dev.
 async function invokeExecutor(action: ExecutorAction | "status", config: { url: string; token: string }): Promise<DesktopStatus | null> {
   if (!hasExecutor) return null;
   const directory = decodeURIComponent(new URL(".", import.meta.url).pathname);
