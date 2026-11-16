@@ -8,6 +8,7 @@ import {
 } from "./core";
 import { claudeDisallowed } from "./gates";
 import { channelPrompt } from "./channels";
+import { liveWorktrees } from "./worktree";
 
 export type Result = {
   status: "done" | "needs_decision" | "failed" | "delegated" | "waiting";
@@ -91,6 +92,8 @@ ${resourceNote}
 
 ${channelPrompt()}
 
+${liveWorktreesNote(undefined, meta.id)}
+
 # Task ${meta.id}: ${meta.title}
 Working directory: ${meta.repo || ROOT}   Scratch space (checkouts, worktrees, build targets): ~/.onlyone/work — never inside the onlyone folder ${ROOT}, which syncs to the cloud   Host capabilities: ${meta.host_caps ?? ""}
 Priority: ${meta.priority}   Source: ${meta.source}
@@ -98,6 +101,25 @@ Priority: ${meta.priority}   Source: ${meta.source}
 ${body}
 
 ${RESULT_SPEC()}`;
+}
+
+/**
+ * What a run must never clean up: the branches and checkouts of tasks that are still queued, running, waiting or
+ * blocked. A cleanup that deletes one of these loses work that was never committed or strands a running session
+ * (T-0036 was deleted mid-run by a pr-triage sweep, 2026-11-16), so the list is generated from the task folders and
+ * put in front of every run instead of trusting each prompt to remember the rule (T-0042).
+ */
+export function liveWorktreesNote(tasksDir?: string, excludeId?: string): string {
+  const live = liveWorktrees(tasksDir, excludeId);
+  const lines = live.map((t) => {
+    const what = [t.branch ? `branch \`${t.branch}\`` : "", t.worktree ? `checkout \`${t.worktree}\`` : "", t.host ? `on ${t.host}` : ""]
+      .filter(Boolean).join(" · ");
+    return `- ${t.id} (${t.state})${what ? ` · ${what}` : ""} — ${t.title}`;
+  });
+  return `# Live tasks — never clean these up
+Only tasks already in tasks/done or tasks/failed may be cleaned up. The branch or checkout of a queued, running, waiting or blocked task is off limits: never delete it, prune it or \`git worktree remove\` it — not even when its diff looks fully merged, its PR is closed, or it looks abandoned. An unfinished run may hold uncommitted edits, and a checkout is that run's working directory right now. Delete a branch or worktree only when its task is finished AND nothing on it is still running; anything else you report and let the owner decide.
+${lines.length ? lines.join("\n") : L("- (no live task holds a branch or checkout right now)", "- （当前没有活着的任务持有分支或 worktree）")}
+`;
 }
 
 function rosterLine(): string {
