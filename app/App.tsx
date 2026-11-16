@@ -1158,11 +1158,15 @@ function SideChatPane(props: {
 
 // ---------------------------------------------------------------- run process
 
-/** "14:32:05" from an ISO stamp; empty when the CLI gave none. */
+/** "14:32:05" from an ISO stamp; empty when the CLI gave none. Written out by hand: the app runtime carries no
+ *  locale data, so `toLocaleTimeString("sv-SE")` falls back to en-US and prints "2:32:05 PM", which does not fit
+ *  the column beside every step. */
 function hms(iso?: string): string {
   if (!iso) return "";
   const d = new Date(iso);
-  return isNaN(d.getTime()) ? "" : d.toLocaleTimeString("sv-SE");
+  if (isNaN(d.getTime())) return "";
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
 }
 
 /**
@@ -1223,7 +1227,7 @@ function RunPane(props: { onlyone: OnlyOne; id: string; at: string; wide: boolea
             {(t) => (
               <View style={{ gap: 4, paddingBottom: 4 }}>
                 <Text testID="run-meta" style={{ fontSize: 12.5, lineHeight: 18, color: colors.muted }}>
-                  {[t()!.host, t()!.cli, t()!.model, t()!.status, typeof t()!.exit === "number" ? `exit ${t()!.exit}` : "", live() ? L("running", "运行中") : ""].filter(Boolean).join(" · ")}
+                  {[t()!.host, t()!.cli, t()!.model, t()!.status, typeof t()!.exit === "number" ? `exit\u00A0${t()!.exit}` : "", live() ? L("running", "运行中") : ""].filter(Boolean).join(" · ")}
                 </Text>
                 <If when={t()!.summary}>
                   <Text testID="run-summary" style={{ fontSize: 13.5, lineHeight: 20, color: colors.text, userSelect: "text" }}>{t()!.summary}</Text>
@@ -1252,7 +1256,7 @@ function RunPane(props: { onlyone: OnlyOne; id: string; at: string; wide: boolea
           <Each of={steps()}>
             {(s, i) => (
               <View testID={`run-step-${i()}`} style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
-                <Text style={{ width: 54, paddingTop: 1, fontFamily: MONO, fontSize: 11, lineHeight: 17, color: colors.faint, fontVariant: ["tabular-nums"] }}>{hms(s().at)}</Text>
+                <Text style={{ width: 64, paddingTop: 1, fontFamily: MONO, fontSize: 11, lineHeight: 17, color: colors.faint, fontVariant: ["tabular-nums"], numberOfLines: 1 }}>{hms(s().at)}</Text>
                 <Text style={{ width: 10, paddingTop: 1, fontSize: 12, lineHeight: 17, color: tone(s().kind) }}>{mark(s().kind)}</Text>
                 <Text
                   style={{
