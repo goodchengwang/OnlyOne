@@ -3940,10 +3940,14 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   // a channel's history beyond what this device holds; what is said there arrives live like the main chat's
   const channelFeed = signal<OnlyOneEvent[]>([]);
   const channelFeeds = new Map<string, OnlyOneEvent[]>();
+  /** The channel's history has arrived (or could not be loaded): what came with it is not new. */
+  const feedSettled = signal(false);
+  let settledSlug: string | null = null;
   effect(() => {
     const slug = scope();
     scoped()?.last_activity;
-    if (!slug) { channelFeed.set([]); return; }
+    if (!slug) { channelFeed.set([]); feedSettled.set(true); return; }
+    if (settledSlug !== slug) { settledSlug = slug; feedSettled.set(false); }
     channelFeed.set(channelFeeds.get(slug) ?? []);
     void onlyone.api("GET", `/api/channels/feed?slug=${encodeURIComponent(slug)}`).then((r) => {
       if (untracked(scope) === slug && r?.ok && Array.isArray(r.data.events)) {
@@ -3951,7 +3955,8 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
         channelFeeds.delete(slug); channelFeeds.set(slug, events);
         while (channelFeeds.size > 6) channelFeeds.delete(channelFeeds.keys().next().value!);
       }
-    }).catch(() => {});
+      if (untracked(scope) === slug) feedSettled.set(true);
+    }).catch(() => { if (untracked(scope) === slug) feedSettled.set(true); });
   });
   /** Shows a page over the channel, in place of the one shown (the sidebar's pages are siblings). */
   const show = (...routes: Route[]) => { drawer.set(false); nav.setRoutes([CHANNEL, ...routes]); };
@@ -4021,12 +4026,26 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     }
     return null;
   });
+  // A report opens by itself only when it arrives while its conversation is open. Opening the app, a
+  // conversation or another channel with a report already in it leaves the reader closed until asked for.
+  let docScope: string | null | undefined;
+  let docsSettled = false;
   let autoDoc: string | undefined;
   effect(() => {
+    const slug = scope();
     const d = latestDoc();
+    if (slug !== docScope) { docScope = slug; docsSettled = false; autoDoc = d?.src; }
+    if (!docsSettled) {
+      // what the conversation came with is never opened by itself
+      autoDoc = d?.src;
+      if (slug ? feedSettled() : onlyone.loaded()) docsSettled = true;
+      return;
+    }
     if (d?.src === autoDoc) return;
     autoDoc = d?.src;
-    untracked(() => reading.set(d && { ...d, at: `channel:${scope() ?? ""}` }));
+    // one that arrives while another page covers the channel does not open when coming back to it
+    if (!d || !untracked(onChannel)) return;
+    untracked(() => reading.set({ ...d, at: `channel:${slug ?? ""}` }));
   });
   // a different onlyone or a sign-out starts with no reports kept from the last one
   cleanup(clearDocCache);
