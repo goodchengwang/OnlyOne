@@ -1283,6 +1283,52 @@ describe("team settings", () => {
     expect(puts).toEqual([{ media_days: 30 }]);
     expect(app.shows("text:14 days")).toBe(true);
   });
+
+  test("a routine's trash button deletes it for good, not by switching it off", async () => {
+    const posts: unknown[] = [];
+    let view = {
+      current: {},
+      effective: {
+        agents: [],
+        autonomy: "onboarding",
+        routines: [
+          { name: "triage-inbound", desc: "扫描收件箱", every: "30m", agent: "lead", enabled: true },
+          { name: "usage-report", desc: "用量周报", every: "weekly FRI 17:00", agent: "reporter", enabled: true },
+        ],
+        max_parallel: 2,
+      },
+      options: { clis: [], autonomy: [] },
+    };
+    const app = await open("./App.tsx", {
+      storage: STORAGE,
+      width: 1200,
+      height: 800,
+      platform: "macos",
+      network: {
+        ...onlyone([]),
+        [`GET ${URL}/api/settings`]: () => ({ body: view }),
+        [`POST ${URL}/api/routines/delete`]: (r: { body?: string | null }) => {
+          const { name } = JSON.parse(r.body!) as { name: string };
+          posts.push(name);
+          view = { ...view, effective: { ...view.effective, routines: view.effective.routines.filter((x) => x.name !== name) } };
+          return { body: { ok: true, routine: name, in_flight: "T-0100" } };
+        },
+      },
+    });
+    await app.press("id:user-menu");
+    await app.press("id:settings");
+    await app.press("id:settings-tab-routines");
+    await app.waitFor("id:routine-delete-usage-report");
+    await app.press("id:routine-delete-usage-report");
+    await app.waitUntil(() => posts.length === 1);
+    // the same delete the team does from chat: one call, no settings write that would merely switch it off
+    expect(posts).toEqual(["usage-report"]);
+    await app.waitFor("id:settings-toast");
+    expect(app.shows("text:Deleted “usage-report”; T-0100 keeps running and will report")).toBe(true);
+    await app.waitUntil(() => !app.shows("id:routine-usage-report"));
+    // its neighbour is untouched
+    expect(app.shows("id:routine-triage-inbound")).toBe(true);
+  });
 });
 
 describe("notifications", () => {
@@ -1673,6 +1719,37 @@ describe("phones", () => {
       expect(app.shows("id:composer")).toBe(true);
     });
   }
+
+  test("a routine's page deletes it and returns to the list without it", async () => {
+    const posts: unknown[] = [];
+    let v = view();
+    const app = await open("./App.tsx", {
+      storage: { ...STORAGE, "onlyone.notifyAsked": "1" },
+      width: 390,
+      height: 844,
+      platform: "ios",
+      network: {
+        ...onlyone([]),
+        [`GET ${URL}/api/settings`]: () => ({ body: v }),
+        [`POST ${URL}/api/routines/delete`]: (r: { body?: string | null }) => {
+          const { name } = JSON.parse(r.body!) as { name: string };
+          posts.push(name);
+          v = { ...v, effective: { ...v.effective, routines: v.effective.routines.filter((x) => x.name !== name) } };
+          return { body: { ok: true, routine: name } };
+        },
+      },
+    });
+    await app.waitFor("id:composer");
+    await app.press("id:settings-top");
+    await app.waitFor("id:phone-settings");
+    await app.press("id:routine-row-triage-inbound");
+    await app.waitFor("id:phone-routine");
+    await app.press("id:routine-delete-triage-inbound");
+    await app.waitUntil(() => posts.length === 1);
+    expect(posts).toEqual(["triage-inbound"]);
+    await app.waitUntil(() => !app.shows("id:phone-routine"));
+    expect(app.shows("id:routine-row-triage-inbound")).toBe(false);
+  });
 
   test("a horizontal swipe opens the phone sidebar", async () => {
     const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.notifyAsked": "1" }, width: 390, height: 844, platform: "ios", network: settingsServer([]) });

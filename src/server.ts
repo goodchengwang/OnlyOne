@@ -26,7 +26,7 @@ import { createProject, projectStore, listProjects, getProject } from "./project
 import { channels, originChannel, updateChannel } from "./channels";
 import { localStore } from "./brain";
 import { ensureWebClient } from "./webclient";
-import { members } from "./team";
+import { deleteRoutine, members } from "./team";
 import { MEMBER_ID, avatarResponse } from "../cloud/src/team";
 
 export type Event = {
@@ -489,6 +489,14 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
       }
       if (url.pathname === "/api/settings" && req.method === "GET") return json(settingsView());
       if (url.pathname === "/api/settings" && req.method === "PUT") return json(await saveSettings((await req.json()) as Record<string, unknown>));
+      // the delete button on a routine: the same delete the team does from chat, tombstone and all
+      if (url.pathname === "/api/routines/delete" && req.method === "POST") {
+        const { name } = (await req.json().catch(() => ({}))) as { name?: unknown };
+        if (typeof name !== "string" || !name.trim()) return json({ error: "name required" }, 400);
+        const result = await locked(() => deleteRoutine(name.trim(), hostName(cfg)));
+        publishStatus();
+        return json(result);
+      }
       if (url.pathname === "/api/tasks" && req.method === "GET") {
         return json(taskHistory(taskStore(), { query: url.searchParams.get("q") ?? "", offset: Number(url.searchParams.get("offset")), limit: Number(url.searchParams.get("limit")) }));
       }
