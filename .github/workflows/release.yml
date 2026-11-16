@@ -50,11 +50,13 @@ jobs:
         if: github.event_name != 'pull_request'
         env:
           NSH_UPDATE_KEY: ${{ secrets.NSH_UPDATE_KEY }}
+          NSH_RELEASE_KEY: ${{ secrets.NSH_RELEASE_KEY }}
+          NSH_RELEASE_CERT: ${{ secrets.NSH_RELEASE_CERT }}
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
         run: |
-          for name in NSH_UPDATE_KEY ANDROID_KEYSTORE_BASE64 ANDROID_KEY_ALIAS ANDROID_KEYSTORE_PASSWORD; do
+          for name in NSH_UPDATE_KEY NSH_RELEASE_KEY NSH_RELEASE_CERT ANDROID_KEYSTORE_BASE64 ANDROID_KEY_ALIAS ANDROID_KEYSTORE_PASSWORD; do
             if [ -z "${!name}" ]; then
               echo "::error::Missing repository secret: $name"
               exit 1
@@ -203,20 +205,31 @@ jobs:
           cd assets
           for f in *; do l=$(printf '%s' "$f" | tr '[:upper:]' '[:lower:]'); [ "$f" = "$l" ] || mv "$f" "$l"; done
           ls -l
-      - name: Sign and verify the full-app update manifest
+      - name: Sign and verify OTA package and app update manifest
         env:
           NSH_UPDATE_KEY: ${{ secrets.NSH_UPDATE_KEY }}
+          NSH_RELEASE_KEY: ${{ secrets.NSH_RELEASE_KEY }}
+          NSH_RELEASE_CERT: ${{ secrets.NSH_RELEASE_CERT }}
         run: |
           version=$(jq -r .version app/nsh.json)
           [ "$GITHUB_REF_TYPE" != tag ] || version="${GITHUB_REF_NAME#v}"
           jq --arg version "$version" '.version = $version' app/nsh.json > "$RUNNER_TEMP/nsh.json"
           mv "$RUNNER_TEMP/nsh.json" app/nsh.json
-          key="$RUNNER_TEMP/update.secret"
-          trap 'rm -f "$key"' EXIT
-          (umask 077 && printf '%s\n' "$NSH_UPDATE_KEY" > "$key")
-          # This workflow publishes native shells; CLI runtime releases belong to npm.yml.
+          printf 'export const CLIENT_VERSION = "%s";\n' "$version" > app/version.ts
+          keys="$RUNNER_TEMP/ota-keys"
+          (umask 077 && mkdir -p "$keys")
+          trap 'rm -rf "$keys"' EXIT
+          (umask 077
+            printf '%s\n' "$NSH_UPDATE_KEY" > "$keys/update.secret"
+            printf '%s\n' "$NSH_RELEASE_KEY" > "$keys/release.secret"
+            printf '%s\n' "$NSH_RELEASE_CERT" > "$keys/release.cert"
+            jq -r '.updater.packages.roots[0]' app/nsh.json > "$keys/root.pub")
+          package="assets/onlyone-$version.nshpkg"
+          nsh publish app --key "$keys/release.secret" --cert "$keys/release.cert" \
+            --app-version "$version" --build "$GITHUB_RUN_NUMBER" -o "$package"
+          nsh verify "$package" --root "$keys/root.pub"
           nsh update-manifest assets/onlyone-"$version"-*.tar.gz assets/onlyone-"$version"-*.zip \
-            --entry app --out assets --key "$key" \
+            --entry app --out assets --key "$keys/update.secret" --package "$package" \
             --link "android=https://github.com/$GITHUB_REPOSITORY/releases/download/v$version/onlyone-android.apk"
           bun scripts/check-app-release.ts assets
           (cd assets && sha256sum * > sha256sums)

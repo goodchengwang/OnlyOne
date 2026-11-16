@@ -5576,7 +5576,7 @@ function App() {
     currentWindow().set({ title: "OnlyOne", titleBar: { style: "hidden", height: size.bar } });
   }
   Scrollbar.setTheme(scrollbarTheme);
-  // Updates are disabled until an OnlyOne release source is configured.
+  watchUpdates();
   const trayChat = signal<TrayChat | null>(null);
   setupTray(trayChat);
   const ready = signal(false);
