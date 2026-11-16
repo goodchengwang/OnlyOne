@@ -4612,7 +4612,8 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     const n = shown().length;
     const grew = n > count;
     count = n;
-    if (grew && !untracked(atEnd)) unseen.update((u) => u + 1);
+    // a channel's history arriving is what the reader came back to, not messages written since
+    if (grew && !untracked(atEnd) && untracked(feedSettled)) unseen.update((u) => u + 1);
   });
   /** What the floating composer covers at the bottom of the timeline. */
   const composerHeight = signal(0);
@@ -4660,7 +4661,9 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     const position = positions.get(slug ?? "");
     limit.set(position?.limit ?? PAGE);
     headPassed.set(false);
-    atEnd.set(position?.atEnd ?? true); unseen.set(0); count = untracked(shown).length;
+    // a card being jumped to (picked from the sidebar, a notification) is not the end: entering leaves the scroll to it
+    atEnd.set(jumping ? false : position?.atEnd ?? true); unseen.set(0); count = untracked(shown).length;
+    if (jumping) return;
     if (position && !position.atEnd) requestAnimationFrame(() => requestAnimationFrame(() => { if (untracked(scope) === slug) scroller?.scrollToIndex({ index: Math.max(0, position.index), animated: false }); }));
     else toEnd();
   });
@@ -4923,18 +4926,34 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     return send(`${ref} ${c}`, null, undefined, [], true);
   };
 
+  /** The channel a card is shown in, or null for the main chat. A card raised for a channel's work carries that
+   *  channel and is never in the main chat at all. */
+  function cardChannel(ref: string): string | null {
+    const ev = onlyone.events().find((e) => e.ref === ref && isAsk(e));
+    if (ev?.channel) return ev.channel;
+    // a card older than what this device loaded: the channel listing still names it
+    return channels.list().find((c) => c.refs?.includes(ref))?.slug ?? null;
+  }
   function pick(ref: string) {
     drawer.set(false);
     // set before the channel comes back: entering it would otherwise scroll to the latest messages, over this card
     jumping = ref;
     atEnd.set(false);
     const back = !untracked(onChannel);
-    nav.popToRoot();
-    if (untracked(scope) && !untracked(shown).some((e) => e.ref === ref)) scope.set(null);
-    chosen.set(ref);
     clearNotification(ref);
-    // back from another page the channel lays out first
-    setTimeout(() => toCard(ref, 4), back ? 120 : 0);
+    const slug = cardChannel(ref);
+    // a card the open view already shows stays in it: switching views would lose the reader's place
+    const stay = !slug && !!untracked(scope) && untracked(shown).some((e) => e.ref === ref && isAsk(e));
+    const target = slug ?? (stay ? untracked(scope) : null);
+    nav.popToRoot();
+    if (untracked(scope) !== target) {
+      if (target) openScope(target);
+      else scope.set(null);
+    }
+    chosen.set(ref);
+    // back from another page the channel lays out first; a channel's history also arrives after the switch,
+    // so keep looking for the card long enough for it
+    setTimeout(() => toCard(ref, target ? 50 : 4), back ? 120 : 0);
   }
   /** Virtualized cards can be off screen; locate the row by identity instead of measuring a view. */
   function toCard(ref: string, tries: number) {
@@ -4943,8 +4962,9 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     const index = timeline().findIndex((row) => "event" in row && row.event.ref === ref && isAsk(row.event));
     if (index >= 0 && scroller) {
       scrollTimeline(index);
-      if (jumping === ref) jumping = null;
-    } else if (tries > 0 && !scroller) {
+      if (jumping === ref) { jumping = null; unseen.set(0); } // the history arriving behind the jump is not new to read
+    } else if (tries > 0 && (at < 0 || !scroller)) {
+      // a channel's history is still on its way, or the list has not laid out yet
       setTimeout(() => toCard(ref, tries - 1), 80);
     } else {
       if (jumping === ref) jumping = null;

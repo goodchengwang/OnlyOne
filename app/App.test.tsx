@@ -261,6 +261,67 @@ describe("channel", () => {
     await app.waitFor("text:/Jump message 499/", { timeout: 2000 });
     await app.waitUntil(() => !app.shows("label:Back to bottom"), { timeout: 2000 });
   });
+  test("a card raised in a project channel opens that channel at the card, not the main chat", async () => {
+    const posts: { text: string; reply_to?: string }[] = [];
+    // the card belongs to the project's work: the feed stamps it with the channel, so the main chat never shows it
+    const card = {
+      id: "chan-card", ts: ts(10), from: "lead@mac", kind: "decision", ref: "D-0424", channel: "prj-onlyone",
+      text: "合并 #12 吗？\n\n建议：*A*", options: ["A: 合并", "B: 再改"],
+    };
+    const after = Array.from({ length: 30 }, (_, i) => ({ id: `after-${i}`, ts: ts(11 + i / 10), from: "agent", kind: "notice", channel: "prj-onlyone", text: `After the card ${i}` }));
+    const project = {
+      slug: "prj-onlyone", project_id: "prj-onlyone", name: "OnlyOne", goal: "OnlyOne · github.com/acme/onlyone",
+      status: "active", created: ts(-900), last_activity: ts(40), stale: false, count: 1, refs: ["D-0424"], items: [],
+    };
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+        ...onlyone(posts, [card, ...after]),
+        [`GET ${URL}/api/status`]: { body: { ...status, decisions: [{ id: "D-0424", kind: "decision", question: "合并 #12 吗？", held: true, task: "T-0007" }] } },
+        [`GET ${URL}/api/channels`]: { body: { channels: [project] } },
+        [`GET ${URL}/api/channels/feed?*`]: { body: { events: [card, ...after] } },
+      },
+    });
+    await app.waitFor("id:composer");
+    await app.waitFor("label:D-0424");
+    expect(app.shows("id:opt-D-0424-A")).toBe(false); // the main chat does not hold this card
+
+    await app.press("label:D-0424");
+    await app.waitFor("id:opt-D-0424-A", { timeout: 5000 });
+    // the channel opened at its newest line and this card sits 30 messages above it: the timeline jumped to the card
+    expect(app.shows("After the card 29")).toBe(false);
+    expect(app.shows("label:Back to bottom")).toBe(true);
+
+    // and the card answers from there, inside the channel it was asked in
+    await app.press("id:opt-D-0424-A");
+    await app.waitUntil(() => posts.length === 1, { timeout: 10_000 });
+    expect(posts[0]).toMatchObject({ text: "D-0424 A", channel: "prj-onlyone", project_id: "prj-onlyone" });
+  });
+  test("a card this device no longer holds opens the channel its listing names, not the main chat", async () => {
+    // the card is older than this device's feed: it is only in the channel's history and its listing's refs
+    const card = { id: "old-card", ts: ts(9), from: "lead@mac", kind: "decision", ref: "D-0500", channel: "prj-onlyone", text: "删掉旧配置吗？\n\n建议：*A*", options: ["A: 删掉", "B: 留着"] };
+    const project = {
+      slug: "prj-onlyone", project_id: "prj-onlyone", name: "OnlyOne", goal: "OnlyOne · github.com/acme/onlyone",
+      status: "active", created: ts(-900), last_activity: ts(40), stale: false, count: 1, refs: ["D-0500"], items: [],
+    };
+    const posts: { text: string; reply_to?: string }[] = [];
+    const app = await open("./App.tsx", {
+      storage: STORAGE, width: 1200, height: 800, platform: "macos", network: {
+        ...onlyone(posts),
+        [`GET ${URL}/api/status`]: { body: { ...status, decisions: [{ id: "D-0500", kind: "decision", question: "删掉旧配置吗？", held: true }] } },
+        [`GET ${URL}/api/channels`]: { body: { channels: [project] } },
+        [`GET ${URL}/api/channels/feed?*`]: { body: { events: [card] } },
+      },
+    });
+    await app.waitFor("id:composer");
+    await app.waitFor("label:D-0500");
+    expect(app.shows("id:opt-D-0500-A")).toBe(false);
+
+    await app.press("label:D-0500");
+    await app.waitFor("id:opt-D-0500-A", { timeout: 5000 });
+    await app.press("id:opt-D-0500-A");
+    await app.waitUntil(() => posts.length === 1, { timeout: 10_000 });
+    expect(posts[0]).toMatchObject({ text: "D-0500 A", channel: "prj-onlyone", project_id: "prj-onlyone" });
+  });
   test("the channel shows the newest 200 messages; older ones load on request", async () => {
     const many = Array.from({ length: 250 }, (_, i) => ({ id: `page-${i}`, ts: ts(i / 5), from: "agent", kind: "notice", text: `Paged message ${i}` }));
     const app = await open("./App.tsx", { storage: STORAGE, width: 390, height: 800, platform: "ios", network: onlyone([], many) });
