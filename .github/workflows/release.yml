@@ -1,4 +1,5 @@
-# Packages the client apps. A tag `vX.Y.Z` publishes them as a GitHub release; pull requests touching this and
+# Packages the client apps. A tag `vX.Y.Z` publishes them as a GitHub release and then deploys that release's web
+# client to the Worker that serves it; pull requests touching this and
 # running it by hand only build them (workflow artifacts). Asset names carry no version, so
 # `releases/latest/download/<asset>`, used by src/webclient.ts, always resolves.
 name: release
@@ -46,6 +47,20 @@ jobs:
       - name: Require published desktop CLI support before releasing clients
         if: github.event_name == 'push' && github.ref_type == 'tag'
         run: bun scripts/check-published-cli.ts
+      - name: Check the Worker deployment secrets the release deploys the web client with
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ONLYONE_WORKER_NAME: ${{ secrets.ONLYONE_WORKER_NAME }}
+          ONLYONE_DOMAIN: ${{ secrets.ONLYONE_DOMAIN }}
+        run: |
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID ONLYONE_WORKER_NAME ONLYONE_DOMAIN; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Missing repository secret: $name. A tag publishes a release and deploys its web client to the Worker; add it with: gh secret set $name"
+              exit 1
+            fi
+          done
       - name: Check signing prerequisites
         if: github.event_name != 'pull_request'
         env:
@@ -259,3 +274,30 @@ jobs:
           # Published assets stay immutable; a failed draft can be inspected and removed before retrying.
           gh release create "$GITHUB_REF_NAME" * --verify-tag --generate-notes --draft --title "OnlyOne $GITHUB_REF_NAME"
           gh release edit "$GITHUB_REF_NAME" --draft=false --latest
+
+  # The site only catches up with the release here: the Worker keeps serving the client deployed last until this runs.
+  deploy-web:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    needs: publish
+    name: deploy web client
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: onlyone-release
+          path: assets
+      - name: Deploy the published web client to the Worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ONLYONE_WORKER_NAME: ${{ secrets.ONLYONE_WORKER_NAME }}
+          ONLYONE_DOMAIN: ${{ secrets.ONLYONE_DOMAIN }}
+        run: |
+          # The published archive, not a rebuild: what is served is exactly what the release verified.
+          (cd assets && grep ' onlyone-web.tar.gz$' sha256sums | sha256sum -c -)
+          mkdir -p app/dist/web/onlyone
+          tar -xzf assets/onlyone-web.tar.gz -C app/dist/web/onlyone
+          # Deploys and then holds until the custom domain serves this build, so a stale site fails the release.
+          bun cloud/deploy.ts --release --version "${GITHUB_REF_NAME#v}"

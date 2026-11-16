@@ -79,6 +79,15 @@ the shared build number (the installed Mac baseline was build 1 when this pipeli
 reuse a smaller build for an OTA release. Tag versions must increase. OTA and native shells share this workflow counter.
 
 The workflow keeps `NSH_REF` pinned and caches the CLI and runtime; a cold source build can take tens of minutes.
+The tag release also deploys the web client to the Worker that serves it, after the GitHub release is published:
+`deploy-web` checks `onlyone-web.tar.gz` against the release's `sha256sums`, unpacks it into `app/dist/web/onlyone`
+and runs `bun cloud/deploy.ts --release --version <version>`. That deploys the tag's Worker code and that client as one
+new version — secrets, custom domain and data stay as they are, so only the first deployment sets them — and fails
+unless `https://<domain>/` serves the deployed build and an unauthenticated `/api/status` still answers 401, which it
+does only while the Worker's secrets and data survived. It needs the repository secrets `CLOUDFLARE_API_TOKEN`
+(a token with Account `Workers Scripts: Edit` and Zone `Workers Routes: Edit`), `CLOUDFLARE_ACCOUNT_ID`,
+`ONLYONE_WORKER_NAME` and `ONLYONE_DOMAIN`; the
+preflight check stops a tag before packaging when one is missing. Pushes without a tag deploy nothing.
 Before a tag release builds, it verifies the public latest `onlyonecli` declares `onlyoneAppProtocol: 1` and all
 four desktop platform dependencies exist at their exact versions. This prevents a new App being distributed before
 a compatible CLI. Manual CI builds skip that publication gate so unpublished code can still be verified.

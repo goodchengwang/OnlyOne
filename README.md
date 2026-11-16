@@ -88,6 +88,10 @@ with **Allow npm publish** enabled and no environment name. Publishing uses OIDC
 Pushes without a tag, pull requests and manual runs on branches only build and test.
 Platform packages are named `onlyone-linux-x64`, `onlyone-linux-arm64`, `onlyone-darwin-x64`, `onlyone-darwin-arm64` and `onlyone-windows-x64`; the main package remains `onlyonecli`. The publish job checks that all six packages exist before publishing any of them; every package has had a first publication and trusted publisher setup since `v0.1.5`, so tagging only needs the code to be ready.
 Published npm versions cannot be overwritten, including after unpublishing; the main package and the old platform packages already occupy `0.1.0` through `0.1.6`.
+A `vX.Y.Z` tag also deploys that release's web client to the Worker that serves it, once the GitHub release is
+published; the deployed site is not touched by pushes without a tag. It needs the repository secrets
+`CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `ONLYONE_WORKER_NAME` and `ONLYONE_DOMAIN` (see
+[release packaging](CONTRIBUTING.md#packaging-the-client-apps)).
 The native App workflow and its pinned NSH version are separate.
 
 ## Install from local source

@@ -4,19 +4,36 @@ import { join } from "node:path";
 import { newVapidKeys } from "./src/push";
 
 const root = join(import.meta.dir, "..");
-export function deploymentConfig(env = process.env) {
-  const required = (key: string) => {
-    const value = env[key]?.trim();
-    if (!value || /[\r\n]/.test(value)) throw new Error(`Missing or invalid ${key}`);
-    return value;
-  };
-  const name = required("ONLYONE_WORKER_NAME"), account = required("CLOUDFLARE_ACCOUNT_ID");
-  const domain = required("ONLYONE_DOMAIN"), owner = required("ONLYONE_OWNER_EMAIL").toLowerCase();
-  const from = required("ONLYONE_MAIL_FROM"), key = required("ONLYONE_RESEND_API_KEY");
+const required = (env: Record<string, string | undefined>, key: string) => {
+  const value = env[key]?.trim();
+  if (!value || /[\r\n]/.test(value)) throw new Error(`Missing or invalid ${key}`);
+  return value;
+};
+
+/** The Worker that serves the site, by name, account and custom domain: everything both a first deployment and a
+ *  release deployment need. */
+export function workerTarget(env = process.env) {
+  const name = required(env, "ONLYONE_WORKER_NAME"), account = required(env, "CLOUDFLARE_ACCOUNT_ID");
+  const domain = required(env, "ONLYONE_DOMAIN");
   if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name) || !/^[a-f0-9]{32}$/.test(account)) throw new Error("Invalid Worker name or Cloudflare account");
   if (!/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z]{2,}$/i.test(domain)) throw new Error("Invalid ONLYONE_DOMAIN");
+  return { name, account, domain };
+}
+
+export function deploymentConfig(env = process.env) {
+  const { name, account, domain } = workerTarget(env);
+  const owner = required(env, "ONLYONE_OWNER_EMAIL").toLowerCase();
+  const from = required(env, "ONLYONE_MAIL_FROM"), key = required(env, "ONLYONE_RESEND_API_KEY");
   if (![owner, from].every((value) => value.length <= 254 && /^[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+$/.test(value))) throw new Error("Invalid owner or sender email");
   return { name, account, domain, owner, from, key };
+}
+
+/** Every deployment of the Worker goes through here: one chain for a first deployment and for a release. */
+async function wrangler(args: string[], env: Record<string, string | undefined> = process.env) {
+  const child = Bun.spawn(["bunx", "wrangler", ...args], { cwd: join(root, "cloud"), env, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+  if (code !== 0) throw new Error(`Wrangler ${args[0]} failed: ${(stderr || stdout).slice(-2000)}`);
+  return { stdout, stderr, code };
 }
 
 export function templateFiles(url: string, owner: string) {
@@ -50,12 +67,7 @@ export async function deployCloud() {
   chmodSync(dir, 0o700);
   const statePath = join(dir, "state.json");
   const env = { ...process.env, CLOUDFLARE_ACCOUNT_ID: config.account };
-  const wr = async (args: string[]) => {
-    const process = Bun.spawn(["bunx", "wrangler", ...args], { cwd: join(root, "cloud"), env, stdout: "pipe", stderr: "pipe" });
-    const [stdout, stderr, code] = await Promise.all([new Response(process.stdout).text(), new Response(process.stderr).text(), process.exited]);
-    if (code !== 0) throw new Error(`Wrangler ${args[0]} failed: ${(stderr || stdout).slice(-2000)}`);
-    return { stdout, stderr, code };
-  };
+  const wr = (args: string[]) => wrangler(args, env);
   await wr(["whoami"]);
   const build = Bun.spawn(["bash", "app/build-web.sh"], { cwd: root, env, stdout: "inherit", stderr: "inherit" });
   if (await build.exited !== 0) throw new Error("Web client build failed; Worker was not deployed");
@@ -95,4 +107,57 @@ export async function deployCloud() {
   return url;
 }
 
-if (import.meta.main) await deployCloud().catch((error) => { console.error(error.message); process.exitCode = 1; });
+/**
+ * Deploys one release's web client to the Worker that serves it. The release workflow unpacks the published
+ * `onlyone-web.tar.gz` into app/dist/web/onlyone and calls this: that client and the tag's Worker code become one new
+ * version. Secrets, custom domain and data are left as they are — only a first deployment sets those.
+ */
+export async function deployRelease(version: string, env = process.env) {
+  if (!/^\d+\.\d+\.\d+$/.test(version)) throw new Error(`Invalid release version: ${version}`);
+  const config = workerTarget(env);
+  const index = join(root, "app", "dist", "web", "onlyone", "index.html");
+  if (!existsSync(index)) throw new Error("Web client missing: unpack the release's onlyone-web.tar.gz into app/dist/web/onlyone");
+  const deployEnv = { ...env, CLOUDFLARE_ACCOUNT_ID: config.account };
+  await wrangler(["whoami"], deployEnv);
+  const deployed = await wrangler(["deploy", "--name", config.name, "--domain", config.domain,
+    "--tag", `v${version}`, "--message", `web client v${version}`], deployEnv);
+  console.log(deployed.stdout);
+  const url = `https://${config.domain}`;
+  await waitForServed(readFileSync(index), `${url}/?release=${version}`);
+  // A new version keeps the Worker's secrets and its Durable Object data; an unauthenticated call answers 401 only
+  // while both are there (without ONLYONE_TOKEN or ONLYONE_INSTANCE it is a 500).
+  const status = await fetch(`${url}/api/status`, { cache: "no-store", signal: AbortSignal.timeout(15_000) });
+  if (status.status !== 401) throw new Error(`${url}/api/status: HTTP ${status.status}, expected 401 — the new version lost the Worker's secrets or data`);
+  console.log(`✓ Web client v${version} served at ${url}`);
+  return url;
+}
+
+/**
+ * Cloudflare serves a new version within seconds; until then the previous build may still answer. Resolves once the
+ * page is this build's, and fails with what was served instead.
+ */
+export async function waitForServed(expected: Uint8Array, url: string, options: {
+  request?: (url: string) => Promise<Response>; timeoutMs?: number; delayMs?: number;
+} = {}) {
+  const request = options.request ?? ((target: string) => fetch(target, { cache: "no-store", signal: AbortSignal.timeout(15_000) }));
+  const delayMs = options.delayMs ?? 3_000, deadline = Date.now() + (options.timeoutMs ?? 120_000);
+  let served = "no response";
+  for (;;) {
+    try {
+      const response = await request(url);
+      const body = new Uint8Array(await response.arrayBuffer());
+      if (response.ok && body.length === expected.length && body.every((byte, i) => byte === expected[i])) return;
+      served = response.ok ? `${body.length} bytes` : `HTTP ${response.status}`;
+    } catch (error) { served = (error as Error).message; }
+    if (Date.now() + delayMs > deadline) throw new Error(`${url} serves ${served}, not the ${expected.length}-byte build just deployed`);
+    await Bun.sleep(delayMs);
+  }
+}
+
+if (import.meta.main) {
+  const args = process.argv.slice(2), release = args.includes("--release");
+  const at = args.findIndex((arg) => arg === "--version" || arg.startsWith("--version="));
+  const version = at < 0 ? undefined : args[at] === "--version" ? args[at + 1] : args[at]!.slice("--version=".length);
+  const run = !release ? deployCloud() : version ? deployRelease(version) : Promise.reject(new Error("--release needs --version=X.Y.Z"));
+  await run.catch((error) => { console.error(error.message); process.exitCode = 1; });
+}
