@@ -288,6 +288,17 @@ jobs:
         with:
           name: onlyone-release
           path: assets
+      - name: Check the deployment secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          ONLYONE_WORKER_NAME: ${{ secrets.ONLYONE_WORKER_NAME }}
+          ONLYONE_DOMAIN: ${{ secrets.ONLYONE_DOMAIN }}
+        run: |
+          # Without this an unset secret only surfaces as a wrangler error, after every package was published.
+          for name in CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID ONLYONE_WORKER_NAME ONLYONE_DOMAIN; do
+            [ -n "${!name}" ] || { echo "::error::$name is not set for this repository: run scripts/set-release-secrets.sh once"; exit 1; }
+          done
       - name: Deploy the published web client to the Worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
