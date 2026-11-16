@@ -87,7 +87,10 @@ unless `https://<domain>/` serves the deployed build and an unauthenticated `/ap
 does only while the Worker's secrets and data survived. It needs the repository secrets `CLOUDFLARE_API_TOKEN`
 (a token with Account `Workers Scripts: Edit` and Zone `Workers Routes: Edit`), `CLOUDFLARE_ACCOUNT_ID`,
 `ONLYONE_WORKER_NAME` and `ONLYONE_DOMAIN`; the
-preflight check stops a tag before packaging when one is missing. Pushes without a tag deploy nothing.
+preflight check stops a tag before packaging when one is missing. Set all four with
+`bash scripts/set-release-secrets.sh [.env]` from the checkout that deployed the cloud: it takes the three
+non-secret values from that ignored `.env`, prompts for the token without echo, checks it with Cloudflare and then
+reads the names back with `gh secret list`. Pushes without a tag deploy nothing.
 Before a tag release builds, it verifies the public latest `onlyonecli` declares `onlyoneAppProtocol: 1` and all
 four desktop platform dependencies exist at their exact versions. This prevents a new App being distributed before
 a compatible CLI. Manual CI builds skip that publication gate so unpublished code can still be verified.

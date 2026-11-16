@@ -91,7 +91,8 @@ Published npm versions cannot be overwritten, including after unpublishing; the 
 A `vX.Y.Z` tag also deploys that release's web client to the Worker that serves it, once the GitHub release is
 published; the deployed site is not touched by pushes without a tag. It needs the repository secrets
 `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID`, `ONLYONE_WORKER_NAME` and `ONLYONE_DOMAIN` (see
-[release packaging](CONTRIBUTING.md#packaging-the-client-apps)).
+[release packaging](CONTRIBUTING.md#packaging-the-client-apps)); `bash scripts/set-release-secrets.sh` sets all four
+from the `.env` that deployed the cloud.
 The native App workflow and its pinned NSH version are separate.
 
 ## Install from local source
