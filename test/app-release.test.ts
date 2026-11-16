@@ -5,13 +5,17 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { checkAppRelease } from "../scripts/check-app-release";
 
-test("a full-app release verifies final archive bytes and refuses tampering or OTA precedence", () => {
+test("a release requires OTA and verifies final package and archive bytes", () => {
   const directory = mkdtempSync(join(tmpdir(), "onlyone-release-"));
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const app = { id: "dev.onlyone.app", version: "0.1.0", updater: {
     publicKey: publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64"),
   } };
-  const manifest: any = { id: app.id, version: app.version, platforms: {
+  const pkgBytes = Buffer.from("signed OTA package fixture");
+  const pkg = { version: app.version, build: 15, url: `onlyone-${app.version}.nshpkg`,
+    size: pkgBytes.length, sha256: createHash("sha256").update(pkgBytes).digest("hex") };
+  writeFileSync(join(directory, pkg.url), pkgBytes);
+  const manifest: any = { id: app.id, version: app.version, package: pkg, platforms: {
     android: { url: "https://github.com/goodchengwang/OnlyOne/releases/download/v0.1.0/onlyone-android.apk" },
   } };
   function save() {
@@ -33,10 +37,16 @@ test("a full-app release verifies final archive bytes and refuses tampering or O
     writeFileSync(archive, Buffer.alloc(original.length));
     expect(() => checkAppRelease(directory, app)).toThrow("SHA-256 mismatch");
     writeFileSync(archive, original);
-    manifest.package = { url: "onlyone.nshpkg" };
+    writeFileSync(join(directory, pkg.url), Buffer.alloc(pkgBytes.length));
+    expect(() => checkAppRelease(directory, app)).toThrow("OTA: SHA-256 mismatch");
+    writeFileSync(join(directory, pkg.url), pkgBytes);
+    manifest.package = { ...pkg, build: 0 };
     save();
-    expect(() => checkAppRelease(directory, app)).toThrow("must not offer a separate OTA");
+    expect(() => checkAppRelease(directory, app)).toThrow("OTA build");
     delete manifest.package;
+    save();
+    expect(() => checkAppRelease(directory, app)).toThrow("must offer a signed OTA package");
+    manifest.package = pkg;
     save();
     writeFileSync(join(directory, "latest.json"), "{}");
     expect(() => checkAppRelease(directory, app)).toThrow("signature");

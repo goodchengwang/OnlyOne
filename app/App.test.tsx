@@ -73,6 +73,32 @@ function auth(log: Auth, opts: { start?: number; code?: string } = {}) {
 }
 const newLog = (): Auth => ({ starts: [], verifies: [], logouts: 0 });
 
+for (const platform of ["macos", "ios", "android"] as const) test(`OTA checks start on ${platform} and stage the package`, async () => {
+  const calls: string[] = [];
+  const app = await open("./App.tsx", {
+    platform, width: platform === "macos" ? 1200 : 390, height: 844,
+    storage: STORAGE, network: onlyone([]), clock: {},
+    modules: { "nsh/updater": {
+      checkForPackage: () => { calls.push("check"); return { version: "0.1.6", build: 15 }; },
+      downloadPackage: () => { calls.push("download"); },
+      restartToPackage: () => { calls.push("restart"); },
+      checkForUpdate: () => { calls.push("whole-app"); return null; },
+    } },
+  });
+  expect(calls).toEqual([]);
+  await app.wait(5000);
+  await app.waitUntil(() => calls.includes("download"));
+  expect(calls).toEqual(["check", "download"]);
+  if (platform === "macos") {
+    await app.waitFor("id:app-update");
+    await app.press("id:app-update");
+    await app.waitUntil(() => calls.includes("restart"));
+  } else {
+    expect(app.shows("id:app-update")).toBe(false);
+    expect(calls).toEqual(["check", "download"]);
+  }
+});
+
 describe("login", () => {
   test("email codes log in and keep the session", async () => {
     const log = newLog();

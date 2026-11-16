@@ -163,6 +163,9 @@ They require onlyonecli 0.1.5+ and contain no executor. They share the terminal 
 opening the desktop App; missing or outdated CLIs produce an actionable message. See [desktop CLI control](docs/desktop-cli.md).
 No old desktop package migration is provided.
 
+On macOS, `bun dev` runs the development App and its executor together. Ending or killing that command stops
+the executor and its running agents; it installs no background service. Source saves still reload the executor.
+
 ## Use
 
 Open your OnlyOne address on any device and sign in with a code sent to your email. On your phone, add it to the home screen and turn on notifications.

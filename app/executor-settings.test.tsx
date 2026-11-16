@@ -30,3 +30,22 @@ test("checks CLI updates and downloads a new version from settings", async () =>
   await app.press("id:finish-task");
   await app.waitFor("CLI 0.1.4 · up to date");
 });
+
+test("missing components can be installed from version settings, failures can retry, then the service starts", async () => {
+  const app = await open("./executor-settings.fixture.tsx", { platform: "macos", width: 800, height: 1000 });
+  await app.press("id:missing-tools");
+  await app.waitFor("Node.js not detected · npm not detected\nonlyonecli not detected");
+  await app.press("id:fail-install");
+  await app.press("id:executor-install");
+  await app.waitFor("Downloading and installing missing components…");
+  await expect(app.press("id:executor-install")).rejects.toThrow();
+  await app.press("id:finish-task");
+  await app.waitFor("Installation failed. Please retry");
+  await app.press("id:fail-install");
+  await app.press("id:executor-install");
+  await app.press("id:finish-task");
+  await app.waitFor("Starting or switching; running tasks will finish first…");
+  await app.press("id:finish-task");
+  await app.waitFor("Release executor running");
+  expect(app.shows("id:executor-install")).toBe(false);
+});

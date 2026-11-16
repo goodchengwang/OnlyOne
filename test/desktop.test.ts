@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { desktopBinding, enrollDesktop, executorPlist } from "../src/desktop";
+import { desktopBinding, enrollDesktop } from "../src/desktop";
 import { lockDaemon } from "../src/daemon-lock";
 import { ignored } from "../src/sync";
 
@@ -14,15 +14,6 @@ test("desktop bindings share the CLI home, isolate development service labels an
   expect(desktopBinding("http://localhost:8799").url).toBe("http://localhost:8799");
   for (const value of ["http://example.com", "https://user:secret@example.com", "https://example.com/path", "https://example.com?token=secret", "file:///tmp"])
     expect(() => desktopBinding(value)).toThrow();
-});
-
-test("launchd keeps cloud credentials out of argv and escapes paths", () => {
-  const plist = executorPlist("dev.onlyone.test", ["/tmp/A&B/onlyone", "daemon"], "/tmp/it's <private>", "/bin");
-  expect(plist).toContain("A&amp;B");
-  expect(plist).toContain("it&apos;s &lt;private&gt;");
-  expect(plist).toContain("ONLYONE_HOME");
-  expect(plist).toContain("KeepAlive");
-  expect(plist).not.toContain("token");
 });
 
 test("daemon lock excludes duplicate executors, recovers a dead PID and is never synced", () => {
@@ -101,65 +92,3 @@ test("uninitialized daemon explains how to bind instead of crashing while writin
     expect(error).not.toContain("ENOENT");
   } finally { rmSync(home, { recursive: true, force: true }); }
 });
-
-const hasLaunchd = process.platform === "darwin" && Bun.spawnSync(["/bin/launchctl", "print", `gui/${process.getuid!()}`], { stdout: "ignore", stderr: "ignore" }).exitCode === 0;
-
-test.skipIf(!hasLaunchd)("development source service reloads and drains without a bundled runtime", async () => {
-  const root = mkdtempSync(join(tmpdir(), "onlyone-source-service-"));
-  const binding = desktopBinding(`http://localhost:${20000 + Math.floor(Math.random() * 40000)}`, root);
-  const job = `gui/${process.getuid!()}/${binding.label}`;
-  const stub = join(root, "daemon.ts");
-  mkdirSync(join(root, "src"));
-  writeFileSync(join(root, "src/cli.ts"), 'console.log("source");');
-  mkdirSync(join(binding.home, "data"), { recursive: true });
-  writeFileSync(join(binding.home, "onlyone.toml"), `[cloud]\nurl = ${JSON.stringify(binding.url)}\n[server]\ntoken = "test-machine"\n`);
-  writeFileSync(join(binding.home, "data/config.toml"), '[fleet]\nprimary = "test"\n');
-  writeFileSync(stub, `
-    import { writeFileSync, appendFileSync, existsSync } from "node:fs";
-    const home = process.env.ONLYONE_HOME;
-    appendFileSync(home + "/starts", process.pid + "\\n");
-    let stopping = false;
-    const stop = () => {
-      if (stopping) return; stopping = true;
-      writeFileSync(home + "/stopping", "yes");
-      setInterval(() => { if (!existsSync(home + "/hold")) process.exit(0); }, 50);
-    };
-    process.on("SIGTERM", stop);
-    const { watchDevelopment } = await import(${JSON.stringify(join(import.meta.dir, "../src/dev-reload.ts"))});
-    await watchDevelopment(${JSON.stringify(root)}, stop);
-    writeFileSync(home + "/service-ready", String(process.pid));
-    setInterval(() => {}, 1000);
-  `);
-  const invoke = async (action: string) => {
-    const code = `import { desktop } from ${JSON.stringify(join(import.meta.dir, "../src/desktop.ts"))}; await desktop(${JSON.stringify({ root, cli: [process.execPath, stub] })});`;
-    const child = Bun.spawn([process.execPath, "-e", code], { stdin: new Blob([JSON.stringify({ action, url: binding.url })]), stdout: "pipe", stderr: "pipe" });
-    const [exit, error, output] = await Promise.all([child.exited, new Response(child.stderr).text(), new Response(child.stdout).text()]);
-    expect({ exit, error }).toEqual({ exit: 0, error: "" });
-    return JSON.parse(output.trim().split("\n").at(-1)!);
-  };
-  try {
-    expect(await invoke("start")).toMatchObject({ running: true, mode: "development" });
-    const pid = readFileSync(join(binding.home, "service-ready"), "utf8");
-    await invoke("start");
-    expect(readFileSync(join(binding.home, "starts"), "utf8").trim().split("\n")).toEqual([pid]);
-    writeFileSync(join(root, "src/cli.ts"), 'console.log("changed");');
-    for (let n = 0; n < 100 && readFileSync(join(binding.home, "service-ready"), "utf8") === pid; n++) await Bun.sleep(100);
-    expect(readFileSync(join(binding.home, "service-ready"), "utf8")).not.toBe(pid);
-    writeFileSync(join(binding.home, "hold"), "active task");
-    let done = false;
-    const stopping = invoke("stop").then(s => { done = true; return s; });
-    await Bun.sleep(10_500);
-    expect(done).toBe(false);
-    expect(await invoke("status")).toMatchObject({ running: true, stopping: true });
-    rmSync(join(binding.home, "hold"));
-    expect(await stopping).toEqual({ running: false, stopping: false, mode: null });
-    const starts = readFileSync(join(binding.home, "starts"), "utf8");
-    await Bun.sleep(1500);
-    expect(readFileSync(join(binding.home, "starts"), "utf8")).toBe(starts);
-  } finally {
-    Bun.spawnSync(["/bin/launchctl", "bootout", job], { stdout: "ignore", stderr: "ignore" });
-    Bun.spawnSync(["/bin/launchctl", "enable", job], { stdout: "ignore", stderr: "ignore" });
-    rmSync(join(homedir(), "Library/LaunchAgents", `${binding.label}.plist`), { force: true });
-    rmSync(root, { recursive: true, force: true });
-  }
-}, 45_000);

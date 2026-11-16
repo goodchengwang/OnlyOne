@@ -16,7 +16,14 @@ export function checkAppRelease(directory: string, app: { id: string; version: s
   const manifest = JSON.parse(bytes.toString());
   assert.equal(manifest.id, app.id);
   assert.equal(manifest.version, app.version);
-  assert.equal(manifest.package, undefined, "Native-shell releases must not offer a separate OTA package");
+  const pkg = manifest.package;
+  assert(pkg, "Release must offer a signed OTA package");
+  assert.equal(pkg.version, app.version);
+  assert(Number.isSafeInteger(pkg.build) && pkg.build > 0, "OTA build must be a positive integer");
+  assert.equal(pkg.url, `onlyone-${app.version}.nshpkg`);
+  const bytesPackage = readFileSync(join(directory, pkg.url));
+  assert.equal(pkg.size, bytesPackage.length, "OTA: size mismatch");
+  assert.equal(pkg.sha256, createHash("sha256").update(bytesPackage).digest("hex"), "OTA: SHA-256 mismatch");
   assert.deepEqual(Object.keys(manifest.platforms).sort(), ["android", "linux-x86_64", "macos-aarch64", "macos-x86_64", "windows-x86_64"]);
   for (const platform of ["linux-x86_64", "macos-aarch64", "macos-x86_64", "windows-x86_64"]) {
     const asset = manifest.platforms[platform];
@@ -31,5 +38,5 @@ export function checkAppRelease(directory: string, app: { id: string; version: s
 
 if (import.meta.main) {
   checkAppRelease(process.argv[2] ?? "assets", JSON.parse(readFileSync("app/nsh.json", "utf8")));
-  console.log("Verified signed full-app update manifest and all desktop archives");
+  console.log("Verified signed update manifest, OTA package hash and all desktop archives");
 }

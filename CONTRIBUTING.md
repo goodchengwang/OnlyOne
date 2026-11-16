@@ -76,7 +76,7 @@ Native apps trust the `goodchengwang/OnlyOne` release source in `app/nsh.json`; 
 publishing; a `vX.Y.Z` tag publishes a draft only after all packages and the signed update manifest pass validation,
 then makes it public. Existing releases are not overwritten. All final asset names are lowercase. The run number is
 the shared build number (the installed Mac baseline was build 1 when this pipeline was enabled); never reset it or
-reuse a smaller build for an OTA release. Tag versions must increase. Keep the same workflow counter for any future OTA path.
+reuse a smaller build for an OTA release. Tag versions must increase. OTA and native shells share this workflow counter.
 
 The workflow keeps `NSH_REF` pinned and caches the CLI and runtime; a cold source build can take tens of minutes.
 Before a tag release builds, it verifies the public latest `onlyonecli` declares `onlyoneAppProtocol: 1` and all
@@ -85,34 +85,44 @@ a compatible CLI. Manual CI builds skip that publication gate so unpublished cod
 It also checks these repository secrets before building on manual and tag runs:
 
 - `NSH_UPDATE_KEY`: the secret corresponding to `updater.publicKey`; signs `latest.json` into `latest.json.sig`.
+- `NSH_RELEASE_KEY`, `NSH_RELEASE_CERT`: sign the OTA package with OnlyOne's certified release key.
 - `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEY_ALIAS`, `ANDROID_KEYSTORE_PASSWORD`: the persistent Android signing key.
   Keep this key; an older debug-signed APK cannot be updated in place by a differently signed APK.
 
 The `onlyone-release` artifact contains the assembled installation archives, versioned desktop update archives,
-`latest.json`, `latest.json.sig` and `sha256sums`. `bun scripts/check-app-release.ts <assets-directory>` independently
-checks the manifest's Ed25519 signature, app identity, version, platform coverage, archive sizes and SHA-256 hashes.
-The update source is GitHub, so these checks add no Worker requests or timers. The iOS archive is unsigned and must
+the signed `onlyone-<version>.nshpkg`, `latest.json`, `latest.json.sig` and `sha256sums`.
+`nsh verify` checks the OTA signature against the app's trusted root before generating the manifest.
+`bun scripts/check-app-release.ts <assets-directory>` independently checks the manifest's Ed25519 signature,
+app identity, version, OTA build, platform coverage, package/archive sizes and SHA-256 hashes.
+The app checks after 5 seconds and hourly while running; a package is preferred over a whole-app update.
+These requests go to GitHub (at most 288 manifest/signature requests per day for three continuously running clients
+when both package and full-app checks fetch separately), with zero Worker requests, rows read or rows written.
+There is no background service waking a closed app to check. The iOS archive is unsigned and must
 pass the SDK 27 check. Mac apps are ad hoc signed; public Gatekeeper distribution additionally needs Developer ID
 signing and notarization before final archives and their update manifest are generated.
 
-This workflow publishes native shells, without an OTA entry. App shell releases and onlyonecli's npm releases
-are independent. Packaging verifies that neither Mac architecture contains a bundled `onlyone-executor`.
+Each release publishes native shells and a signed OTA entry with the same version and build. An older compatible
+app can take the package; a shell from that release already contains that code. Desktop clients offer a restart
+after download; iOS and Android silently use the package on their next cold start.
+App releases and onlyonecli's npm releases are independent. Packaging verifies that neither Mac architecture
+contains a bundled `onlyone-executor`. Apps built before the update watcher was enabled need one full reinstall;
+they cannot discover this fix through OTA. Older phone shells without package support also need a full reinstall.
 
 OnlyOne has its own OTA trust root and a release certificate scoped to `dev.onlyone.app`. The private signing material
 is outside the checkout in `~/.onlyone/release-keys` (directory 0700, files 0600). Move `root.secret` to encrypted offline
-storage and retain backups of all signing material; it is never uploaded to CI. `NSH_RELEASE_KEY` and `NSH_RELEASE_CERT`
-are reserved for a future, explicitly enabled UI-only OTA release. Renew its certificate before expiry (365 days).
+storage and retain backups of all signing material; the root secret is never uploaded to CI.
+CI uses only `NSH_RELEASE_KEY`, `NSH_RELEASE_CERT` and `NSH_UPDATE_KEY`. Renew the release certificate before expiry (365 days).
 Never copy Noop's keys, certificates, app id or update source.
 
-To prepare a UI-only package later, use the **same pinned NSH** as installed apps, increment version and build, and run:
+Release CI builds the package with the **same pinned NSH** as installed apps. For local verification, use an isolated
+directory and a build higher than the installed baseline:
 
 ```bash
 nsh publish app --key <release.secret> --cert <release.cert> --app-version <version> --build <build> -o <package.nshpkg>
 nsh verify <package.nshpkg> --root <root.pub>
 ```
 
-Do not add that package to a release manifest until real desktop/mobile update checks pass, including calling
-onlyonecli from an OTA run. OTA cannot change onlyonecli, the NSH runtime, platform permissions,
+Verify desktop/mobile update checks, including calling onlyonecli from an OTA run. OTA cannot change onlyonecli, the NSH runtime, platform permissions,
 update source or trusted keys; those require a full app. It also does not deploy the Worker or update npm executors.
 
 Do not run tests against a production Worker or a live `DATA` directory.

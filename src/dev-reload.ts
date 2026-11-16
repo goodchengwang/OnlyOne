@@ -1,6 +1,19 @@
 import { existsSync, watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
 
+/** SIGKILL cannot run the owner's cleanup; the executor then kills its own process group. */
+export function watchDevelopmentOwner() {
+  const owner = Number(process.env.ONLYONE_DEV_PID);
+  if (!(owner > 0)) return;
+  const timer = setInterval(() => {
+    try { process.kill(owner, 0); }
+    catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") process.kill(-process.pid, "SIGKILL");
+    }
+  }, 250);
+  timer.unref();
+}
+
 /** Source-mode executors validate a save before asking the existing graceful shutdown to restart them. */
 export async function watchDevelopment(root: string, restart: () => void) {
   let timer: ReturnType<typeof setTimeout> | undefined;

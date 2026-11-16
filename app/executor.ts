@@ -5,6 +5,7 @@ const process = (processModule as typeof processModule & { default?: typeof proc
 import { L } from "./i18n";
 import * as updater from "nsh/updater";
 import { executorCommand } from "./executor-command";
+import { executorSetupCommand, MissingExecutorTools, needsExecutorTools, parseExecutorTools } from "./executor-setup";
 
 import type { DesktopStatus } from "../src/desktop-status";
 import type { ExecutorAction } from "../src/desktop-status";
@@ -12,6 +13,15 @@ export type { ExecutorAction, DesktopStatus } from "../src/desktop-status";
 export const hasExecutor = ["macos", "windows", "linux"].includes(platform.os) && !!process.dataDir;
 
 let pending: Promise<unknown> = Promise.resolve();
+export async function executorTools(install = false) {
+  const launch = executorSetupCommand(platform.os, install);
+  const result = await process.run(launch.command, launch.args, { timeoutMs: install ? 15 * 60_000 : 30_000 });
+  if (result.code !== 0) throw new Error(L("Component installation or detection failed. Retry from Settings → Version.", "组件安装或检测未完成，请在设置 → 版本中重试。") + (result.stderr.trim() ? `\n${result.stderr.trim().slice(-600)}` : ""));
+  const tools = parseExecutorTools(platform.os, result.stdout);
+  if (install && needsExecutorTools(tools)) throw new Error(L("Components are still unavailable after installation. Retry from Settings → Version.", "安装后仍未检测到所需组件，请在设置 → 版本中重试。"));
+  return tools;
+}
+
 export function executor(action: ExecutorAction | "status", config: { url: string; token: string }): Promise<DesktopStatus | null> {
   if (action === "status") return invokeExecutor(action, config);
   const next = pending.then(() => invokeExecutor(action, config));
@@ -19,7 +29,7 @@ export function executor(action: ExecutorAction | "status", config: { url: strin
   return next;
 }
 
-// launchd owns the executor, so closing the window or hot reloading never kills a task.
+// Release services survive window close; the development executor belongs to bun dev.
 async function invokeExecutor(action: ExecutorAction | "status", config: { url: string; token: string }): Promise<DesktopStatus | null> {
   if (!hasExecutor) return null;
   const directory = decodeURIComponent(new URL(".", import.meta.url).pathname);
@@ -34,7 +44,7 @@ async function invokeExecutor(action: ExecutorAction | "status", config: { url: 
   const done = new Promise<void>((resolve, reject) => {
     child.on("exit", (result) => {
       if (result.code === 0) resolve();
-      else if ((result.code === 127 || result.code === 9009)) reject(new Error(L("Install Node.js 22+ and onlyonecli (npm install -g onlyonecli), then retry.", "请先安装 Node.js 22+ 和 onlyonecli（npm install -g onlyonecli），然后重试。")));
+      else if ((result.code === 127 || result.code === 9009)) reject(new MissingExecutorTools(L("Required components are missing. Open Settings → Version and click Install missing components.", "未检测到所需组件，请在设置 → 版本中点击「安装缺少的组件」。")));
       else if (/connected to another server/.test(diagnostic)) reject(new Error(L("onlyonecli is connected to another server. Switch its server before retrying.", "本机 onlyonecli 已连接其他服务器，请先切换 CLI 的服务器再重试。")));
       else if (/Install or update onlyonecli/.test(diagnostic)) reject(new Error(L("Update onlyonecli with npm and run onlyone update, then retry.", "请通过 npm 更新 onlyonecli，并运行 onlyone update 后重试。")));
       else if (action === "update" || action === "check-update") reject(new Error(L("CLI update did not complete. Your existing version is retained or restored; retry checking the update.", "CLI 更新未完成，现有版本会保留或恢复，请重新检查更新。")));

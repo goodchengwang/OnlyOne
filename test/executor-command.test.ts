@@ -30,11 +30,14 @@ test.skipIf(process.platform !== "win32")("Windows desktop invokes the npm cmd s
     writeFileSync(script, 'console.log(process.argv.slice(2).join(" ")); process.stdout.write(await Bun.stdin.text());');
     writeFileSync(join(bin, "onlyone.cmd"), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
     const command = executorCommand("windows", "C:\\not-a-source-checkout", false);
-    const child = Bun.spawn([command.command, ...command.args], { env: { ...process.env, APPDATA: home }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const child = Bun.spawn([command.command, ...command.args], { env: { ...process.env, USERPROFILE: home, APPDATA: home }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     child.stdin.write('{"session":"test-secret"}'); child.stdin.end();
     const output = await new Response(child.stdout).text();
     const error = await new Response(child.stderr).text();
     expect({ code: await child.exited, error }).toEqual({ code: 0, error: "" });
     expect(output.replace(/\r\n/g, "\n").trimEnd()).toBe('app\n{"session":"test-secret"}');
   } finally { rmSync(home, { recursive: true, force: true }); }
-});
+  // The launcher is powershell.exe, whose start-up alone costs about 4.9s on windows-latest:
+  // v0.1.6's run passed at 4889ms against the 5s default, and this branch timed out at 5000ms
+  // twice on unchanged launcher code. Only the budget moves; the byte assertions stay exact.
+}, 30_000);
