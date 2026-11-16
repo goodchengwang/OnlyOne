@@ -152,7 +152,7 @@ export function startModel(cli: string, cmd: string[], codexHome?: string): stri
 export const agentProcs = new Map<string, { kill: (sig?: number | NodeJS.Signals) => void }>();
 
 /** One line saying what a tool call does ("gh pr checks 814 -R longbridge/nsh", "读 src/cli.ts"), for "最近在做". */
-function toolStep(name: string, input: any): string {
+export function toolStep(name: string, input: any): string {
   const i = input ?? {};
   const v = i.description || i.command || i.file_path || i.path || i.pattern || i.url || i.query || i.prompt || "";
   return `${name}${v ? ` · ${String(v).split("\n")[0].slice(0, 120)}` : ""}`;

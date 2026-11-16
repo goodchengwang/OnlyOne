@@ -13,6 +13,7 @@ import {
 import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, overrideJudge, ownerPickedMenu, recentJudgeIds, routeDecision } from "./decisions";
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
+import { traceFromLog, writeTrace } from "./runlog";
 import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, pushBranch, type WorkInfo, type Worktree } from "./worktree";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, HUMAN_WAIT_MAX_HOURS, humanWaitExpired, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
@@ -151,6 +152,11 @@ function busyRepoFor(host: string, meta: Record<string, string>): boolean {
   });
 }
 
+/** The panel is a convenience: a trace that cannot be written must never fail or slow the run. */
+function writeTraceQuietly(o: { id: string; at: string; logFile: string; host: string; cli: string; status?: string; summary?: string }) {
+  try { writeTrace(traceFromLog(o)); } catch {}
+}
+
 async function processTask(path: string, cfg: Cfg, host: string) {
   let { meta, body } = readDoc(path);
   if (meta.project_id) {
@@ -211,7 +217,11 @@ async function processTask(path: string, cfg: Cfg, host: string) {
       ? `\n## Branch\nThis run works directly in \`${repoNow.root}\` on branch \`${repoNow.branch}\`. Commit the work you do there (\`Agent: ${agent}\` trailer). The executor pushes whatever this run committed to origin when you finish, so never leave finished work uncommitted.\n`
       : "";
   const promptBody = `${meta.requeue_note ? `${body}\n\n> ${meta.requeue_note}\n` : body}${worktreeNote}`;
-  let cli = acct.cli, out = "", res!: ReturnType<typeof parseResult>;
+  // The run's own name, fixed before it starts: its `## Run <at>` line and its trace file (docs/run-trace.md) share it,
+  // so the panel can read the process while the run is still going.
+  const runAt = now();
+  meta = { ...meta, run_at: runAt };
+  let cli = acct.cli, out = "", log = "", res!: ReturnType<typeof parseResult>;
   for (let hop = 0; ; hop++) { // quota / login trouble: switch account or CLI on this host instead of waiting it out
     cli = acct.cli;
     const model = cfg.clis?.[cli]?.model ?? (cli === "claude" ? "claude-opus-5-5" : "default");
@@ -222,7 +232,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
       await _commitPush(`[${host}] start ${meta.id}`);
     });
 
-    const log = P("logs", "runs", `${meta.id}-${Date.now()}-${cli}.log`);
+    log = P("logs", "runs", `${meta.id}-${Date.now()}-${cli}.log`);
     const gh = await githubStarved(cfg);
     const b = budget(sample(cfg), running, meta.weight === "heavy");
     b.note += gh.note ? `\n${gh.note}` : "";
@@ -264,6 +274,8 @@ async function processTask(path: string, cfg: Cfg, host: string) {
       acct = next;
       continue;
     }
+    // the attempt that failed is still a run the owner can read
+    writeTraceQuietly({ id: meta.id, at: runAt, logFile: log, host, cli, status: "failed", summary: res.summary });
     await locked(async () => { // nothing usable on this host → requeue
       await _pull();
       writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined, retried_after: failure }, body);
@@ -273,6 +285,10 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     });
     return;
   }
+  // The run's whole process, written once it has ended — the file the panel beside the conversation opens. One file per
+  // run: a run rewritten while it goes would cost a row a minute on the free plan (test/budget.test.ts) for a panel
+  // nobody may open, and a run record is read after the fact anyway.
+  writeTraceQuietly({ id: meta.id, at: runAt, logFile: log, host, cli, status: res.status, summary: res.summary });
   // Commit the run's work on its own branch before anything is reported: the owner decides what happens to it next.
   // Both this auto-commit and a commit the run made on the plain branch are pushed, so work never sits on one machine.
   let work: WorkInfo | null = null;
@@ -321,7 +337,7 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   const workLine = (tree && work
     ? `\n**Worktree:** \`${tree.branch}\` (base \`${tree.base}\`) at \`${tree.path}\`${work.sha ? ` · commit ${work.sha}` : ""}${work.diff ? ` · ${work.diff}` : ""}${work.error ? `\n**Commit failed:** ${work.error}` : ""}\n`
     : "") + pushLine + (pushLine ? "\n" : "");
-  const runNote = `\n\n## Run ${now()} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n${workLine}`;
+  const runNote = `\n\n## Run ${runAt} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n${workLine}`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
   const latest = existsSync(path) ? readDoc(path).body : body;
   const added = latest.length > body.length && latest.startsWith(body) ? latest.slice(body.length) : "";

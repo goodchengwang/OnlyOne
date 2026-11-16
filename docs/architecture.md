@@ -39,6 +39,8 @@
 - Commits are compare-and-swap per path (`base_version`). A 409 means another host won; task claims rely on this, so exactly one host claims a task.
 - Every file version is kept in `history` (90 days / 20k rows, latest per path always kept) and can be reverted — this is how self-evolution edits are audited and undone.
 - The primary mirrors chat events to the Worker and receives inbox nudges over the hibernating `/api/host/stream` WebSocket (slow polling only while disconnected) for the owner's messages, settings and MCP writes (`src/cloud.ts`).
+- Side chat (`src/side.ts`, [side-chat.md](side-chat.md)): beside any conversation, a read-only `claude -p` session in that conversation's project folder, resumed turn by turn. Its transcript is one row per conversation in the Durable Object, never a feed event, and "push to conversation" sends it through the normal `POST /api/messages` path.
+- Run trace (`src/runlog.ts`, [run-trace.md](run-trace.md)): the pane beside a conversation also shows a run's whole process — every tool call, what the agent said, what failed — read from one small file per run (`runs/<T-id>/<stamp>.json`) in the synced data folder. It is written once when the run ends, so it rides the push that reports the result: no new request path, no timer.
 - Chat brain (`src/brain.ts`): every owner message that isn't a bare `D-0012 A` goes to a fast model (Claude Haiku via the local `claude` CLI, a pre-spawned warm process) that runs a short agent loop over OnlyOne's tools (`cloud/src/tools.ts`, shared with the MCP server): answer, look up, create/amend/cancel/reprioritise/reassign tasks, answer decisions, remember, edit or delete memories. The owner's model login stays on the primary; only the message and the reply cross the Worker. Latency per message: `~/.onlyone/brain.jsonl`.
 
 ## Layout
@@ -71,8 +73,10 @@ Auth: the machine token (hosts) or an owner session from email login (clients). 
 |---|---|---|
 | `POST /api/auth/start`, `/verify`, `/logout` | public / session | email one-time code login |
 | `GET /api/feed`, `WS /api/stream`, `POST /api/messages` | session | chat timeline |
+| `GET`/`POST`/`DELETE /api/side`, `POST /api/host/side` | session / machine | side chat: a private scratch conversation beside a conversation, stored outside the feed ([side-chat.md](side-chat.md)) |
 | `GET /api/status`, `GET/PUT /api/settings` | session | dashboard, UI-adjustable settings |
 | `POST /api/media`, `GET /media/<id>` | both | screenshots and recordings |
+| `POST /api/uploads` | session | the owner's files for a message: any type up to 10 MB, up to ten in one request (`{url}` for one, `{urls}` for several); the primary downloads them beside the task so the agent can read them, and `mediaHeaders` serves anything a browser could run as a sandboxed download |
 | `/api/push/*` | session | Web Push subscribe / test / answer from a notification |
 | `/api/files/changes`, `/commit` | machine | file sync |
 | `/api/files/history`, `/revert` | session | audit and undo |

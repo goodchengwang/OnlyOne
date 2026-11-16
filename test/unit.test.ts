@@ -46,12 +46,19 @@ test("result parsing", () => {
   expect(parseResult("no block").status).toBe("failed");
 });
 
-test("owner image uploads: images only, 10 MB, attachments are the onlyone's own media", async () => {
-  const { uploadProblem, ownerAttachments, MAX_UPLOAD } = await import("../cloud/src/uploads");
-  expect(uploadProblem("image/png", 1000)).toBeNull();
-  expect(uploadProblem("image/svg+xml", 1000)?.status).toBe(415);
-  expect(uploadProblem("application/pdf", 1000)?.status).toBe(415);
-  expect(uploadProblem("image/jpeg", MAX_UPLOAD + 1)?.status).toBe(413);
+test("owner file uploads: any file up to 10 MB, attachments are the onlyone's own media", async () => {
+  const { uploadProblem, uploadType, ownerAttachments, MAX_UPLOAD } = await import("../cloud/src/uploads");
+  // any file may be sent: what it is decides how it is served, not whether it may be sent
+  expect(uploadProblem(1000)).toBeNull();
+  expect(uploadProblem(MAX_UPLOAD + 1)?.status).toBe(413);
+  expect(uploadProblem(0)?.status).toBe(400);
+  // the type stored: an image by its bytes whatever the client said, else what the client said, else the name
+  expect(uploadType(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]), "application/octet-stream", "photo")).toBe("image/jpeg");
+  expect(uploadType(new Uint8Array([1, 2, 3]), "application/pdf", "paper.pdf")).toBe("application/pdf");
+  expect(uploadType(new Uint8Array([1, 2, 3]), "", "notes.md")).toBe("text/markdown");
+  expect(uploadType(new Uint8Array([1, 2, 3]), "", "archive.bin")).toBe("application/octet-stream");
+  // an SVG is kept as itself and served as a download (see mediaHeaders), never rendered
+  expect(uploadType(new Uint8Array([1, 2, 3]), "image/svg+xml", "icon.svg")).toBe("image/svg+xml");
   expect(ownerAttachments(undefined)).toEqual([]);
   expect(ownerAttachments(["/media/1-a.png"])).toEqual(["/media/1-a.png"]);
   expect(ownerAttachments(["https://evil.example/x.png"])).toBeNull();
@@ -59,7 +66,7 @@ test("owner image uploads: images only, 10 MB, attachments are the onlyone's own
   expect(ownerAttachments(Array(11).fill("/media/a.png"))).toBeNull();
 });
 
-test("owner images are downloaded and named by absolute path in the task text", async () => {
+test("owner files are downloaded and named by absolute path in the task text", async () => {
   const { mkdtempSync, readFileSync, rmSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
@@ -74,10 +81,10 @@ test("owner images are downloaded and named by absolute path in the task text", 
   expect(files).toEqual([join(root, "ev-1", "1-shot.png")]);
   expect([...readFileSync(files[0])]).toEqual([1, 2, 3]);
   const text = withAttachments("看这个报错", files, 1);
-  expect(text.startsWith("看这个报错\n\nAttached images")).toBe(true);
+  expect(text.startsWith("看这个报错\n\nAttached files")).toBe(true);
   expect(text).toContain(`- ${files[0]}`);
-  expect(text).toContain("1 more image(s) could not be downloaded");
-  expect(withAttachments("", files).split("\n")[0]).toBe("(see the attached images)");
+  expect(text).toContain("1 more file(s) could not be downloaded");
+  expect(withAttachments("", files).split("\n")[0]).toBe("(see the attached files)");
   expect(withAttachments("plain", [])).toBe("plain");
   rmSync(root, { recursive: true, force: true });
 });

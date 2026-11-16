@@ -15,9 +15,10 @@ export const PULL_MIN_MS = 10_000;
 /** Heartbeats go up lazily, so a machine counts as offline only after this long without one. */
 export const OFFLINE_AFTER_MINUTES = 8;
 
-/** Paths rewritten constantly whose old versions are worth nothing: append-only logs and machine heartbeats. */
+/** Paths rewritten constantly whose old versions are worth nothing: append-only logs, machine heartbeats, and a run's
+ *  process file, which grows while the run goes on and is read as the run's latest state. */
 export const latestOnly = (p: string) =>
-  p.startsWith("journal/") || p.startsWith("logs/") || p.startsWith("fleet/") || p === "memory/lessons.md" || p === "memory/judge-feedback.md";
+  p.startsWith("journal/") || p.startsWith("logs/") || p.startsWith("fleet/") || p.startsWith("runs/") || p === "memory/lessons.md" || p === "memory/judge-feedback.md";
 
 /** An idle guest worker (src/guest.ts) asks for work this often; each ask is one request and at most one row written
  *  (its last_seen). Three guests running as services all day cost under 1k requests. Busy guests ask again right away. */
