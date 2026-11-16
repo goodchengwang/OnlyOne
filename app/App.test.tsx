@@ -475,6 +475,17 @@ describe("channel", () => {
     expect(app.shows("id:task-chip-T-0005 >> nth=2")).toBe(false);
   });
 
+  test("a decision id in a message is a chip that is drawn, not blank space", async () => {
+    const extra = [{ id: "e31", ts: ts(41), from: "dev@linux-box", kind: "notice", text: "按 D-0015 选 A 开好 PR，P-0002 也一样" }];
+    const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], extra), width: 1200, height: 800, platform: "macos" });
+    await app.waitFor("text:/开好 PR/");
+    // TextView gives an inline custom view its space but paints nothing unless it is an accessibility element:
+    // the ids' labels are what keep the chips visible (D-0015 was a gap inside a task page's sentence).
+    expect(app.shows("label:Decision D-0015")).toBe(true);
+    expect(app.shows("label:Proposal P-0002")).toBe(true);
+    expect(app.shows("text:D-0015")).toBe(true);
+  });
+
   test("a task page is its conversation: what was said about it, and a box that adds to it", async () => {
     const posts: { text: string; reply_to?: string }[] = [];
     const said = [

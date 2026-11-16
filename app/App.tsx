@@ -630,8 +630,12 @@ function Custom(props: { node: TextViewCustomNode; small: boolean }) {
       </View>
     );
   }
+  // A decision or proposal id is a label, not a press: its accessibility label is what makes TextView paint it
+  // at all. An inline custom view that is no accessibility element keeps its space and draws nothing (D-0015
+  // was blank space in a task page's message), so the label stays even though nothing is announced on press.
+  const what = (n.text ?? "").startsWith("P-") ? L("Proposal", "提案") : L("Decision", "决策");
   return (
-    <View style={{ verticalAlign: "middle", height: 20, justifyContent: "center", marginHorizontal: 2, paddingHorizontal: 6, borderRadius: corner.badge, backgroundColor: alpha(colors.text, 0.07) }}>
+    <View accessibilityLabel={`${what} ${n.text ?? ""}`} style={{ verticalAlign: "middle", height: 20, justifyContent: "center", marginHorizontal: 2, paddingHorizontal: 6, borderRadius: corner.badge, backgroundColor: alpha(colors.text, 0.07) }}>
       <Text style={{ fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.muted }}>{n.text}</Text>
     </View>
   );
