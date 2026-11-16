@@ -860,7 +860,7 @@ describe("channel", () => {
   });
 });
 
-describe("images", () => {
+describe("attachments", () => {
   const desk = { storage: STORAGE, width: 1200, height: 800, platform: "linux" as const };
   const here = (f: string) => decodeURIComponent(new (globalThis as any).URL(`./${f}`, import.meta.url).pathname);
   const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, 0x49, 0x48, 0x44, 0x52, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 0x1f, 0x15, 0xc4, 0x89, 0, 0, 0, 0x0a, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9c, 0x63, 0, 1, 0, 0, 5, 0, 1, 0x0d, 0x0a, 0x2d, 0xb4, 0, 0, 0, 0, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82]);
@@ -897,7 +897,7 @@ describe("images", () => {
     // opened by itself, beside the chat on a wide window
     await app.waitFor("id:doc-side");
     await app.waitUntil(() => app.shows("text:Push notifications"));
-    expect(app.shows("text:Markdown · Reading")).toBe(true);
+    expect(app.shows("text:MD · Reading")).toBe(true);
     expect(app.shows("text:100%")).toBe(true);
     await app.press("id:doc-zoom-in");
     await app.waitUntil(() => app.shows("text:113%"));
@@ -983,6 +983,57 @@ describe("images", () => {
     expect(posts[0]).toMatchObject({ text: "看这个报错", attachments: ["/media/shot-1.png"] });
   });
 
+  test("a file of any kind shows as a card and goes with the message, all files in one request", async () => {
+    const posts: { text: string; attachments?: string[] }[] = [];
+    let requests = 0;
+    const app = await open("./App.tsx", {
+      ...desk,
+      network: {
+        ...onlyone(posts),
+        [`POST ${URL}/api/uploads`]: () => { requests++; return { body: { urls: ["/media/1-notes.zip", "/media/2-build.log"] } }; },
+      },
+    });
+    await app.waitFor("id:composer");
+    app.onPick(() => [
+      { name: "notes.zip", type: "application/zip", data: new Uint8Array([0x50, 0x4b, 3, 4]) },
+      { name: "build.log", type: "text/plain", data: new TextEncoder().encode("x".repeat(2048)) },
+    ]);
+    await app.press("id:attach");
+    await app.waitUntil(() => app.count("id:attachment") === 2);
+    // the picker itself takes any file, not images only
+    expect(app.picks()[0].kind).toBe("files");
+    // a file is a card with its name and size, not a broken picture
+    expect(app.shows("text:notes.zip")).toBe(true);
+    expect(app.shows("text:build.log")).toBe(true);
+    expect(app.shows("text:2 KB")).toBe(true);
+    await app.type("id:composer", "看下这两个文件");
+    await app.press("id:send");
+    await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
+    expect(requests).toBe(1); // one request for the message, not one per file
+    expect(posts[0]).toMatchObject({ text: "看下这两个文件", attachments: ["/media/1-notes.zip", "/media/2-build.log"] });
+  });
+
+  test("files another agent sent are cards: a log reads in the chat, a zip opens, images stay pictures", async () => {
+    const sent = {
+      id: "f1", ts: ts(8), from: "lead@mac", kind: "notice", text: "打包好了",
+      attachments: ["/media/1762650000000-bundle.zip", "/media/1762650000001-shot.png", "/media/1762650000002-build.log"],
+    };
+    const app = await open("./App.tsx", {
+      ...desk,
+      network: { ...onlyone([], [sent]), [`GET ${URL}/media/*`]: { body: "step one\nstep two failed" } },
+    });
+    // the zip is a file card, the log a text card that reads in the chat, the png still a picture
+    await app.waitFor("id:file-attachment");
+    expect(app.count("id:file-attachment")).toBe(1);
+    expect(app.shows("text:bundle.zip")).toBe(true);
+    expect(app.shows("text:File · Open")).toBe(true);
+    expect(app.shows("text:build.log")).toBe(true);
+    expect(app.count("id:doc-attachment")).toBe(1);
+    expect(app.shows("id:media-gone")).toBe(false);
+    await app.press("id:doc-attachment");
+    await app.waitUntil(() => app.shows("text:/step two failed/"));
+  });
+
   test("undo brings the image back to the composer; nothing is uploaded", async () => {
     const posts: { text: string }[] = [];
     const uploads: string[] = [];
@@ -999,16 +1050,19 @@ describe("images", () => {
     expect(posts.length).toBe(0);
   });
 
-  test("a pasted screenshot attaches; a non-image is refused", async () => {
+  test("a pasted screenshot attaches; so does a pasted file of any kind, and it can be taken off again", async () => {
     const posts: { text: string; attachments?: string[] }[] = [];
     const uploads: string[] = [];
     const app = await open("./App.tsx", { ...desk, network: withUploads(posts, uploads) });
     await app.waitFor("id:composer");
     await app.paste("id:composer", { files: [here("icon.png")] });
     await app.waitFor("id:attachment");
+    // a .ts pasted from the clipboard is not refused — it is a file card like any other
     await app.paste("id:composer", { files: [here("onlyone.ts")] });
-    await app.waitFor("id:attach-note");
-    expect(app.shows("Only images can be sent")).toBe(true);
+    await app.waitUntil(() => app.count("id:attachment") === 2);
+    expect(app.shows("id:attach-note")).toBe(false);
+    expect(app.shows("text:onlyone.ts")).toBe(true);
+    await app.press("label:Remove onlyone.ts");
     expect(app.count("id:attachment")).toBe(1);
     await app.submit("id:composer");
     await app.waitUntil(() => posts.length === 1, { timeout: 8000 });
@@ -2188,5 +2242,81 @@ describe("side chat", () => {
     await app.waitUntil(() => deletes.length === 1);
     await app.waitUntil(() => !app.shows("text:/只读/"));
     expect(app.shows("id:side-composer")).toBe(true);
+  });
+});
+
+describe("run process", () => {
+  // docs/run-trace.md: a run record in a conversation opens that run's whole process in the pane beside it
+  const at = "2026-11-16T06:16:10Z";
+  const norm = at.replace(/[^\w]+/g, "-");
+  const trace = {
+    id: "T-0005", at, host: "linux-box", cli: "claude", model: "claude-opus-5-5", status: "done", exit: 0,
+    summary: "改好了，测试全绿",
+    steps: [
+      { at: "2026-11-16T06:16:11Z", kind: "tool", name: "Read", text: "Read · src/cli.ts" },
+      { at: "2026-11-16T06:16:20Z", kind: "say", text: "看完代码，开始改。" },
+      { at: "2026-11-16T06:16:30Z", kind: "fail", name: "Bash", text: "Bash · bun test\n3 tests failed" },
+    ],
+  };
+  const task = (extra: Record<string, unknown> = {}) => ({
+    id: "T-0005", title: "修复登录页", agent: "dev", host: "linux-box", state: "done",
+    request: "修一下登录页", run_at: at, events: [],
+    runs: [{ ts: at, host: "linux-box", cli: "claude", status: "done", summary: "改好了，测试全绿" }],
+    ...extra,
+  });
+
+  test("pressing a run record shows every step it took, not just the summary", async () => {
+    const reads: string[] = [];
+    const app = await open("./App.tsx", {
+      storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 1280, height: 900, platform: "macos",
+      network: {
+        ...onlyone([]),
+        [`GET ${URL}/api/tasks/get?*`]: { body: task() },
+        [`GET ${URL}/api/files/read?*`]: (r: { url: string }) => {
+          reads.push(r.url);
+          return { body: { path: `runs/T-0005/${norm}.json`, content: JSON.stringify(trace) } };
+        },
+      },
+    });
+    await app.waitFor("id:composer");
+    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.waitFor("id:task-page");
+    // the run's summary in the task's own conversation carries the way into its process
+    await app.press(`id:run-open-${norm}`);
+    await app.waitFor("id:run-pane");
+    await app.waitFor("text:/Read · src\\/cli.ts/");
+    expect(app.shows("text:/看完代码，开始改。/")).toBe(true);
+    expect(app.shows("text:/3 tests failed/")).toBe(true);
+    expect(app.shows("id:run-summary")).toBe(true);
+    // it asks for exactly this run's file, through the read route every client already uses
+    expect(reads.some((u) => u.includes(encodeURIComponent(`runs/T-0005/${norm}.json`)))).toBe(true);
+    await app.press("id:run-close");
+    await app.waitUntil(() => !app.shows("id:run-pane"));
+  });
+
+  test("the live line opens the run going on; until it ends there is only its latest step", async () => {
+    const live = {
+      ...status,
+      // the dashboard's active entry is the task view: it carries run_at, which names the run's process file
+      active: [{ id: "T-0005", title: "修复登录页", agent: "dev", host: "linux-box", state: "active", started: ts(20), run_at: at, activity: { at: new Date().toISOString(), step: "Bash · bun test", steps: 12, model: "claude-opus-5-5" } }],
+    };
+    const app = await open("./App.tsx", {
+      storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 1280, height: 900, platform: "macos",
+      network: {
+        ...onlyone([]),
+        [`GET ${URL}/api/status`]: { body: live },
+        [`GET ${URL}/api/tasks/get?*`]: { body: task({ state: "active", started: ts(20), activity: live.active[0].activity }) },
+        [`GET ${URL}/api/files/read?*`]: { status: 404, body: { error: "not found" } },
+      },
+    });
+    await app.waitFor("id:composer");
+    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.waitFor("id:task-page");
+    await app.press("id:task-activity");
+    await app.waitFor("id:run-pane");
+    await app.waitFor("id:run-running");
+    expect(app.shows("text:/Bash · bun test/")).toBe(true);
+    // a run that has not ended is not an error: the process is kept when it does
+    expect(app.shows("id:run-error")).toBe(false);
   });
 });

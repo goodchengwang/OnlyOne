@@ -52,10 +52,11 @@ import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf as memberAvatar } from "./avatars";
 import type { MemberView } from "../cloud/src/team";
 import { type SideChat, sideConv } from "../cloud/src/side";
+import { type RunTrace, runPath } from "../cloud/src/runs";
 const memberProfiles = signal<MemberView[]>([]);
 const avatarOf = (from: string) => memberAvatar(from, memberProfiles());
 import { CheckMark } from "./ui/icons";
-import { attachmentName, isDoc } from "./files";
+import { ATTACH_MAX_COUNT, attachmentName, fileExt, fileSize, fileType, isDoc, isImageFile, isTextFile, showsAsImage } from "./files";
 import { onlyoneMarkdown } from "./markdown";
 import { canPickProjectFolder, pickProjectFolder } from "./project-folder";
 import { type Channel, channelDigest, sortChannels } from "./channels";
@@ -138,7 +139,6 @@ import {
   type Attachment,
   attachProblem,
   filePath,
-  imageType,
   rows,
   type Status,
   TAGS,
@@ -328,19 +328,19 @@ function createOnlyOne(cfg: Config) {
     };
   }
 
-  /** Uploads one image the owner attaches; resolves with its media path ("/media/…"). */
-  async function upload(a: Attachment): Promise<string> {
+  /** Uploads the files the owner attaches in one request; resolves with their media paths ("/media/…"). */
+  async function upload(files: Attachment[]): Promise<string[]> {
     const fd = new FormData();
-    fd.append("file", a.file, a.name);
+    for (const a of files) fd.append("file", a.file, a.name);
     const r = await fetch(`${cfg.url}/api/uploads`, { method: "POST", headers: { Authorization: headers.Authorization }, body: fd });
     if (r.status === 401) conn.set("unauthorized");
-    if (!r.ok) throw new Error(L(`Image upload failed (${r.status})`, `图片上传失败（${r.status}）`));
-    return ((await r.json()) as { url: string }).url;
+    if (!r.ok) throw new Error(L(`Upload failed (${r.status})`, `上传失败（${r.status}）`));
+    const j = (await r.json()) as { url?: string; urls?: string[] };
+    return j.urls ?? (j.url ? [j.url] : []);
   }
 
   async function send(text: string, replyTo: string | null, files: Attachment[] = [], thread = false, clientId?: string, channel?: string) {
-    const attachments: string[] = [];
-    for (const f of files) attachments.push(await upload(f));
+    const attachments = files.length ? await upload(files) : [];
     const r = await fetch(`${cfg.url}/api/messages`, {
       method: "POST",
       headers,
@@ -685,14 +685,18 @@ function Media(props: { onlyone: OnlyOne; path: string; /** Every attachment of 
   const ratio = signal(16 / 10);
   const zoomed = signal(false);
   const frame: ViewStyle = { borderRadius: radius.inset, backgroundColor: colors.inset };
-  if (isDoc(props.path)) return <DocAttachment src={src} name={attachmentName(props.path)} />;
+  // a report, or any text file (a log, a script): read in the chat's own reader
+  if (isDoc(props.path) || isTextFile(props.path)) return <DocAttachment src={src} name={attachmentName(props.path)} />;
   if (isVideo(props.path)) return <Video src={src} controls paused style={{ ...frame, borderWidth: 1, borderColor: colors.border, width: "100%", maxWidth: 480, aspectRatio: 16 / 9 }} />;
+  // anything else the owner sent (a .zip, a .log, a .ts): a card that opens it, never a broken picture. A blob: path is
+  // an image still being sent, shown from its local preview.
+  if (!/^(blob|data):/i.test(props.path) && !isImageFile(props.path)) return <FileAttachment src={src} name={attachmentName(props.path)} />;
   // a thumbnail that keeps the timeline readable; press it to see the full image
   const THUMB = 240;
   const size = () => (ratio() >= 1 ? { width: THUMB, height: THUMB / ratio() } : { width: THUMB * ratio(), height: THUMB });
   const gone = signal(false); // past the media retention (or otherwise unavailable)
   // the message's images, which the zoomed view pages through in a loop
-  const images = () => (props.siblings ?? [props.path]).filter((p) => !isDoc(p) && !isVideo(p));
+  const images = () => (props.siblings ?? [props.path]).filter(isImageFile);
   return (
     <If
       when={!gone()}
@@ -772,6 +776,16 @@ type DocRef = { src: string; name: string; at?: string };
 const reading = signal<DocRef | null>(null);
 /** The side chat beside the conversation (docs/side-chat.md): open or shut, and it moves with the conversation. */
 const sideChatOpen = signal(false);
+/** A run's process in that same pane (docs/run-trace.md): which task, and the `## Run <at>` stamp naming the file. */
+const openRun = signal<{ id: string; at: string } | null>(null);
+/** Show a run in the pane beside the conversation, closing whatever the pane showed before. */
+function showRun(id: string, at: string) {
+  reading.set(null);
+  sideChatOpen.set(false);
+  openRun.set({ id, at });
+}
+/** The pane beside the conversation is open: the side chat, or a run's process. One at a time. */
+const paneOpen = () => sideChatOpen() || !!openRun();
 /** The page the reader belongs to (a channel or a task); a report opened on one page never shows on another. */
 const readerAt = signal("");
 /** Report bodies already fetched, so reopening or switching back is instant. Bounded, newest kept; a failed one loads again when reopened or retried. */
@@ -819,6 +833,7 @@ function retryDoc(src: string, body: Signal<DocBody>) {
 function DocAttachment(props: { src: string; name: string }) {
   const active = () => reading()?.src === props.src && reading()?.at === readerAt();
   const stem = () => props.name.replace(/\.(md|markdown)$/i, "");
+  const kind = () => fileExt(props.name) || "FILE";
   return (
     <View
       testID="doc-attachment"
@@ -836,15 +851,65 @@ function DocAttachment(props: { src: string; name: string }) {
     >
       <View style={{ width: 40, height: 44, flexShrink: 0, borderRadius: 8, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", gap: 3 }}>
         <Icon name="document" size={18} tint={active() ? colors.info : colors.muted} />
-        <Text style={{ fontFamily: MONO, fontSize: 8, fontWeight: "600", letterSpacing: 0.5, color: colors.faint }}>MD</Text>
+        <Text style={{ fontFamily: MONO, fontSize: 8, fontWeight: "600", letterSpacing: 0.5, color: colors.faint }}>{kind()}</Text>
       </View>
       <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
         <Text style={{ fontSize: 14, lineHeight: 19, fontWeight: "600", color: colors.text, numberOfLines: 2 }}>{stem()}</Text>
         <Text style={{ fontSize: 12, lineHeight: 16, color: active() ? colors.info : colors.faint, numberOfLines: 1 }}>
-          {active() ? L("Markdown · Reading", "Markdown · 正在阅读") : L("Markdown · Report", "Markdown · 报告")}
+          {active() ? L(`${kind()} · Reading`, `${kind()} · 正在阅读`) : L(`${kind()} · Read`, `${kind()} · 阅读`)}
         </Text>
       </View>
       <Icon name="chevron" size={14} tint={active() ? colors.info : colors.faint} />
+    </View>
+  );
+}
+
+/** Any other file the owner sent (a .zip, a .log, a .ts): a card that opens it in whatever the system uses for it. */
+function FileAttachment(props: { src: string; name: string }) {
+  return (
+    <View
+      testID="file-attachment"
+      role="button"
+      accessibilityLabel={L(`Open ${props.name}`, `打开 ${props.name}`)}
+      onPress={() => void openUrl(props.src).catch(() => {})}
+      hoverStyle={{ borderColor: colors.fieldBorder, backgroundColor: alpha(colors.text, 0.03) }}
+      style={{
+        flexDirection: "row", alignItems: "center", gap: 12, width: 344, maxWidth: "100%", padding: 14,
+        borderRadius: radius.inset, borderCurve: "continuous", borderWidth: 1, cursor: "pointer",
+        borderColor: colors.border, backgroundColor: colors.background,
+      }}
+    >
+      <View style={{ width: 40, height: 44, flexShrink: 0, borderRadius: 8, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", gap: 3 }}>
+        <Icon name="document" size={18} tint={colors.muted} />
+        <Text style={{ fontFamily: MONO, fontSize: 8, fontWeight: "600", letterSpacing: 0.5, color: colors.faint }}>{fileExt(props.name) || "FILE"}</Text>
+      </View>
+      <View style={{ flex: 1, minWidth: 0, gap: 3 }}>
+        <Text style={{ fontSize: 14, lineHeight: 19, fontWeight: "600", color: colors.text, numberOfLines: 2 }}>{props.name}</Text>
+        <Text style={{ fontSize: 12, lineHeight: 16, color: colors.faint, numberOfLines: 1 }}>{L("File · Open", "文件 · 打开")}</Text>
+      </View>
+      <Icon name="download" size={14} tint={colors.faint} />
+    </View>
+  );
+}
+
+/** A file waiting in the composer: its name and size, so the owner sees what will be sent before sending it. */
+function FileChip(props: { name: string; size: number }) {
+  return (
+    <View
+      testID="file-chip"
+      style={{
+        flexDirection: "row", alignItems: "center", gap: 8, height: 64, maxWidth: 240, paddingLeft: 10, paddingRight: 14,
+        borderRadius: radius.inset, borderCurve: "continuous", borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background,
+      }}
+    >
+      <View style={{ width: 32, height: 36, flexShrink: 0, borderRadius: 6, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, alignItems: "center", justifyContent: "center", gap: 2 }}>
+        <Icon name="document" size={15} tint={colors.muted} />
+        <Text style={{ fontFamily: MONO, fontSize: 7, fontWeight: "600", letterSpacing: 0.4, color: colors.faint }}>{fileExt(props.name) || "FILE"}</Text>
+      </View>
+      <View style={{ minWidth: 0, gap: 2 }}>
+        <Text style={{ fontSize: 13, lineHeight: 18, color: colors.text, numberOfLines: 1 }}>{props.name}</Text>
+        <Text style={{ fontSize: 11.5, lineHeight: 15, color: colors.faint }}>{fileSize(props.size)}</Text>
+      </View>
     </View>
   );
 }
@@ -1087,6 +1152,124 @@ function SideChatPane(props: {
           </View>
         </View>
       </Dialog>
+    </View>
+  );
+}
+
+// ---------------------------------------------------------------- run process
+
+/** "14:32:05" from an ISO stamp; empty when the CLI gave none. */
+function hms(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? "" : d.toLocaleTimeString("sv-SE");
+}
+
+/**
+ * A run's whole process beside the conversation (docs/run-trace.md): every step the agent took, not just the summary.
+ * It shares the side chat's pane, so a conversation has one place to look things up. While the run is going on the
+ * file is rewritten by the machine (once a minute) and re-read here as the task's activity moves — push-driven, never
+ * on a timer of its own.
+ */
+function RunPane(props: { onlyone: OnlyOne; id: string; at: string; wide: boolean; onClose: () => void }) {
+  const state = signal<{ trace: RunTrace | null; error: string }>({ trace: null, error: "" });
+  let page: ScrollRef | undefined;
+  const read = (initial = false) => {
+    props.onlyone.api("GET", `/api/files/read?path=${encodeURIComponent(runPath(props.id, props.at))}`).then((r) => {
+      if (!r.ok) return state.set({ trace: null, error: r.status === 404 ? L("No process was kept for this run.", "这次运行没有留下过程记录。") : L(`Couldn’t read it (${r.status})`, `读取失败（${r.status}）`) });
+      try {
+        state.set({ trace: JSON.parse(String(r.data.content ?? "")) as RunTrace, error: "" });
+        if (initial) setTimeout(() => page?.scrollToEnd({ animated: false }), 30);
+      } catch {
+        state.set({ trace: null, error: L("The process file is still being written.", "过程文件还在写入。") });
+      }
+    }).catch(() => state.set({ trace: null, error: L("Can’t reach the server", "连不上服务器") }));
+  };
+  // a new run, or the same one reopened: read it fresh
+  effect(() => { props.id; props.at; untracked(() => read(true)); });
+  // The file is written when the run ends. A run opened while it is still going is read once more when it stops being
+  // active — the status frame says so, no timer here — so the process appears without the owner reopening the panel.
+  let wasActive = false;
+  effect(() => {
+    const active = !!props.onlyone.status()?.active.some((x) => x.id === props.id);
+    const was = wasActive;
+    wasActive = active;
+    if (was && !active) untracked(() => read());
+  });
+  const trace = () => state().trace;
+  /** The task is running right now: its process is not written yet, and its latest step is all there is to show. */
+  const running = () => !!props.onlyone.status()?.active.some((x) => x.id === props.id);
+  const live = () => running() && trace()?.status === undefined;
+  const step = () => activityLine(props.onlyone.status()?.active.find((x) => x.id === props.id)?.activity)?.text ?? "";
+  const steps = () => trace()?.steps ?? [];
+  const mark = (kind: string) => (kind === "fail" ? "!" : kind === "tool" ? "▸" : "¶");
+  const tone = (kind: string) => (kind === "fail" ? colors.warn : kind === "tool" ? colors.muted : colors.text);
+  return (
+    <View testID="run-pane" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>
+      <View
+        desktop={props.wide ? { windowDrag: true } : undefined}
+        style={{ flexDirection: "row", alignItems: "center", gap: 2, height: size.bar, paddingLeft: 14, paddingRight: (props.wide && hasWindow ? titleBar().right : 0) + 8, borderBottomWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}
+      >
+        <Icon name="play" size={16} tint={colors.muted} />
+        <View style={{ flex: 1, minWidth: 0, marginLeft: 8, marginRight: 4 }}>
+          <Text testID="run-title" style={{ fontSize: 13.5, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{L("Run process", "运行过程")}</Text>
+          <Text style={{ fontSize: 11.5, color: colors.faint, numberOfLines: 1 }}>{`${props.id} · ${clock(props.at)}`}</Text>
+        </View>
+        <IconButton testID="run-close" icon="close" label={L("Close", "关闭")} size="sm" onPress={props.onClose} />
+      </View>
+      <Scroll ref={(r) => (page = r)} style={{ flex: 1 }} contentStyle={{ paddingTop: 12, paddingBottom: 24 }}>
+        <View style={{ width: "100%", maxWidth: 760, alignSelf: "center", gap: 10, paddingHorizontal: props.wide ? 16 : 12 }}>
+          <If when={trace()}>
+            {(t) => (
+              <View style={{ gap: 4, paddingBottom: 4 }}>
+                <Text testID="run-meta" style={{ fontSize: 12.5, lineHeight: 18, color: colors.muted }}>
+                  {[t()!.host, t()!.cli, t()!.model, t()!.status, typeof t()!.exit === "number" ? `exit ${t()!.exit}` : "", live() ? L("running", "运行中") : ""].filter(Boolean).join(" · ")}
+                </Text>
+                <If when={t()!.summary}>
+                  <Text testID="run-summary" style={{ fontSize: 13.5, lineHeight: 20, color: colors.text, userSelect: "text" }}>{t()!.summary}</Text>
+                </If>
+              </View>
+            )}
+          </If>
+          {/* still running: the whole process is kept when it ends, and the latest step is what there is until then */}
+          <If when={running() && !trace()}>
+            <View testID="run-running" style={{ gap: 6 }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                <Spinner size={13} tint={colors.muted} />
+                <Text style={{ flexShrink: 1, fontSize: 13, lineHeight: 19, color: colors.muted }}>{L("This run is still going; its whole process is kept when it ends.", "这次运行还在进行，结束后会保存完整过程。")}</Text>
+              </View>
+              <If when={step()}>
+                <Text style={{ fontSize: 13, lineHeight: 19, color: colors.text }}>{step()}</Text>
+              </If>
+            </View>
+          </If>
+          <If when={!!state().error && !running()}>
+            <Text testID="run-error" style={{ fontSize: 13, lineHeight: 19, color: colors.muted }}>{state().error}</Text>
+          </If>
+          <If when={!steps().length && !state().error && !!trace() && !running()}>
+            <Text testID="run-empty" style={{ fontSize: 13, lineHeight: 19, color: colors.faint }}>{L("The run has only just started; its steps appear here as it goes.", "这次运行刚开始，步骤会随着它进行出现在这里。")}</Text>
+          </If>
+          <Each of={steps()}>
+            {(s, i) => (
+              <View testID={`run-step-${i()}`} style={{ flexDirection: "row", alignItems: "flex-start", gap: 8 }}>
+                <Text style={{ width: 54, paddingTop: 1, fontFamily: MONO, fontSize: 11, lineHeight: 17, color: colors.faint, fontVariant: ["tabular-nums"] }}>{hms(s().at)}</Text>
+                <Text style={{ width: 10, paddingTop: 1, fontSize: 12, lineHeight: 17, color: tone(s().kind) }}>{mark(s().kind)}</Text>
+                <Text
+                  style={{
+                    flex: 1, minWidth: 0, fontSize: s().kind === "say" ? 13.5 : 12.5, lineHeight: 19, userSelect: "text",
+                    color: tone(s().kind), fontFamily: s().kind === "tool" ? MONO : undefined,
+                  }}
+                >{s().text}</Text>
+              </View>
+            )}
+          </Each>
+          <If when={!!trace()?.dropped}>
+            <Text style={{ fontSize: 12, lineHeight: 18, color: colors.faint, paddingTop: 4 }}>
+              {L(`${trace()!.dropped} steps in the middle were left out; the opening and the end are here.`, `中间省略了 ${trace()!.dropped} 步，保留开头和结尾。`)}
+            </Text>
+          </If>
+        </View>
+      </Scroll>
     </View>
   );
 }
@@ -1433,6 +1616,8 @@ function Message(props: {
   /** Unread on this device; the dot by the name and the action under the message. */
   unread?: () => boolean;
   onToggleRead?: () => void;
+  /** A run's summary: open that run's whole process beside the conversation (docs/run-trace.md). */
+  onOpenRun?: (at: string) => void;
 }) {
   const e = props.event;
   const selection = props.selection ?? new Map<string, Signal<Set<string>>>();
@@ -1550,6 +1735,20 @@ function Message(props: {
         ) : (
           body
         )}
+        {/* a run's summary is a record of one run: the whole process is one press away */}
+        <If when={!!props.onOpenRun && e.id.startsWith("run:")}>
+          <View
+            testID={`run-open-${e.ts.replace(/[^\w]+/g, "-")}`}
+            role="button"
+            accessibilityLabel={L("Open this run’s whole process", "查看这次运行的完整过程")}
+            onPress={() => props.onOpenRun!(e.ts)}
+            hoverStyle={hovered()}
+            style={{ flexDirection: "row", alignItems: "center", gap: 5, alignSelf: "flex-start", marginTop: 2, paddingVertical: 2, paddingRight: 6, borderRadius: 6 }}
+          >
+            <Icon name="play" size={12} tint={colors.muted} />
+            <Text style={{ fontSize: 12.5, color: colors.muted }}>{L("Whole process", "完整过程")}</Text>
+          </View>
+        </If>
         <If when={touch && e.text.trim()}>
           <MsgActions id={e.id} text={e.text} show={() => touch || over()} unread={props.unread} onToggleRead={props.onToggleRead} onReply={e.ref && !(ask && !done()) ? () => props.onReply(e.ref!, replyable ? firstLine(e.text) : undefined) : undefined} />
         </If>
@@ -2001,9 +2200,22 @@ function TaskDetail(props: { onlyone: OnlyOne; id: string; wide: boolean; onFold
               </View>
             </If>
           </PageHeader>
+          {/* the run going on: its latest step, and — one press — the whole process beside the conversation */}
           <If when={t()!.state === "active" ? activityLine(t()!.activity) : null}>
             {(a) => (
-              <Text testID="task-activity" style={{ marginTop: 10, fontSize: 13.5, lineHeight: 19, color: a().quiet ? colors.warn : colors.muted }}>{a().text}</Text>
+              <View
+                testID="task-activity"
+                role={t()!.run_at ? "button" : undefined}
+                accessibilityLabel={t()!.run_at ? L("Open this run’s whole process", "查看这次运行的完整过程") : undefined}
+                onPress={() => { if (t()!.run_at) showRun(t()!.id, t()!.run_at!); }}
+                hoverStyle={t()!.run_at ? hovered() : undefined}
+                style={{ marginTop: 10, flexDirection: "row", alignItems: "center", gap: 8, alignSelf: "flex-start", maxWidth: "100%", marginHorizontal: -6, paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6 }}
+              >
+                <Text style={{ flexShrink: 1, fontSize: 13.5, lineHeight: 19, color: a().quiet ? colors.warn : colors.muted }}>{a().text}</Text>
+                <If when={!!t()!.run_at}>
+                  <Text testID="task-activity-open" style={{ fontSize: 12.5, color: colors.faint }}>{L("Whole process", "完整过程")}</Text>
+                </If>
+              </View>
             )}
           </If>
           <If when={t()!.state === "nohost"}>
@@ -2021,6 +2233,7 @@ function TaskDetail(props: { onlyone: OnlyOne; id: string; wide: boolean; onFold
                 const e = row.event;
                 if (e.from === "owner") return <OwnerBubble onlyone={props.onlyone} event={e} />;
                 return <Message onlyone={props.onlyone} event={e} answered={settled} target={() => null}
+                  onOpenRun={(at) => showRun(props.id, at)}
                   onAnswer={(ref, choice) => void props.onlyone.send(`${ref} ${choice}`, ref, [], true).catch((err) => note.set(String((err as Error)?.message ?? err)))}
                   onReply={() => hint.set(L("Write your instructions in the box below.", "在下面的输入框继续说。"))} />;
               }}
@@ -3205,7 +3418,7 @@ function TeamSettings(props: { service: ExecutorControl; onlyone: OnlyOne; push:
         </Group>
         </If>
         <If when={on("storage")}>
-        <Group title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
+        <Group title={L("Attachment retention", "附件保留")} hint={MEDIA_HINT()}>
           <MediaDaysChoices settings={props.settings} />
         </Group>
         </If>
@@ -3565,14 +3778,14 @@ function SetRow(props: {
   );
 }
 
-const MEDIA_HINT = () => L("How long screenshots and images in the chat are kept. They’re deleted when they expire.", "聊天里的截图和图片保存多久，过期后自动删除。");
+const MEDIA_HINT = () => L("How long files, screenshots and images in the chat are kept. They’re deleted when they expire.", "聊天里的文件、截图和图片保存多久，过期后自动删除。");
 
 /** How long images are kept: 7, 14, 30 or 90 days. */
 function MediaDaysChoices(props: { settings: Settings }) {
   const { view, save } = props.settings;
   return (
     <Choices
-      label={L("Image retention", "图片保留")}
+      label={L("Attachment retention", "附件保留")}
       choices={MEDIA_DAYS.map((d) => ({ id: String(d), label: L(`${d} days`, `${d} 天`), testID: `media-days-${d}` }))}
       selected={view() ? String(mediaDaysOf(view())) : null}
       onPick={(id) => save(patches.mediaDays(Number(id)))}
@@ -3686,7 +3899,7 @@ function PhoneSettings(props: { service: ExecutorControl; onlyone: OnlyOne; push
       <Section title={L("Commands", "常用指令")} hint={L("Type / in the message box to use one. Built-in commands perform an action; ones you add send a message to the team.", "在输入框里输入 / 选用。内置指令执行操作，你添加的指令把一段话发给团队。")}>
         <CommandRows settings={props.settings} />
       </Section>
-      <Section title={L("Image retention", "图片保留")} hint={MEDIA_HINT()}>
+      <Section title={L("Attachment retention", "附件保留")} hint={MEDIA_HINT()}>
         <MediaDaysChoices settings={props.settings} />
       </Section>
       <If when={hasExecutor}><ExecutorSettings service={props.service} /></If>
@@ -4167,7 +4380,8 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     const slug = scope();
     const outgoing = outbox().filter((o) => (o.channel ?? null) === slug).map((o) => ({
       id: o.id, ts: o.ts, from: "owner", kind: "owner" as const, text: o.text, ref: o.ref ?? undefined, channel: o.channel,
-      attachments: o.files.length ? o.files.map((f) => f.preview) : undefined,
+      // the bubble shows the images at once; a file card waits for the server, which names what it stored
+      attachments: o.files.some((f) => f.preview) ? o.files.filter((f) => f.preview).map((f) => f.preview) : undefined,
     }));
     if (slug) {
       const ch = untracked(scoped);
@@ -4192,7 +4406,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     const d = latestDoc();
     if (d?.src === autoDoc) return;
     autoDoc = d?.src;
-    untracked(() => { if (!sideChatOpen()) reading.set(d && { ...d, at: `channel:${scope() ?? ""}` }); });
+    untracked(() => { if (!paneOpen()) reading.set(d && { ...d, at: `channel:${scope() ?? ""}` }); });
   });
   // a different onlyone or a sign-out starts with no reports kept from the last one
   cleanup(clearDocCache);
@@ -4203,7 +4417,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   const readerWidth = () => (readerWide() ? Math.round(chatRoom() * 0.62) : Math.min(460, Math.round(chatRoom() * 0.42)));
   const shownDoc = () => { const d = reading(); return d && d.at === readerAt() ? d : null; };
   /** The reader beside a page that has one (the channel, a task), from the window's top edge. */
-  const docSide = () => !!shownDoc() && readerSide() && !sideChatOpen() && (top().name === "channel" || top().name === "task");
+  const docSide = () => !!shownDoc() && readerSide() && !paneOpen() && (top().name === "channel" || top().name === "task");
   // The side chat (docs/side-chat.md) is the second pane: it follows the conversation on screen and shares the width
   // with the report reader (one of them at a time).
   const sideKey = computed(() => { const r = top(); return sideConv(r.name, scope(), r.name === "task" ? r.id : null); });
@@ -4214,9 +4428,12 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   });
   const sideBeside = () => wide() && chatRoom() >= 860;
   const sideWidth = () => Math.min(420, Math.max(320, Math.round(chatRoom() * 0.34)));
-  const sideShown = () => sideChatOpen() && !!sideKey();
+  // The pane holds one thing: a run's process (opened from a run record) or the side chat.
+  const sideShown = () => paneOpen() && (!!openRun() || !!sideKey());
   const sideSide = () => sideShown() && sideBeside();
   const sidePane = () => {
+    const run = openRun();
+    if (run) return <RunPane onlyone={onlyone} id={run.id} at={run.at} wide={sideBeside()} onClose={() => openRun.set(null)} />;
     const conv = sideKey();
     if (!conv) return null;
     return <SideChatPane onlyone={onlyone} conv={() => sideKey() ?? conv} title={() => sideTitle()} wide={sideBeside()} onClose={() => sideChatOpen.set(false)} onPush={(text) => {
@@ -4227,7 +4444,8 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     }} />;
   };
   const toggleSide = () => {
-    const open = !sideChatOpen();
+    const open = !paneOpen();
+    openRun.set(null);
     sideChatOpen.set(open);
     if (open) reading.set(null); // one pane at a time
   };
@@ -4478,34 +4696,39 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     send(v, r, undefined, files);
   }
 
-  // Images the owner attaches: pasted, dropped on the window, or picked.
+  // Files the owner attaches — any file, like ChatGPT: pasted, dropped on the window, or picked. Images show a
+  // thumbnail; every other file a card with its name and size.
   const attachments = signal<Attachment[]>([]);
   const attachNote = signal<string | null>(null);
   // A file drag over the window: null when none, else the offered files (empty until the shell reports them).
   const dropping = signal<string[] | null>(null);
   let attachSeq = 0;
-  function attach(file: Blob, name: string, fromPicker = false) {
-    // the photo picker only returns images, but phones often give them no type or extension; the server reads the bytes
-    const type = imageType(file.type, name) ?? (fromPicker ? "image/jpeg" : null);
-    const problem = attachProblem(type, file.size, attachments().length);
+  function attach(file: Blob, name: string) {
+    const problem = attachProblem(file.size, attachments().length);
     if (problem) return attachNote.set(problem);
     attachNote.set(null);
-    const typed = file.type === type ? file : new Blob([file], { type: type! });
-    const preview = URL.createObjectURL(typed);
-    attachments.update((a) => [...a, { id: `a${++attachSeq}`, name: name || `image-${attachSeq}.png`, type: type!, size: file.size, file: typed, preview }]);
+    // an image's type comes from its name when the device gave none; anything else keeps what the device said
+    const type = fileType(file.type, name);
+    const typed = type && file.type !== type ? new Blob([file], { type }) : file;
+    const preview = showsAsImage(type) ? URL.createObjectURL(typed) : "";
+    attachments.update((a) => [...a, { id: `a${++attachSeq}`, name: name || `file-${attachSeq}`, type, size: file.size, file: typed, preview }]);
   }
   function unattach(id: string) {
     const a = attachments().find((x) => x.id === id);
-    if (a) URL.revokeObjectURL(a.preview);
+    if (a?.preview) URL.revokeObjectURL(a.preview);
     attachments.update((list) => list.filter((x) => x.id !== id));
     attachNote.set(null);
   }
-  /** Local files (`file:` URLs from a drop or a file manager's copy): read the images among them. */
+  /** Local files (`file:` URLs from a drop or a file manager's copy): read them, whatever they are. */
   async function attachUris(uris: string[]) {
     for (const u of uris) {
       const path = filePath(u);
-      const name = path.split(/[\\/]/).pop() ?? "image";
-      if (!imageType(undefined, name)) { attachNote.set(L("Only images can be sent", "只能发送图片")); continue; }
+      const name = path.split(/[\\/]/).pop() ?? "file";
+      // the size is checked before anything is read: a folder, a missing file or one too big adds nothing
+      const info = await fs.stat(path).catch(() => null);
+      if (!info?.isFile()) { attachNote.set(L(`Can’t read ${name}`, `读不到 ${name}`)); continue; }
+      const problem = attachProblem(info.size, attachments().length);
+      if (problem) { attachNote.set(problem); continue; }
       try {
         const bytes = await fs.readFile(path);
         attach(new Blob([bytes as Uint8Array<ArrayBuffer>]), name);
@@ -4514,12 +4737,12 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
       }
     }
   }
-  async function pickImages() {
+  async function pickFiles() {
     try {
-      const picked = await Picker.pickImages({ multiple: true, limit: 10 });
-      for (const p of picked) attach(p.file, p.file.name, true);
+      const picked = await Picker.pickFiles({ multiple: true, limit: ATTACH_MAX_COUNT }); // no filters: any file
+      for (const p of picked) attach(p.file, p.file.name);
     } catch {
-      attachNote.set(L("Can’t pick images on this device", "这台设备上不能选择图片"));
+      attachNote.set(L("Can’t pick files on this device", "这台设备上不能选择文件"));
     }
     composer?.focus();
   }
@@ -5104,11 +5327,13 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
                   <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 8, paddingTop: 2 }}>
                     <Each of={attachments()} key={(a) => a.id}>
                       {(a) => (
-                        <View testID="attachment" accessibilityLabel={a().name} style={{ width: 64, height: 64 }}>
-                          <Image
-                            src={a().preview}
-                            style={{ width: 64, height: 64, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }}
-                          />
+                        <View testID="attachment" accessibilityLabel={a().name} style={a().preview ? { width: 64, height: 64 } : undefined}>
+                          <If when={!!a().preview} else={<FileChip name={a().name} size={a().size} />}>
+                            <Image
+                              src={a().preview}
+                              style={{ width: 64, height: 64, borderRadius: radius.inset, backgroundColor: colors.inset, objectFit: "cover" }}
+                            />
+                          </If>
                           <View
                             testID="remove-attachment"
                             role="button"
@@ -5178,9 +5403,9 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
                     <View
                       testID="attach"
                       role="button"
-                      accessibilityLabel={L("Add image", "添加图片")}
-                      tooltip={touch ? undefined : <Tooltip label={L("Add image (or paste or drop)", "添加图片（也可粘贴或拖入）")} />}
-                      onPress={() => void pickImages()}
+                      accessibilityLabel={L("Add file", "添加文件")}
+                      tooltip={touch ? undefined : <Tooltip label={L("Add a file (or paste or drop it)", "添加文件或图片（也可粘贴或拖入）")} />}
+                      onPress={() => void pickFiles()}
                       hoverStyle={hovered()}
                       style={{ width: touch ? 44 : 36, height: touch ? 44 : 36, marginLeft: -8, borderRadius: touch ? 22 : 18, alignItems: "center", justifyContent: "center" }}
                     >
@@ -5232,13 +5457,13 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     <View style={{ flex: 1, flexDirection: "row", minWidth: 0 }}>
       {page}
       {/* room for the reader, which `docSide` draws over the page's bar up to the window's top edge */}
-      <If when={shownDoc() && readerSide() && !sideChatOpen()}>
+      <If when={shownDoc() && readerSide() && !paneOpen()}>
         <View style={{ width: readerWidth() }} />
       </If>
       <If when={sideSide()}>
         <View style={{ width: sideWidth() }} />
       </If>
-      <If when={shownDoc() && !readerSide() && !sideChatOpen()}>
+      <If when={shownDoc() && !readerSide() && !paneOpen()}>
         <View testID="doc-sheet" style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, paddingBottom: safeArea().bottom, backgroundColor: colors.background }}>{readerPane()}</View>
       </If>
       <If when={sideShown() && !sideBeside()}>
@@ -5328,7 +5553,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
       <If when={(p.route.name === "channel" || p.route.name === "task") && !sideShown()}>
         <IconButton icon="chat" label={L("Side chat", "侧边聊天")} onPress={toggleSide} testID="side-toggle" />
       </If>
-      <If when={p.route === CHANNEL && !shownDoc() && !sideChatOpen() && latestDoc()}>
+      <If when={p.route === CHANNEL && !shownDoc() && !paneOpen() && latestDoc()}>
         <IconButton icon="document" label={L("Open latest report", "打开最新报告")} onPress={() => { const d = latestDoc(); reading.set(d && { ...d, at: readerAt() }); }} testID="doc-reopen" />
       </If>
       <If when={!wide() && p.route === CHANNEL}>
@@ -5484,20 +5709,16 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
 /** What a file drag over the window shows: the whole window becomes the target, saying what the drop will do. */
 function DropTarget(props: { files: string[] }) {
   const names = () => props.files.map((u) => { const n = u.split(/[\\/]/).pop() ?? ""; try { return decodeURIComponent(n); } catch { return n; } });
-  const images = () => names().filter((n) => imageType(undefined, n)).length;
   const detail = () => {
     const n = names().length;
-    if (n === 0) return L("Images are added to the message", "图片会添加到消息中");
-    if (images() === 0) return L("Only images can be sent", "只能发送图片");
-    if (images() < n) return L(`${images()} of ${n} files are images`, `${n} 个文件中有 ${images()} 张图片`);
-    return n === 1 ? names()[0] : L(`${n} images`, `${n} 张图片`);
+    if (n === 0) return L("Files are added to the message", "文件会添加到消息中");
+    return n === 1 ? names()[0] : L(`${n} files`, `${n} 个文件`);
   };
-  const ok = () => names().length === 0 || images() > 0;
   return (
     <View testID="drop-target" style={{ position: "absolute", top: 0, right: 0, bottom: 0, left: 0, padding: 12, pointerEvents: "none" }}>
-      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12, borderRadius: 20, borderCurve: "continuous", borderWidth: 2, borderStyle: "dashed", borderColor: ok() ? colors.accent : colors.faint, backgroundColor: alpha(colors.background, 0.88) }}>
-        <View style={{ width: 56, height: 56, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: ok() ? tints.accent : colors.raised }}>
-          <Icon name="image" size={28} tint={ok() ? colors.accent : colors.muted} />
+      <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 12, borderRadius: 20, borderCurve: "continuous", borderWidth: 2, borderStyle: "dashed", borderColor: colors.accent, backgroundColor: alpha(colors.background, 0.88) }}>
+        <View style={{ width: 56, height: 56, borderRadius: 16, alignItems: "center", justifyContent: "center", backgroundColor: tints.accent }}>
+          <Icon name="document" size={26} tint={colors.accent} />
         </View>
         <Text style={{ fontSize: 17, fontWeight: "600", color: colors.text }}>{L("Drop to attach", "松开以添加附件")}</Text>
         <Text testID="drop-detail" style={{ fontSize: 14, color: colors.muted, numberOfLines: 1, maxWidth: 360 }}>{detail()}</Text>

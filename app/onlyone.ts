@@ -1,6 +1,7 @@
 import { displayRev } from "../src/release";
 // onlyone: the server's shapes and the pure logic of the timeline (no UI, no I/O), shared by App.tsx and the tests.
 import { L } from "./i18n";
+import { ATTACH_MAX_COUNT, attachIssue } from "./files";
 import type { MemberView } from "../cloud/src/team";
 
 /** Show the version actually running; source checkouts are never labelled as npm releases. */
@@ -65,6 +66,8 @@ export type TaskInfo = {
   /** state "nohost": what the task needs that no online machine has ("os:windows"). */
   needs?: string;
   started?: string; created?: string; finished?: string; updated?: string; attempt?: string; decision?: string; cli?: string; model?: string;
+  /** The run in progress (or the last one): its `## Run <at>` stamp, which names its process file. */
+  run_at?: string;
   request?: string;
   /** Where the requirement lives: its branch, the worktree it runs in (when it has one), why, and what was committed. */
   branch?: string; worktree?: string; worktree_mode?: string; worktree_why?: string; base_branch?: string;
@@ -265,29 +268,17 @@ export const mediaUrl = (base: string, token: string, path: string) =>
     ? path // a local preview of an image not sent yet
     : `${/^https?:/i.test(path) ? path : base + path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(token)}`;
 
-// ---------------------------------------------------------------- attachments (images the owner sends with a message)
+// ---------------------------------------------------------------- attachments (files the owner sends with a message)
 
-/** An image waiting in the composer (or in a held message): its bytes and a local URL that shows it. */
-export type Attachment = { id: string; name: string; type: string; size: number; file: Blob; preview: string };
+/** A file waiting in the composer (or in a held message): its bytes, and — for an image — a local URL that shows it. */
+export type Attachment = { id: string; name: string; type: string; size: number; file: Blob; /** An image's local preview; "" for any other file. */ preview: string };
 
-export const ATTACH_MAX_BYTES = 10 * 1024 * 1024;
-export const ATTACH_MAX_COUNT = 10;
-const IMAGE_EXT: Record<string, string> = {
-  png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp", heic: "image/heic", heif: "image/heif", bmp: "image/bmp",
-};
-
-/** The image type of a file, from its media type or else its name's extension; null when it is not an image (SVG is not taken). */
-export function imageType(type: string | undefined, name: string): string | null {
-  if (type && /^image\/[\w.+-]+$/i.test(type) && !/svg/i.test(type)) return type.toLowerCase();
-  return IMAGE_EXT[(name.match(/\.(\w+)$/)?.[1] ?? "").toLowerCase()] ?? null;
-}
-
-/** Why a file cannot be attached ("" when it can). */
-export function attachProblem(type: string | null, size: number, count: number): string {
-  if (!type) return L("Only images can be sent", "只能发送图片");
-  if (size > ATTACH_MAX_BYTES) return L("Images must be 10 MB or less", "图片不能超过 10 MB");
-  if (count >= ATTACH_MAX_COUNT) return L(`Up to ${ATTACH_MAX_COUNT} images at a time`, `一次最多发送 ${ATTACH_MAX_COUNT} 张图片`);
-  return "";
+/** Why a file cannot be attached ("" when it can), in the owner's language. */
+export function attachProblem(size: number, count: number): string {
+  const issue = attachIssue(size, count);
+  return issue === "big" ? L("Files must be 10 MB or less", "文件不能超过 10 MB")
+    : issue === "many" ? L(`Up to ${ATTACH_MAX_COUNT} files at a time`, `一次最多发送 ${ATTACH_MAX_COUNT} 个文件`)
+    : "";
 }
 
 /** A `file:` URL as a local path ("file:///Users/a/My%20Shot.png" → "/Users/a/My Shot.png"; Windows drive paths too). */

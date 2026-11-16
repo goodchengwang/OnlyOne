@@ -5,7 +5,7 @@
 //   GET  /api/feed?since=<iso>            → { events: Event[] }        chat timeline (newest last)
 //   GET  /api/stream                      → WebSocket, pushes Event JSON as it happens
 //   POST /api/messages {text, reply_to?, attachments?}  → owner message: answers D-/P-/L- ids, otherwise becomes a task for `lead`
-//   POST /api/uploads (multipart file)    → { url }   (the owner's images for a message: image/*, ≤ 10 MB)
+//   POST /api/uploads (multipart file ×1-10) → { url } / { urls }   (the owner's files for a message: any, ≤ 10 MB)
 //   GET  /api/status                      → queue, decisions, hosts, accounts
 //   POST /api/fleet/update               → every machine updates to the latest code; the primary redeploys the cloud
 //   POST /api/media (multipart file)      → { url }   (workers upload screenshots/recordings here)
@@ -18,7 +18,7 @@ import type { ServerWebSocket } from "bun";
 import { accountsInfo } from "./accounts";
 import { cliCommand, startModel } from "./runner";
 import { type Cfg, DATA, L, P, _commitPush, isEnglish, allowedClis, hostName, locked, list, loadConfig, onlineHosts, readDoc, UPDATE_REQUEST } from "./core";
-import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "../cloud/src/uploads";
+import { MAX_ATTACHMENTS, mediaHeaders, ownerAttachments, uploadFiles, uploadId, uploadProblem, uploadType } from "../cloud/src/uploads";
 import { timingSafeEqual } from "node:crypto";
 import { readable, validPath } from "../cloud/src/files";
 import { channelDigest, channelsView, parseTaskBody, taskHistory, taskInfo } from "../cloud/src/tools";
@@ -156,7 +156,7 @@ export function taskView(path: string, state: string, log: string[]) {
   // queued, but no online machine can run it (a task that needs Windows while none is up): it waits for one, not for a turn
   const needs = state === "inbox" && m.parked && m.requires ? String(m.requires) : undefined;
   if (needs) state = "nohost";
-  return { id: m.id, title: m.title, agent: m.agent, host: m.claimed_by, state, needs, waiting_on: m.waiting_on, wake_at: m.wake_at, started: m.started, created: m.created, cli: m.cli_used, model: m.model,
+  return { id: m.id, title: m.title, agent: m.agent, host: m.claimed_by, state, needs, waiting_on: m.waiting_on, wake_at: m.wake_at, started: m.started, created: m.created, cli: m.cli_used, model: m.model, run_at: m.run_at,
     finished: m.finished, updated: m.finished ?? m.started ?? m.created, attempt: m.attempt, decision: m.decision, request, runs, steps,
     // where the requirement lives: its branch, the worktree when it has one, why, and what was committed there
     branch: m.branch, worktree: m.worktree, worktree_mode: m.worktree_mode, worktree_why: m.worktree_why, base_branch: m.base_branch,
@@ -330,7 +330,7 @@ export async function updateFleet(): Promise<string> {
 }
 const AMEND_MS = 5 * 60_000;
 
-// ---------------------------------------------------------------- the owner's images (attachments of a chat message)
+// ---------------------------------------------------------------- the owner's files (attachments of a chat message)
 // Downloaded next to the data repo (not into it: the repo syncs through git / the Worker's files API, which is no place
 // for screenshots), one directory per message, and named by absolute path in the task so Claude / Codex can open them.
 export const ATTACH_DIR = join(DATA, "..", "attachments");
@@ -341,7 +341,7 @@ export const localMedia: FetchAttachment = async (p) => {
   return existsSync(f) && statSync(f).isFile() ? new Uint8Array(readFileSync(f)) : null;
 };
 
-/** How long images and other media are kept: one of MEDIA_DAYS (settings `media_days`), 7 by default. */
+/** How long files, images and other media are kept: one of MEDIA_DAYS (settings `media_days`), 7 by default. */
 export const MEDIA_DAYS = [7, 14, 30, 90];
 export const mediaDays = (cfg: Cfg) => (MEDIA_DAYS.includes(Number(cfg.media_days)) ? Number(cfg.media_days) : 7);
 
@@ -374,12 +374,12 @@ export async function saveAttachments(key: string, paths: string[], fetchOne: Fe
   return out;
 }
 
-/** The owner's text with the saved images listed for the agent (a message of images only gets a placeholder text). */
+/** The owner's text with the saved files listed for the agent (a message of files only gets a placeholder text). */
 export function withAttachments(text: string, files: string[], missing = 0): string {
   if (!files.length && !missing) return text;
   const lines = files.map((f) => `- ${f}`);
-  if (missing) lines.push(`- (${missing} more image(s) could not be downloaded)`);
-  return `${text.trim() || "(see the attached images)"}\n\nAttached images from the owner (absolute paths on the primary host; open them to see):\n${lines.join("\n")}`;
+  if (missing) lines.push(`- (${missing} more file(s) could not be downloaded)`);
+  return `${text.trim() || "(see the attached files)"}\n\nAttached files from the owner (absolute paths on the primary host; read them to see):\n${lines.join("\n")}`;
 }
 
 export async function handleOwnerMessage(
@@ -469,7 +469,9 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         const f = join(MEDIA, basename(url.pathname));
         if (!existsSync(f)) return json({ error: "not found" }, 404);
         const file = Bun.file(f);
-        return new Response(file, { headers: mediaHeaders(file.type, basename(f)) });
+        // what the bytes are, not what the name says: a photo picked from a phone may have no extension at all
+        const type = uploadType(new Uint8Array(await file.slice(0, 16).arrayBuffer()), file.type, basename(f));
+        return new Response(file, { headers: mediaHeaders(type, basename(f)) });
       }
       if (url.pathname === "/api/feed") return json({ events: feed(url.searchParams.get("since") ?? undefined) });
       if (url.pathname === "/api/status") return json(status());
@@ -533,17 +535,23 @@ export function startServer(cfg: Cfg, onOwnerTask: OwnerTask) {
         await Bun.write(join(MEDIA, name), f);
         return json({ url: `/media/${name}` });
       }
-      if (url.pathname === "/api/uploads" && req.method === "POST") { // the owner's images for a message
-        const f = (await req.formData().catch(() => null))?.get("file") as File | null;
-        if (!f || typeof f === "string") return json({ error: "file required" }, 400);
-        const bytes = new Uint8Array(await f.arrayBuffer());
-        const type = sniffImage(bytes.subarray(0, 16), f.type);
-        const bad = uploadProblem(type, f.size);
-        if (bad) return json({ error: bad.error }, bad.status);
+      if (url.pathname === "/api/uploads" && req.method === "POST") { // the owner's files for a message
+        const files = uploadFiles(await req.formData().catch(() => null));
+        if (!files.length) return json({ error: "file required" }, 400);
+        if (files.length > MAX_ATTACHMENTS) return json({ error: `up to ${MAX_ATTACHMENTS} files at a time` }, 400);
+        // every file is checked before any is stored, so a refused one leaves nothing behind
+        for (const f of files) {
+          const bad = uploadProblem(f.size);
+          if (bad) return json({ error: bad.error }, bad.status);
+        }
         mkdirSync(MEDIA, { recursive: true });
-        const name = uploadId(f.name);
-        await Bun.write(join(MEDIA, name), bytes);
-        return json({ url: `/media/${name}` });
+        const urls: string[] = [];
+        for (const f of files) {
+          const name = uploadId(f.name);
+          await Bun.write(join(MEDIA, name), new Uint8Array(await f.arrayBuffer()));
+          urls.push(`/media/${name}`);
+        }
+        return json(files.length === 1 ? { url: urls[0], urls } : { urls });
       }
       if (url.pathname === "/api/events" && req.method === "POST") return json(appendEvent(await req.json() as Event));
       if (url.pathname === "/api/messages" && req.method === "POST") {

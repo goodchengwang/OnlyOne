@@ -104,6 +104,8 @@ const historyRow = (f: FileRow, folder: string) => {
   const state = folder === "waiting" && m.wake_at ? "parked" : folder === "inbox" && m.parked && m.requires ? "nohost" : folder === "rejected" ? "cancelled" : folder;
   return { id: m.id || f.path.split("/").pop()!.replace(/\.md$/, ""), title: m.title ?? "", agent: m.agent, host: m.claimed_by, state, needs: state === "nohost" ? m.requires : undefined,
     started: m.started, created: m.created, finished: m.finished ?? m.cancelled, updated: m.finished ?? m.cancelled ?? m.started ?? m.created ?? f.updated, attempt: m.attempt, cli: m.cli_used, model: m.model,
+    // the run going on now (or the last one): its `## Run <at>` stamp, which names its process file (cloud/src/runs.ts)
+    run_at: m.run_at,
     // the branch/worktree the requirement works on, so the task page can show it on every client
     branch: m.branch, worktree: m.worktree, worktree_mode: m.worktree_mode, worktree_why: m.worktree_why, base_branch: m.base_branch, commit: m.commit, diff: m.diff, pr: m.pr, pushed: m.pushed, push_error: m.push_error };
 };

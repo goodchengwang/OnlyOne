@@ -34,6 +34,9 @@ test("readable whitelist", () => {
   expect(readable("config.toml")).toBe(false);
   expect(readable("decisions/open/D-2.md")).toBe(false);
   expect(readable("tasks/")).toBe(false);
+  // a run's process is a file the owner's clients read (docs/run-trace.md); the run logs themselves stay machine-only
+  expect(readable("runs/T-0031/2026-11-16T06-16-10Z.json")).toBe(true);
+  expect(readable("logs/runs/T-0031-1-claude.log")).toBe(false);
   expect(readable("policies/../config.toml")).toBe(false);
   expect(prefixEnd("memory/")).toBe("memory0");
 });

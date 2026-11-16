@@ -26,7 +26,7 @@ const PAGE_BYTES = 8_000_000;               // response budget for one changes p
 const PAGE_ROWS = 1000;
 const HISTORY_DAYS = 90, HISTORY_ROWS = 20_000, HISTORY_PER_PATH = 30;
 export { latestOnly };
-const LATEST_ONLY_SQL = `(path LIKE 'journal/%' OR path LIKE 'logs/%' OR path LIKE 'fleet/%' OR path IN ('memory/lessons.md', 'memory/judge-feedback.md'))`;
+const LATEST_ONLY_SQL = `(path LIKE 'journal/%' OR path LIKE 'logs/%' OR path LIKE 'fleet/%' OR path LIKE 'runs/%' OR path IN ('memory/lessons.md', 'memory/judge-feedback.md'))`;
 
 import { TARGET, latestOnly } from "./budget";
 import { MEMBER_ID, avatarResponse } from "./team";
@@ -115,7 +115,7 @@ export function pruneHistory(sql: FilesSql, now = Date.now(), dbBytes = 0) {
 }
 
 /** Prefixes the owner session may read (rules, memory, agent profiles, closed decisions). Never config / secrets. */
-export const READABLE = ["policies/", "memory/", "agents/", "decisions/closed/", "reports/", "projects/"] as const;
+export const READABLE = ["policies/", "memory/", "agents/", "decisions/closed/", "reports/", "projects/", "runs/"] as const;
 export const readable = (p: unknown): p is string => validPath(String(p ?? "").replace(/\/$/, "") || "x") && READABLE.some((r) => String(p).startsWith(r));
 /** Exclusive upper bound for a prefix range scan on the primary key: "a/" → "a0". */
 export const prefixEnd = (p: string) => p.slice(0, -1) + String.fromCharCode(p.charCodeAt(p.length - 1) + 1);

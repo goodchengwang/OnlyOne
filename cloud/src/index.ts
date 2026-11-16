@@ -5,7 +5,7 @@
 // Client API (same shape as the local onlyone server):
 //   GET /api/feed?since=  · WS /api/stream?token=  · POST /api/messages {text, reply_to?, attachments?: ["/media/<id>"]}
 //   GET /api/status  · GET|PUT /api/settings  · POST /api/media (multipart) · GET /media/<id>
-//   POST /api/uploads (multipart `file`; the owner's images for a message: image/*, ≤ 10 MB) → {url: "/media/<id>"}
+//   POST /api/uploads (multipart `file` ×1-10; the owner's files for a message: any, ≤ 10 MB) → {url} / {urls}
 // Fleet API (primary host):
 //   POST /api/events (event)  · PUT /api/host/state {status, settings}  · GET /api/host/inbox?after=<seq>
 //   POST /api/host/revoke-sessions (ONLYONE_TOKEN only)
@@ -25,7 +25,7 @@ import { SIDE_CONV, SIDE_TEXT_MAX, addSideMessage, answerSide, emptySide, parseS
 import { CODE_RE, newCode, normCode } from "./authcode";
 import { claimPrimary } from "./bootstrap";
 import { sendResend } from "./resend";
-import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
+import { MAX_ATTACHMENTS, mediaHeaders, ownerAttachments, uploadFiles, uploadId, uploadProblem, uploadType } from "./uploads";
 import { GUEST_TOKEN, guestApi, guestJoin, guestWho, guestsAdmin, initGuestSchema } from "./guests";
 
 import { sendPush, type PushSub, type Vapid } from "./push";
@@ -764,18 +764,27 @@ export class OnlyOne extends DurableObject<Env> {
       return json({ ok: true });
     }
 
-    // The owner's images for a message (paste / drop / pick in the app): images only, ≤ 10 MB, kept with the media.
+    // The owner's files for a message (paste / drop / pick in the app): any file, ≤ 10 MB, up to ten in one request,
+    // kept with the media and served as downloads unless they are something a browser may render (see mediaHeaders).
     if (p === "/api/uploads" && m === "POST") {
-      const f = (await req.formData().catch(() => null))?.get("file") as File | null;
-      if (!f || typeof f === "string") return json({ error: "file required" }, 400);
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      const type = sniffImage(bytes.subarray(0, 16), f.type);
-      const bad = uploadProblem(type, f.size);
-      if (bad) return json({ error: bad.error }, bad.status);
-      const id = uploadId(f.name);
-      for (let i = 0, n = 0; i < bytes.length; i += CHUNK, n++)
-        this.sql.exec("INSERT INTO media (id, n, type, data) VALUES (?, ?, ?, ?)", id, n, type, bytes.slice(i, i + CHUNK));
-      return json({ url: `/media/${id}` });
+      const files = uploadFiles(await req.formData().catch(() => null));
+      if (!files.length) return json({ error: "file required" }, 400);
+      if (files.length > MAX_ATTACHMENTS) return json({ error: `up to ${MAX_ATTACHMENTS} files at a time` }, 400);
+      // every file is checked before any is stored, so a refused one leaves nothing behind
+      for (const f of files) {
+        const bad = uploadProblem(f.size);
+        if (bad) return json({ error: bad.error }, bad.status);
+      }
+      const urls: string[] = [];
+      for (const f of files) {
+        const bytes = new Uint8Array(await f.arrayBuffer());
+        const type = uploadType(bytes.subarray(0, 16), f.type, f.name);
+        const id = uploadId(f.name);
+        for (let i = 0, n = 0; i < bytes.length; i += CHUNK, n++)
+          this.sql.exec("INSERT INTO media (id, n, type, data) VALUES (?, ?, ?, ?)", id, n, type, bytes.slice(i, i + CHUNK));
+        urls.push(`/media/${id}`);
+      }
+      return json(files.length === 1 ? { url: urls[0], urls } : { urls });
     }
 
     if (p === "/api/status") return json(this.statusView());

@@ -4,7 +4,7 @@ import type { Acts } from "./brain";
 import { HOME_DIR, L, P, _commitPush, _pull, journal, loadConfig, locked } from "./core";
 import { runAgent } from "./runner";
 import { MAX_AVATAR, MEMBER_ID, type MemberView } from "../cloud/src/team";
-import { sniffImage, uploadProblem } from "../cloud/src/uploads";
+import { isImageBytes } from "../cloud/src/uploads";
 import { writeOp } from "../cloud/src/tools";
 import { localStore } from "./brain";
 
@@ -43,8 +43,7 @@ Do not modify any other project or configuration. End with the saved path.`, dir
 
 async function prepareAvatar(path: string): Promise<Uint8Array> {
   let data = new Uint8Array(readFileSync(path));
-  const bad = uploadProblem(sniffImage(data), data.length);
-  if (bad) throw new Error(bad.error);
+  if (!isImageBytes(data)) throw new Error("an avatar must be an image");
   // shortcut: macOS has a built-in image resizer; other hosts accept images within the sync limit.
   if (Bun.which("sips")) {
     mkdirSync(HOME_DIR, { recursive: true });
@@ -86,8 +85,7 @@ export function teamActs(host: string, io: {
       } else if (op.generate_avatar === true || op.avatar_prompt || (isNew && op.generate_avatar !== false)) {
         io.report?.(L(`Generating ${op.name ?? op.id}'s avatar with Codex…`, `正在通过 Codex 为${op.name ?? op.id}生成头像…`));
         avatar = await (io.generate ?? generateAvatar)(op.name ?? op.id, op.role ?? "", op.avatar_prompt ?? "");
-        const bad = uploadProblem(sniffImage(avatar), avatar.length);
-        if (bad || avatar.length > MAX_AVATAR) throw new Error(bad?.error ?? "Avatar exceeds 1.5 MB");
+        if (!isImageBytes(avatar) || avatar.length > MAX_AVATAR) throw new Error("Avatar must be an image of at most 1.5 MB");
       }
       return locked(async () => {
         await pull();
