@@ -5,7 +5,7 @@
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { HOME_DIR, L, type Cfg } from "./core";
+import { HOME_DIR, L, P, list, readDoc, type Cfg } from "./core";
 
 export type GitRepo = { root: string; branch: string; base: string };
 export type Worktree = { path: string; branch: string; base: string; repo: string };
@@ -146,4 +146,26 @@ export function decideWorktree(i: { meta: Record<string, string>; cfg: Cfg; busy
   if (i.busyRepo) return { use: true, why: L("Another task is working in this repo, so this one gets its own worktree", "同一仓库已有任务在跑，这个需求用独立 worktree，互不阻塞") };
   if (meta.worktree_mode === "main") return { use: false, why: meta.worktree_why || "" };
   return { use: false, why: "" };
+}
+
+/**
+ * Tasks that are still alive — queued, running, waiting on a condition, or blocked on a card — with the branch and
+ * checkout they hold. Their work is not finished: a checkout can hold uncommitted edits and is somebody's working
+ * directory right now, so no run may clean these up, even when the diff looks fully merged (T-0042).
+ */
+export type LiveWorktree = { id: string; title: string; state: "running" | "queued" | "waiting" | "blocked"; branch?: string; worktree?: string; host?: string };
+
+const LIVE_FOLDERS = [["active", "running"], ["inbox", "queued"], ["waiting", "waiting"], ["blocked", "blocked"]] as const;
+
+export function liveWorktrees(tasksDir = P("tasks"), excludeId?: string): LiveWorktree[] {
+  const out: LiveWorktree[] = [];
+  for (const [folder, state] of LIVE_FOLDERS)
+    for (const path of list(join(tasksDir, folder), /^T-.*\.md$/)) {
+      const { meta } = readDoc(path);
+      if (!meta.id || meta.id === excludeId) continue;
+      out.push({ id: meta.id, title: meta.title ?? "", state,
+        ...(meta.branch ? { branch: meta.branch } : {}), ...(meta.worktree ? { worktree: meta.worktree } : {}),
+        ...((meta.claimed_by || meta.host) && meta.host !== "any" ? { host: meta.claimed_by || meta.host } : {}) });
+    }
+  return out.sort((a, b) => a.id.localeCompare(b.id));
 }
