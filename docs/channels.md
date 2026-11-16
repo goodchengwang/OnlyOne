@@ -6,7 +6,7 @@ Definitions live in `channels/<slug>.md`; tasks carry a comma-separated `channel
 
 The sidebar shows unread **messages**, using the same per-event state as the main chat and task pages. Opening an item marks its messages read in every view on that device. Opening a channel alone does not mark unseen results read. The account menu shows the total unread count and offers **Mark all as read**. The old main-chat timestamp migrates into this state once. Read state is local to each device.
 
-Channel views show tasks, their decision cards, and existing Markdown reports referenced by those tasks, newest first. The owner can edit goals and archive or restore channels. Seven quiet days mark a channel idle. Routine multi-project results must use a separate line for each topic so the owner can find a project's result.
+Channel views show tasks, their decision cards, and existing Markdown reports referenced by those tasks, newest first. A card raised for a channel's work carries that channel: picking it in **Needs your decision**, a notification or the tray opens that channel scrolled to the card, never the main chat, where such a card is not shown at all. The owner can edit goals and archive or restore channels. Seven quiet days mark a channel idle. Routine multi-project results must use a separate line for each topic so the owner can find a project's result.
 
 ## Traffic budget
 
