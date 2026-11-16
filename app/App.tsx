@@ -45,7 +45,8 @@ import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, insta
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
 import * as nshUpdater from "nsh/updater";
 import { CLIENT_VERSION } from "./version";
-import { executor, hasExecutor, type ExecutorAction, type DesktopStatus } from "./executor";
+import { executor, executorTools, hasExecutor, type ExecutorAction, type DesktopStatus } from "./executor";
+import { MissingExecutorTools, needsExecutorTools, type ExecutorTools } from "./executor-setup";
 import { ExecutorSettings, type ExecutorControl } from "./executor-settings";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf as memberAvatar } from "./avatars";
@@ -5110,6 +5111,16 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   };
 
   return (
+    <View style={{ flex: 1 }}>
+    <If when={props.service.error()}>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: tints.danger }}>
+        <Text style={{ flex: 1, color: colors.danger }}>{props.service.error()}</Text>
+        <Button testID="executor-error-action" label={props.service.requiresInstall() ? L("Go to install", "前往安装") : L("Retry", "重试")} onPress={() => {
+          if (props.service.requiresInstall()) { settings.tab.set("version"); show({ name: "team" }); }
+          else void props.service.retry();
+        }} />
+      </View>
+    </If>
     <View
       testID="drop-window"
       onFileDragEnter={(e?: { uris?: string[] }) => dropping.set(e?.uris ?? [])}
@@ -5207,6 +5218,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
       <If when={dropping()}>
         {(files) => <DropTarget files={files()} />}
       </If>
+    </View>
     </View>
   );
 }
@@ -5482,23 +5494,38 @@ function Login(props: { url: string; served: boolean; email: string; notice?: st
 function Connected(props: { config: Config; openRef: string | null; onExpired: () => void; onLogout: () => void; onTray: (chat: TrayChat | null) => void }) {
   const onlyone = createOnlyOne(props.config);
   const executorError = signal("");
+  const executorMissing = signal(false);
   const executorState = signal<DesktopStatus | null>(null);
-  const executorBusy = signal<ExecutorAction | null>(null);
+  const executorBusy = signal<ExecutorAction | "install" | null>(null);
+  const tools = signal<ExecutorTools | null>(null);
   let retryAction: ExecutorAction = "start";
   const refreshExecutor = () => {
     if (!hasExecutor || untracked(executorBusy)) return;
+    executorTools().then((value) => { if (!untracked(executorBusy)) tools.set(value); }).catch((error) => { if (!untracked(executorBusy)) executorError.set(error instanceof Error ? error.message : String(error)); });
     executor("status", props.config).then((s) => { if (!untracked(executorBusy)) executorState.set(s); }).catch(() => { if (!untracked(executorError)) executorError.set(L("Could not read the background service status. Please retry.", "无法读取后台服务状态，请重试。")); });
   };
   const runExecutor = async (action: ExecutorAction): Promise<boolean> => {
     if (untracked(executorBusy)) return false;
     retryAction = action;
     executorError.set("");
+    executorMissing.set(false);
     executorBusy.set(action);
     try { executorState.set(await executor(action, props.config)); return true; }
-    catch (error) { executorError.set(error instanceof Error ? error.message : L("Could not change the background service. Please retry.", "后台服务操作未完成，请重试。")); return false; }
+    catch (error) { executorMissing.set(error instanceof MissingExecutorTools); executorError.set(error instanceof Error ? error.message : L("Could not change the background service. Please retry.", "后台服务操作未完成，请重试。")); return false; }
     finally { executorBusy.set(null); if (action === "start" || action === "stop") refreshExecutor(); }
   };
-  const service: ExecutorControl = { state: executorState, busy: executorBusy, error: executorError, run: runExecutor, refresh: refreshExecutor };
+  const installExecutorTools = async () => {
+    if (untracked(executorBusy)) return;
+    executorBusy.set("install");
+    executorError.set("");
+    let installed = false;
+    try { tools.set(await executorTools(true)); installed = true; }
+    catch (error) { executorError.set(error instanceof Error ? error.message : String(error)); }
+    finally { executorBusy.set(null); }
+    if (installed) await runExecutor("start");
+    else refreshExecutor();
+  };
+  const service: ExecutorControl = { state: executorState, busy: executorBusy, error: executorError, run: runExecutor, retry: () => runExecutor(retryAction), requiresInstall: () => tools() ? needsExecutorTools(tools()!) : executorMissing(), refresh: refreshExecutor, tools, install: installExecutorTools };
   if (hasExecutor) {
     void runExecutor("start");
     let active = lifecycle() === "active";
@@ -5523,13 +5550,6 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
     if (onlyone.conn() === "unauthorized") props.onExpired();
   });
   return (
-    <View style={{ flex: 1 }}>
-    <If when={executorError()}>
-      <View style={{ flexDirection: "row", alignItems: "center", gap: 12, padding: 12, backgroundColor: tints.danger }}>
-        <Text style={{ flex: 1, color: colors.danger }}>{executorError()}</Text>
-        <Button label={L("Retry", "重试")} onPress={() => void runExecutor(retryAction)} />
-      </View>
-    </If>
     <Chat
       service={service}
       onlyone={onlyone}
@@ -5548,7 +5568,6 @@ function Connected(props: { config: Config; openRef: string | null; onExpired: (
         props.onLogout();
       }}
     />
-    </View>
   );
 }
 

@@ -30,7 +30,7 @@ test.skipIf(process.platform !== "win32")("Windows desktop invokes the npm cmd s
     writeFileSync(script, 'console.log(process.argv.slice(2).join(" ")); process.stdout.write(await Bun.stdin.text());');
     writeFileSync(join(bin, "onlyone.cmd"), `@echo off\r\n"${process.execPath}" "${script}" %*\r\n`);
     const command = executorCommand("windows", "C:\\not-a-source-checkout", false);
-    const child = Bun.spawn([command.command, ...command.args], { env: { ...process.env, APPDATA: home }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+    const child = Bun.spawn([command.command, ...command.args], { env: { ...process.env, USERPROFILE: home, APPDATA: home }, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
     child.stdin.write('{"session":"test-secret"}'); child.stdin.end();
     const output = await new Response(child.stdout).text();
     const error = await new Response(child.stderr).text();
