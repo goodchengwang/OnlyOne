@@ -2067,3 +2067,126 @@ test("projects: the dialog fits a narrow phone sidebar", async () => {
   expect(app.shows("请在 Mac App 中选择项目文件夹。")).toBe(true);
   await app.press("id:project-cancel");
 });
+
+describe("side chat", () => {
+  const transcript = (conv: string) => ({
+    conv,
+    messages: [
+      { id: "m1", role: "owner", text: "先把 side 聊天的边界想清楚", ts: ts(1) },
+      { id: "a1", role: "agent", text: "它是一个**只读**的私人对话，见 `docs/side-chat.md`。", ts: ts(2) },
+    ],
+    updated: ts(2),
+  });
+  const sideNet = (sent: any[], pushed: any[], conv = "main", extra: Record<string, unknown> = {}) => ({
+    ...onlyone(pushed),
+    [`GET ${URL}/api/side?*`]: { body: transcript(conv) },
+    [`POST ${URL}/api/side`]: (r: { body?: string | null }) => {
+      const m = JSON.parse(r.body!);
+      sent.push(m);
+      return { body: {
+        conv: m.conv,
+        messages: [...transcript(m.conv).messages, { id: m.client_id, role: "owner", text: m.text, ts: ts(3) }],
+        pending: { id: "s-1", at: ts(3) },
+        updated: ts(3),
+      } };
+    },
+    [`DELETE ${URL}/api/side?*`]: { body: { conv, messages: [], updated: ts(4) } },
+    ...extra,
+  });
+
+  test("the panel is a private chat beside the conversation: send, answer, and it never touches the feed", async () => {
+    const sent: any[] = [], pushed: any[] = [];
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 1280, height: 900, platform: "macos", network: sideNet(sent, pushed) });
+    await app.waitFor("id:composer");
+    expect(app.shows("id:side-chat")).toBe(false);
+    await app.press("id:side-toggle");
+    await app.waitFor("id:side-chat");
+    await app.waitFor("text:/只读/");
+    expect(app.shows("id:side-beside")).toBe(true);
+    await app.type("id:side-composer", "这个功能和任务是什么关系");
+    await app.press("id:side-send");
+    await app.waitUntil(() => sent.length === 1);
+    expect(sent[0]).toMatchObject({ conv: "main", text: "这个功能和任务是什么关系" });
+    await app.waitFor("text:/这个功能和任务是什么关系/");
+    await app.waitFor("id:side-pending");
+    // nothing here becomes a chat message
+    expect(pushed.length).toBe(0);
+    await app.press("id:side-close");
+    await app.waitUntil(() => !app.shows("id:side-chat"));
+  });
+
+  test("pushing an answer into the main conversation sends it as the owner's message", async () => {
+    const sent: any[] = [], pushed: any[] = [];
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 1280, height: 900, platform: "macos", network: sideNet(sent, pushed) });
+    await app.waitFor("id:composer");
+    await app.press("id:side-toggle");
+    await app.waitFor("id:side-chat");
+    await app.press("id:side-push");
+    await app.waitFor("id:side-push-text");
+    expect(app.value("id:side-push-text")).toContain("只读");
+    // the dialog starts from the answer and the owner edits it before it goes in
+    await app.clear("id:side-push-text");
+    await app.type("id:side-push-text", "把 side 聊天做出来");
+    await app.press("id:side-push-confirm");
+    await app.waitUntil(() => pushed.length === 1, { timeout: 10_000 });
+    expect(pushed[0]).toMatchObject({ text: "把 side 聊天做出来" });
+    expect(pushed[0].thread).toBeUndefined();
+    await app.waitFor("text:/把 side 聊天做出来/");
+    expect(app.shows("id:side-chat")).toBe(false);
+  });
+
+  test("a channel's side chat is its own, and a push lands in that channel", async () => {
+    const sent: any[] = [], pushed: any[] = [];
+    const chans = [{ slug: "nsh-i18n", name: "NSH i18n", goal: "NSH 多语言", status: "active", created: ts(-900), last_activity: ts(5), stale: false, count: 0, refs: [], items: [] }];
+    const app = await open("./App.tsx", {
+      storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 1280, height: 900, platform: "macos",
+      network: sideNet(sent, pushed, "ch:nsh-i18n", { [`GET ${URL}/api/channels`]: { body: { channels: chans } }, [`GET ${URL}/api/channels/feed?*`]: { body: { events: [] } } }),
+    });
+    await app.waitFor("id:side-channel-nsh-i18n");
+    await app.press("id:side-channel-nsh-i18n");
+    await app.waitFor("id:side-toggle");
+    await app.press("id:side-toggle");
+    await app.waitFor("id:side-chat");
+    expect(app.shows("text:/# NSH i18n/")).toBe(true);
+    await app.press("id:side-push");
+    await app.waitFor("id:side-push-text");
+    await app.press("id:side-push-confirm");
+    await app.waitUntil(() => pushed.length === 1, { timeout: 10_000 });
+    expect(pushed[0]).toMatchObject({ channel: "nsh-i18n" });
+  });
+
+  test("a task's side chat reads in the task and a push is a follow-up in its thread", async () => {
+    const sent: any[] = [], pushed: any[] = [];
+    const task = { id: "T-0005", title: "修复登录页", agent: "lead", state: "active", events: [] };
+    const app = await open("./App.tsx", {
+      storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 1280, height: 900, platform: "macos",
+      network: sideNet(sent, pushed, "task:T-0005", { [`GET ${URL}/api/tasks/get?*`]: { body: task } }),
+    });
+    await app.waitFor("id:composer");
+    await app.press("id:task-chip-T-0005 >> nth=0");
+    await app.waitFor("id:task-page");
+    await app.press("id:side-toggle");
+    await app.waitFor("id:side-chat");
+    expect(app.shows("text:T-0005")).toBe(true);
+    await app.press("id:side-push");
+    await app.waitFor("id:side-push-text");
+    await app.press("id:side-push-confirm");
+    await app.waitUntil(() => pushed.length === 1, { timeout: 10_000 });
+    expect(pushed[0]).toMatchObject({ reply_to: "T-0005", thread: true });
+  });
+
+  test("on a phone the panel is a full sheet and can be cleared", async () => {
+    const sent: any[] = [], pushed: any[] = [];
+    const deletes: string[] = [];
+    const net = sideNet(sent, pushed, "main", { [`DELETE ${URL}/api/side?*`]: (r: { url: string }) => { deletes.push(r.url); return { body: { conv: "main", messages: [], updated: ts(4) } }; } });
+    const app = await open("./App.tsx", { storage: { ...STORAGE, "onlyone.lang": "zh" }, width: 390, height: 844, platform: "ios", network: net });
+    await app.waitFor("id:composer");
+    await app.press("id:side-toggle");
+    await app.waitFor("id:side-sheet");
+    await app.waitFor("text:/只读/");
+    await app.press("id:side-clear");
+    await app.waitUntil(() => deletes.length === 1);
+    await app.waitUntil(() => !app.shows("text:/只读/"));
+    expect(app.shows("id:side-composer")).toBe(true);
+  });
+});

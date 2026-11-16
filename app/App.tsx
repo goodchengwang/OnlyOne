@@ -51,6 +51,7 @@ import { ExecutorSettings, type ExecutorControl } from "./executor-settings";
 import { createSettingsToast, SettingsToast } from "./settings-toast";
 import { agentDisplayName, avatarOf as memberAvatar } from "./avatars";
 import type { MemberView } from "../cloud/src/team";
+import { type SideChat, sideConv } from "../cloud/src/side";
 const memberProfiles = signal<MemberView[]>([]);
 const avatarOf = (from: string) => memberAvatar(from, memberProfiles());
 import { CheckMark } from "./ui/icons";
@@ -249,6 +250,8 @@ const OFFLINE_AFTER = 5;
 function createOnlyOne(cfg: Config) {
   const events = signal<OnlyOneEvent[]>([]);
   const status = signal<Status | null>(null);
+  /** Side chats by conversation key; the newest pushed transcript wins (the panel reads only its own). */
+  const sides = signal<Record<string, SideChat>>({});
   const conn = signal<Conn>("connecting");
   const blockedIp = signal("");
   const loaded = signal(false);
@@ -307,8 +310,9 @@ function createOnlyOne(cfg: Config) {
     };
     ws.onmessage = (m: { data: unknown }) => {
       try {
-        const d = JSON.parse(String(m.data)) as OnlyOneEvent & { $status?: Status };
+        const d = JSON.parse(String(m.data)) as OnlyOneEvent & { $status?: Status; $side?: SideChat };
         if (d.$status) acceptStatus(d.$status);
+        else if (d.$side) sides.update((m2) => ({ ...m2, [d.$side!.conv]: d.$side! }));
         else events.update((evs) => merge(evs, [d]));
       } catch {
         /* not JSON */
@@ -381,6 +385,20 @@ function createOnlyOne(cfg: Config) {
     }
   }
 
+  // A side chat (docs/side-chat.md): a scratch conversation beside main / ch:<slug> / task:<T-id>.
+  // It is stored beside the feed, never in it, so nothing here is history or unread.
+  async function sideGet(conv: string): Promise<{ chat: SideChat | null; status: number }> {
+    const r = await api("GET", `/api/side?conv=${encodeURIComponent(conv)}`);
+    return { chat: r.ok && r.data.conv ? (r.data as unknown as SideChat) : null, status: r.status };
+  }
+  async function sideSend(conv: string, text: string, clientId?: string): Promise<{ chat: SideChat | null; status: number }> {
+    const r = await api("POST", "/api/side", { conv, text, ...(clientId ? { client_id: clientId } : {}) });
+    return { chat: r.ok && r.data.conv ? (r.data as unknown as SideChat) : null, status: r.status };
+  }
+  async function sideClear(conv: string) {
+    await api("DELETE", `/api/side?conv=${encodeURIComponent(conv)}`);
+  }
+
   loadFeed().then(stream);
   loadStatus();
   // the socket pushes the dashboard; only without it does the app poll, and slowly (Cloudflare free plan)
@@ -392,7 +410,7 @@ function createOnlyOne(cfg: Config) {
     clearTimeout(retry);
     socket?.close();
   };
-  return { events, status, conn, blockedIp, loaded, send, settings, api, logout, dispose, cfg };
+  return { events, status, sides, conn, blockedIp, loaded, send, settings, api, sideGet, sideSend, sideClear, logout, dispose, cfg };
 }
 type OnlyOne = ReturnType<typeof createOnlyOne>;
 
@@ -752,6 +770,8 @@ function ImagePager(props: { onlyone: OnlyOne; paths: string[]; start: number; o
 /** The report open in the chat's reader pane: one at a time, shared by every file card in the timeline. */
 type DocRef = { src: string; name: string; at?: string };
 const reading = signal<DocRef | null>(null);
+/** The side chat beside the conversation (docs/side-chat.md): open or shut, and it moves with the conversation. */
+const sideChatOpen = signal(false);
 /** The page the reader belongs to (a channel or a task); a report opened on one page never shows on another. */
 const readerAt = signal("");
 /** Report bodies already fetched, so reopening or switching back is instant. Bounded, newest kept; a failed one loads again when reopened or retried. */
@@ -878,6 +898,199 @@ function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpan
 }
 
 
+// ---------------------------------------------------------------- side chat
+
+/**
+ * The side chat beside a conversation (docs/side-chat.md): a private scratch chat with an agent that can read this
+ * project, kept out of the conversation's history, whose answer can be pushed in as a message when the owner is done.
+ */
+function SideChatPane(props: {
+  onlyone: OnlyOne;
+  /** The conversation it sits beside ("main" / "ch:<slug>" / "task:<T-id>"), as a getter so it follows navigation. */
+  conv: () => string;
+  /** What it sits beside: "主会话", "# OnlyOne releases", "T-0031 …". */
+  title: () => string;
+  wide: boolean;
+  onClose: () => void;
+  /** Send the edited text into the conversation it sits beside. */
+  onPush: (text: string) => void;
+}) {
+  const chat = signal<SideChat | null>(null);
+  const note = signal("");
+  const draft = signal("");
+  const busy = signal(false);
+  const pushing = signal(false);
+  const pushText = signal("");
+  let page: ScrollRef | undefined;
+  const toEnd = (animated = false) => setTimeout(() => page?.scrollToEnd({ animated }), 30);
+
+  const apply = (c: SideChat | null) => {
+    if (!c || c.conv !== props.conv()) return;
+    chat.set(c);
+    note.set("");
+    toEnd(true);
+  };
+
+  // Read the transcript when the panel opens or the conversation changes, then follow the pushed frames (this panel
+  // only ever reads its own conversation's).
+  effect(() => {
+    const conv = props.conv();
+    chat.set(null);
+    note.set("");
+    untracked(async () => {
+      const r = await props.onlyone.sideGet(conv);
+      if (untracked(() => props.conv()) !== conv) return;
+      if (r.chat) apply(r.chat);
+      else note.set(L(`Couldn’t open the side chat (${r.status})`, `侧边聊天打不开（${r.status}）`));
+    });
+  });
+  effect(() => {
+    const pushed = props.onlyone.sides()[props.conv()];
+    if (pushed) apply(pushed);
+  });
+
+  const messages = () => chat()?.messages ?? [];
+  const pending = () => chat()?.pending ?? null;
+  // A side turn can take a few minutes. Show how long it has been, so a turn whose computer went away never looks
+  // like a thinking one; the interval is local, it asks the server nothing.
+  const tick = signal(0);
+  effect(() => {
+    if (!pending()) return;
+    const t = setInterval(() => tick.update((n) => n + 1), 30_000);
+    cleanup(() => clearInterval(t));
+  });
+  const waited = () => (tick(), pending()?.at ? Math.floor((Date.now() - Date.parse(pending()!.at)) / 60_000) : 0);
+  /** What Push starts from: the newest answer. */
+  const lastAnswer = () => [...messages()].reverse().find((m) => m.role === "agent" && !m.error)?.text ?? "";
+
+  const ask = async () => {
+    const text = draft().trim();
+    if (!text || busy() || pending()) return;
+    draft.set("");
+    busy.set(true);
+    note.set("");
+    // one request each way; the transcript comes back with the owner message and the pending turn
+    const r = await props.onlyone.sideSend(props.conv(), text, `side:${crypto.randomUUID()}`);
+    busy.set(false);
+    if (r.chat) apply(r.chat);
+    else note.set(L(`Couldn’t send (${r.status})`, `发送失败（${r.status}）`));
+  };
+
+  const clear = async () => {
+    const conv = props.conv();
+    await props.onlyone.sideClear(conv);
+    apply({ conv, messages: [], updated: new Date().toISOString() });
+  };
+
+  const push = () => {
+    const text = pushText().trim();
+    if (!text) return;
+    pushing.set(false);
+    props.onPush(text);
+  };
+
+  const btn = (p: { id: string; icon: IconName; label: string; disabled?: boolean; onPress: () => void }) => (
+    <IconButton testID={p.id} icon={p.icon} label={p.label} size="sm" disabled={p.disabled} onPress={p.onPress} />
+  );
+  return (
+    <View testID="side-chat" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>
+      <View
+        desktop={props.wide ? { windowDrag: true } : undefined}
+        style={{ flexDirection: "row", alignItems: "center", gap: 2, height: size.bar, paddingLeft: 14, paddingRight: (props.wide && hasWindow ? titleBar().right : 0) + 8, borderBottomWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}
+      >
+        <Icon name="chat" size={16} tint={colors.muted} />
+        <View style={{ flex: 1, minWidth: 0, marginLeft: 8, marginRight: 4 }}>
+          <Text testID="side-title" style={{ fontSize: 13.5, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{L("Side chat", "侧边聊天")}</Text>
+          <Text testID="side-beside" style={{ fontSize: 11.5, color: colors.faint, numberOfLines: 1 }}>{props.title()}</Text>
+        </View>
+        {btn({ id: "side-clear", icon: "trash", label: L("Clear side chat", "清空侧边聊天"), disabled: !messages().length && !pending(), onPress: () => void clear() })}
+        <Button testID="side-push" variant="ghost" size="sm" icon="arrow-up" label={L("Push", "放进会话")} disabled={!lastAnswer() || !!pending() || busy()} onPress={() => { pushText.set(lastAnswer()); pushing.set(true); }} />
+        {btn({ id: "side-close", icon: "close", label: L("Close side chat", "关闭侧边聊天"), onPress: props.onClose })}
+      </View>
+      <Scroll ref={(r) => (page = r)} style={{ flex: 1 }} contentStyle={{ paddingTop: 12, paddingBottom: 16 }}>
+        <View style={{ width: "100%", maxWidth: 720, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 16 : 12 }}>
+          <If when={!messages().length && !pending() && !note()}>
+            <Text style={{ fontSize: 13.5, lineHeight: 19, color: colors.faint, paddingTop: 8 }}>
+              {L("A private chat with an agent that can read this project. Nothing here is posted to the conversation or becomes work — push the result in when you are ready.",
+                "这里是一个能读项目的私人对话：不会进入会话，也不会变成任务，聊完可以一键把结论放进会话。")}
+            </Text>
+          </If>
+          <Each of={messages()}>
+            {(m) => (
+              <If
+                when={m().role === "owner"}
+                else={
+                  <View testID={`side-answer-${m().id}`} style={{ width: "100%", minWidth: 0, paddingVertical: 2 }}>
+                    <If when={m().error} else={<Rich text={m().text} muted={false} />}>
+                      <Text style={{ fontSize: 14, lineHeight: 20, color: colors.danger, userSelect: "text" }}>{m().text}</Text>
+                    </If>
+                  </View>
+                }
+              >
+                <View style={{ flexDirection: "row", justifyContent: "flex-end" }}>
+                  <View testID={`side-ask-${m().id}`} style={{ maxWidth: "86%", minWidth: 0, paddingHorizontal: 12, paddingVertical: 7, borderRadius: 16, borderBottomRightRadius: 6, backgroundColor: tints.accent }}>
+                    <Text style={{ fontSize: 15, lineHeight: 21, color: colors.text, userSelect: "text" }}>{m().text}</Text>
+                  </View>
+                </View>
+              </If>
+            )}
+          </Each>
+          <If when={pending()}>
+            {(p) => (
+              <View testID="side-pending" style={{ flexDirection: "row", alignItems: "center", gap: 8, paddingVertical: 4 }}>
+                <Spinner size={13} tint={colors.muted} />
+                <Text style={{ flex: 1, minWidth: 0, fontSize: 13, lineHeight: 18, color: colors.muted, numberOfLines: 2 }}>
+                  {`${p().step ? L(`Working · ${p().step}`, `进行中 · ${p().step}`) : L("Thinking…", "思考中…")}${waited() >= 1 ? ` · ${waited()} min` : ""}`}
+                </Text>
+              </View>
+            )}
+          </If>
+          <If when={note()}>
+            <Text testID="side-note" style={{ fontSize: 13, color: colors.danger }}>{note()}</Text>
+          </If>
+        </View>
+      </Scroll>
+      <View style={{ paddingHorizontal: props.wide ? 16 : 10, paddingTop: 4, paddingBottom: props.wide ? 12 : 10 }}>
+        <View style={{ flexDirection: "row", alignItems: "flex-end", gap: 8, paddingLeft: 14, paddingRight: 6, paddingVertical: 6, ...composerGlass() }}>
+          <Input
+            testID="side-composer"
+            multiline
+            value={draft()}
+            onChange={({ value }) => draft.set(value)}
+            submitBehavior={touch ? "newline" : "submit"}
+            onSubmit={() => void ask()}
+            placeholder={L("Ask, or refine a request…", "问点什么，或先把需求想清楚…")}
+            class="placeholder:text-faint"
+            style={{ flex: 1, minHeight: 34, maxHeight: 140, paddingVertical: 7, fontSize: 15, lineHeight: 21, color: colors.text, borderWidth: 0, backgroundColor: "transparent" }}
+          />
+          <IconButton variant="primary" icon="arrow-up" label={L("Send", "发送")} shortcut="Enter" testID="side-send" disabled={!draft().trim() || busy() || !!pending()} onPress={() => void ask()} />
+        </View>
+      </View>
+      <Dialog testID="side-push-dialog" open={pushing()} animation="fade" onOpenChange={({ open }) => !open && pushing.set(false)} backdropClass="bg-scrim" style={{ flex: 1, alignItems: "center", justifyContent: "center", padding: 16, pointerEvents: "box-none" }}>
+        <View style={{ width: "100%", maxWidth: 560, maxHeight: Math.max(260, windowSize().height - keyboardFrame().height - 40), gap: 16, padding: 20, borderRadius: corner.sheet, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface }}>
+          <View style={{ gap: 4 }}>
+            <Text style={{ fontSize: 19, fontWeight: "600", color: colors.text }}>{L("Push to conversation", "放进会话")}</Text>
+            <Text style={{ fontSize: 13, lineHeight: 18, color: colors.muted }}>
+              {L(`It is sent as your message in ${props.title()}. Edit it here; the side chat keeps its own copy.`, `它会作为你在${props.title()}里的一条消息发出。可以在这里改完再发，侧边聊天保留自己的一份。`)}
+            </Text>
+          </View>
+          <Input
+            testID="side-push-text"
+            multiline
+            value={pushText()}
+            onChange={({ value }) => pushText.set(value)}
+            style={{ minHeight: 150, maxHeight: 320, padding: 12, fontSize: 14, lineHeight: 20, color: colors.text, borderWidth: 1, borderColor: colors.border, borderRadius: 12 }}
+          />
+          <View style={{ flexDirection: "row", justifyContent: "flex-end", gap: 10 }}>
+            <Button testID="side-push-cancel" variant="ghost" label={L("Cancel", "取消")} onPress={() => pushing.set(false)} />
+            <Button testID="side-push-confirm" variant="primary" label={L("Push", "放进会话")} disabled={!pushText().trim()} onPress={push} />
+          </View>
+        </View>
+      </Dialog>
+    </View>
+  );
+}
+
 // ---------------------------------------------------------------- timeline
 
 /** Messages the onlyone just confirmed: a quiet check beside their timestamp fades away. */
@@ -908,7 +1121,7 @@ function SentCheck() {
 }
 
 /** A message the owner sent that the onlyone has not confirmed yet: it reads as sent unless delivery fails. */
-type Outgoing = { id: string; ts: string; text: string; ref: string | null; files: Attachment[]; state: "held" | "sending" | "failed"; channel?: string };
+type Outgoing = { id: string; ts: string; text: string; ref: string | null; files: Attachment[]; state: "held" | "sending" | "failed"; channel?: string; thread?: boolean };
 
 /** Each agent's own color and mark, the same everywhere it appears (stable by its id). */
 const MARKS = ["★", "◆", "▲", "●", "✦", "☾", "✿", "♪"];
@@ -3979,7 +4192,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     const d = latestDoc();
     if (d?.src === autoDoc) return;
     autoDoc = d?.src;
-    untracked(() => reading.set(d && { ...d, at: `channel:${scope() ?? ""}` }));
+    untracked(() => { if (!sideChatOpen()) reading.set(d && { ...d, at: `channel:${scope() ?? ""}` }); });
   });
   // a different onlyone or a sign-out starts with no reports kept from the last one
   cleanup(clearDocCache);
@@ -3990,7 +4203,34 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   const readerWidth = () => (readerWide() ? Math.round(chatRoom() * 0.62) : Math.min(460, Math.round(chatRoom() * 0.42)));
   const shownDoc = () => { const d = reading(); return d && d.at === readerAt() ? d : null; };
   /** The reader beside a page that has one (the channel, a task), from the window's top edge. */
-  const docSide = () => !!shownDoc() && readerSide() && (top().name === "channel" || top().name === "task");
+  const docSide = () => !!shownDoc() && readerSide() && !sideChatOpen() && (top().name === "channel" || top().name === "task");
+  // The side chat (docs/side-chat.md) is the second pane: it follows the conversation on screen and shares the width
+  // with the report reader (one of them at a time).
+  const sideKey = computed(() => { const r = top(); return sideConv(r.name, scope(), r.name === "task" ? r.id : null); });
+  const sideTitle = computed(() => {
+    const r = top();
+    if (r.name === "task") return r.id;
+    return scope() ? `# ${scoped()?.name ?? scope()}` : L("Main chat", "主会话");
+  });
+  const sideBeside = () => wide() && chatRoom() >= 860;
+  const sideWidth = () => Math.min(420, Math.max(320, Math.round(chatRoom() * 0.34)));
+  const sideShown = () => sideChatOpen() && !!sideKey();
+  const sideSide = () => sideShown() && sideBeside();
+  const sidePane = () => {
+    const conv = sideKey();
+    if (!conv) return null;
+    return <SideChatPane onlyone={onlyone} conv={() => sideKey() ?? conv} title={() => sideTitle()} wide={sideBeside()} onClose={() => sideChatOpen.set(false)} onPush={(text) => {
+      // into the conversation on screen: a task gets a follow-up in its thread, everything else is a normal message
+      const r = untracked(top);
+      sideChatOpen.set(false);
+      send(text, r.name === "task" ? r.id : null, undefined, [], false, r.name === "task");
+    }} />;
+  };
+  const toggleSide = () => {
+    const open = !sideChatOpen();
+    sideChatOpen.set(open);
+    if (open) reading.set(null); // one pane at a time
+  };
   const readerPane = () => {
     const d = shownDoc();
     if (!d) return null;
@@ -4154,10 +4394,10 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   // A message reads as sent at once but leaves a few seconds later, so 撤回 (or Mod+Z) can still take it back.
   const UNDO_MS = 5000;
   const holds = new Map<string, ReturnType<typeof setTimeout>>();
-  function send(text: string, ref: string | null, id = `local:${crypto.randomUUID()}`, files: Attachment[] = [], silent = false) {
+  function send(text: string, ref: string | null, id = `local:${crypto.randomUUID()}`, files: Attachment[] = [], silent = false, thread = false) {
     const ts = new Date().toISOString();
-    const channel = untracked(scope) ?? undefined;
-    outbox.update((o) => [...o.filter((x) => x.id !== id), { id, ts, text, ref, files, state: "held", channel }]);
+    const channel = thread ? undefined : untracked(scope) ?? undefined;
+    outbox.update((o) => [...o.filter((x) => x.id !== id), { id, ts, text, ref, files, state: "held", channel, thread }]);
     // answering a card is a quiet act: the reader stays where the card is
     if (!silent) jumpToEnd();
     holds.set(id, setTimeout(() => { holds.delete(id); void deliver(id); }, UNDO_MS));
@@ -4198,10 +4438,10 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   async function deliver(id: string) {
     const o = outbox().find((x) => x.id === id);
     if (!o || o.state === "sending") return;
-    const { text, ref, files, channel } = o;
+    const { text, ref, files, channel, thread } = o;
     outbox.update((l) => l.map((x) => (x.id === id ? { ...x, state: "sending" } : x)));
     try {
-      markSent(await onlyone.send(text, ref, files, false, id, channel));
+      markSent(await onlyone.send(text, ref, files, !!thread, id, channel));
       outbox.update((o) => o.filter((x) => x.id !== id));
     } catch {
       outbox.update((o) => o.map((x) => (x.id === id ? { ...x, state: "failed" } : x)));
@@ -4992,11 +5232,17 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     <View style={{ flex: 1, flexDirection: "row", minWidth: 0 }}>
       {page}
       {/* room for the reader, which `docSide` draws over the page's bar up to the window's top edge */}
-      <If when={shownDoc() && readerSide()}>
+      <If when={shownDoc() && readerSide() && !sideChatOpen()}>
         <View style={{ width: readerWidth() }} />
       </If>
-      <If when={shownDoc() && !readerSide()}>
+      <If when={sideSide()}>
+        <View style={{ width: sideWidth() }} />
+      </If>
+      <If when={shownDoc() && !readerSide() && !sideChatOpen()}>
         <View testID="doc-sheet" style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, paddingBottom: safeArea().bottom, backgroundColor: colors.background }}>{readerPane()}</View>
+      </If>
+      <If when={sideShown() && !sideBeside()}>
+        <View testID="side-sheet" style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, paddingBottom: safeArea().bottom, backgroundColor: colors.background }}>{sidePane()}</View>
       </If>
     </View>
   );
@@ -5047,8 +5293,8 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
         alignItems: "center",
         gap: 6,
         paddingLeft: (wide() && sidebarOpen() ? 0 : hasWindow ? titleBar().left : 0) + (wide() ? 24 : 8),
-        // the reader beside the chat takes the bar's right end and the window buttons with it
-        paddingRight: (docSide() ? readerWidth() : hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
+        // the reader or the side chat beside the chat takes the bar's right end and the window buttons with it
+        paddingRight: (docSide() ? readerWidth() : sideSide() ? sideWidth() : hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
         borderBottomWidth: 0.5,
         borderBottomColor: surfaceEdge(),
         backgroundColor: colors.background,
@@ -5079,7 +5325,10 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
           {(f) => <FoldedTitle folded={f()} />}
         </If>
       </View>
-      <If when={p.route === CHANNEL && !shownDoc() && latestDoc()}>
+      <If when={(p.route.name === "channel" || p.route.name === "task") && !sideShown()}>
+        <IconButton icon="chat" label={L("Side chat", "侧边聊天")} onPress={toggleSide} testID="side-toggle" />
+      </If>
+      <If when={p.route === CHANNEL && !shownDoc() && !sideChatOpen() && latestDoc()}>
         <IconButton icon="document" label={L("Open latest report", "打开最新报告")} onPress={() => { const d = latestDoc(); reading.set(d && { ...d, at: readerAt() }); }} testID="doc-reopen" />
       </If>
       <If when={!wide() && p.route === CHANNEL}>
@@ -5158,7 +5407,13 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
               // phones: a folded page's compact title replaces the system title until its head is back in sight
               systemHeader && folded(route) ? <FoldedTitle folded={folded(route)!} stacked /> : undefined
             }
-            headerRight={systemHeader && route === CHANNEL ? <IconButton icon="sliders" label={L("Settings", "设置")} onPress={openTeam} testID="settings-top" /> : undefined}
+            // phones put both page actions in the system header: the side chat on any conversation, settings in the main chat
+            headerRight={systemHeader && (route.name === "channel" || route.name === "task") ? (
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+                <If when={!sideShown()}><IconButton icon="chat" label={L("Side chat", "侧边聊天")} onPress={toggleSide} testID="side-toggle" /></If>
+                <If when={route === CHANNEL}><IconButton icon="sliders" label={L("Settings", "设置")} onPress={openTeam} testID="settings-top" /></If>
+              </View>
+            ) : undefined}
             style={{ backgroundColor: colors.background }}
           >
             {content(route)}
@@ -5167,6 +5422,9 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
       </NavStack>
       <If when={docSide()}>
         <View testID="doc-side" style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: readerWidth(), borderLeftWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}>{readerPane()}</View>
+      </If>
+      <If when={sideSide()}>
+        <View testID="side-side" style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: sideWidth(), borderLeftWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}>{sidePane()}</View>
       </If>
       <If when={!wide() && drawer()}>
         <View testID="drawer-dismiss" role="button" accessibilityLabel={L("Close sidebar", "关闭侧栏")} onPress={() => drawer.set(false)} pan={{ x: drawerX }} onPanStart={() => { Keyboard.dismiss(); drawerDragging.set(true); }} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.08)" }} />

@@ -41,6 +41,10 @@ const SERVICE_CHANGES = HOSTS.length * 2, SERVICE_REQUESTS = SERVICE_CHANGES * 1
 // No project timer: unattended cost is zero. Reads write no rows; reserve 2 metering rows per owner request.
 const PROJECT_REQUESTS = 3 * (1 + HOSTS.length + 1) + HOSTS.length * 20, PROJECT_ROWS = PROJECT_REQUESTS * 2;
 const TEAM_REQUESTS = 3 * (3 + 3 + 1), TEAM_ROWS = 3 * 2;
+// Side chats (docs/side-chat.md): 60 owner turns a day. Each turn is the owner's message request and the primary's
+// final frame, plus an interim step frame at most every five seconds on a long one; opening a transcript is one
+// request and one row read, and a turn writes the single row of its conversation. Shut, the panel costs nothing.
+const SIDE_TURNS = 60, SIDE_REQUESTS = SIDE_TURNS * 9 + 20, SIDE_ROWS = SIDE_TURNS * 4 + 20;
 const RECEIPT_ROWS = 50;
 const OTHER_ROWS = RECEIPT_ROWS + (HOSTS.length * TASKS_PER_HOST * 2 + 96) * 2 + 50 * 6 + 2_000; // + events the fleet reports
 
@@ -134,8 +138,8 @@ test("a fleet day stays under the free-plan target", async () => {
   }
   clock += LAZY_PUSH_MS;
   expect(await sync.commitPush("flush batched project lessons")).toBe(true);
-  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS + ENROLL_REQUESTS + DEV_REQUESTS + TEAM_REQUESTS + SERVICE_REQUESTS + PROJECT_REQUESTS;
-  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS + ENROLL_ROWS + DEV_ROWS + TEAM_ROWS + SERVICE_ROWS + PROJECT_ROWS;
+  const requests = t.meter!.requests + OTHER_REQUESTS + GUEST_ASKS + ENROLL_REQUESTS + DEV_REQUESTS + TEAM_REQUESTS + SERVICE_REQUESTS + PROJECT_REQUESTS + SIDE_REQUESTS;
+  const rowsWritten = t.meter!.rowsWritten * INDEX_FACTOR + OTHER_ROWS + GUEST_ASKS + ENROLL_ROWS + DEV_ROWS + TEAM_ROWS + SERVICE_ROWS + PROJECT_ROWS + SIDE_ROWS;
   console.log(`fleet day: ${requests} requests (target ${TARGET.requests}), ~${rowsWritten} rows written (target ${TARGET.rowsWritten})`);
   expect(requests).toBeLessThanOrEqual(TARGET.requests);
   expect(rowsWritten).toBeLessThanOrEqual(TARGET.rowsWritten);

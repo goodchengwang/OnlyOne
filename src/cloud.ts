@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
 import { type Cfg, L, P, _commitPush, hostName, journal, locked, HOME_DIR } from "./core";
 import { updateChannel } from "./channels";
+import { queueSideTurn } from "./side";
 import { type Event, MEDIA, appendEvent, applyOp, handleOwnerMessage, saveSettings, setMirror, settingsView, status, cancelTask, updateFleet } from "./server";
 
 const base = (cfg: Cfg) => String(cfg.cloud?.url ?? "").replace(/\/$/, "");
@@ -106,6 +107,9 @@ export function startCloudBridge(cfg: Cfg) {
       await cancelTask(it.id, it.done === true);
     } else if (it.type === "channel" && typeof it.slug === "string") {
       await locked(async () => { if (typeof updateChannel(it.slug, it) !== "string") await _commitPush(`channel ${it.slug}`); });
+    } else if (it.type === "side" && typeof it.conv === "string" && typeof it.id === "string" && typeof it.text === "string") {
+      // a side-chat turn runs beside the drain, one at a time, so a slow answer never delays the owner's messages
+      queueSideTurn({ conv: it.conv, id: it.id, text: it.text, at: typeof it.at === "string" ? it.at : new Date().toISOString() });
     } else if (it.type === "update") {
       await updateFleet();
     } else if (it.type === "settings") {
