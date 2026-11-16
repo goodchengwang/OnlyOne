@@ -1,9 +1,9 @@
 import { expect, test } from "bun:test";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { localStore, think, type Model } from "../src/brain";
-import { P, agentName, loadConfig, readDoc } from "../src/core";
-import { teamActs, members } from "../src/team";
-import { runRoutines } from "../src/cli";
+import { P, agentName, loadConfig, readDoc, type Cfg } from "../src/core";
+import { startServer } from "../src/server";
+import { teamActs, members } from "../src/team";import { runRoutines } from "../src/cli";
 import { avatarResponse, validSchedule } from "../cloud/src/team";
 import { runTool, listRoutines, writeOp } from "../cloud/src/tools";
 import { avatarOf, agentDisplayName } from "../app/avatars";
@@ -209,6 +209,25 @@ test("deleting a code-defined routine tombstones it so config.toml and the built
     expect(loadConfig().routine.some((r: any) => r.name === "security-check")).toBe(false);
     // the source still defines it, so the tombstone is what keeps it off
     expect(JSON.parse(readFileSync(P("settings.json"), "utf8")).routines["security-check"]).toMatchObject({ deleted: true });
+  });
+});
+
+test("the settings page deletes a routine through the same tombstone the chat uses", async () => {
+  await fixture(async (st) => {
+    await runTool(st, "upsert_routine", { ...recurring, every: "15m" });
+    const server = startServer({ server: { host: "127.0.0.1", port: 0, token: "test" } } as Cfg, async () => {})!;
+    const del = (body: object) => fetch(`http://127.0.0.1:${server.port}/api/routines/delete`, {
+      method: "POST", headers: { authorization: "Bearer test", "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    try {
+      expect((await del({})).status).toBe(400);
+      const out: any = await (await del({ name: routine })).json();
+      expect(out).toMatchObject({ ok: true, routine });
+      expect(JSON.parse(readFileSync(P("settings.json"), "utf8")).routines[routine].deleted).toBe(true);
+      expect(loadConfig().routine.some((r: any) => r.name === routine)).toBe(false);
+      // pressing delete twice is a no-op, not an error
+      expect((await del({ name: routine })).status).toBe(200);
+    } finally { server.stop(true); }
   });
 });
 

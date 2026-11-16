@@ -137,24 +137,36 @@ export function teamActs(host: string, io: {
       await persist(`[${host}] routine ${name}`);
       return { ok: true, routine: loadConfig().routine.find((r: any) => r.name === name) };
     }),
-    // Deleting is not disabling: the routine leaves the list and never runs again. Its source may be config.toml or the
-    // code, where we cannot remove it, so the settings.json entry becomes a tombstone (loadConfig and list_routines drop it).
+    // the tombstone itself is deleteRoutine below, shared with the settings page's delete button
     delete_routine: (op) => locked(async () => {
-      await pull();
       const checked = writeOp(op.tool, op, store());
       if (typeof checked === "string") throw new Error(checked);
-      const path = P("settings.json");
-      const settings = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
-      settings.routines ??= {};
-      // runs it already created are tasks of their own: they finish and report; nothing new is scheduled
-      const inFlight = routineQueued(op.name);
-      if (settings.routines[op.name]?.deleted === true) return { ok: true, routine: op.name, already: true, ...(inFlight ? { in_flight: inFlight } : {}) };
-      // keep the old values next to the tombstone: an upsert of the same name then restores them
-      settings.routines[op.name] = { ...settings.routines[op.name], deleted: true };
-      writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
-      journal(host, `🗑️ routine ${op.name} deleted (owner chat)${inFlight ? `; ${inFlight} already running` : ""}`);
-      await persist(`[${host}] delete routine ${op.name}`);
-      return { ok: true, routine: op.name, ...(inFlight ? { in_flight: inFlight } : {}) };
+      return deleteRoutine(op.name, host, { pull, push, changed: io.changed });
     }),
   };
+}
+
+/**
+ * Deleting is not disabling: the routine leaves the list and never runs again. Its source may be config.toml or the
+ * code, where we cannot remove it, so the settings.json entry becomes a tombstone (loadConfig and list_routines drop
+ * it). One path for the owner chatting with the team and for the delete button in settings. Call inside `locked()`.
+ */
+export async function deleteRoutine(name: string, host: string, io: {
+  pull?: () => Promise<unknown>; push?: (msg: string) => Promise<boolean>; changed?: () => void;
+} = {}): Promise<{ ok: true; routine: string; already?: true; in_flight?: string }> {
+  const pull = io.pull ?? _pull, push = io.push ?? _commitPush;
+  await pull();
+  const path = P("settings.json");
+  const settings = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+  settings.routines ??= {};
+  // runs it already created are tasks of their own: they finish and report; nothing new is scheduled
+  const inFlight = routineQueued(name);
+  if (settings.routines[name]?.deleted === true) return { ok: true, routine: name, already: true, ...(inFlight ? { in_flight: inFlight } : {}) };
+  // keep the old values next to the tombstone: an upsert of the same name then restores them
+  settings.routines[name] = { ...settings.routines[name], deleted: true };
+  writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
+  journal(host, `🗑️ routine ${name} deleted${inFlight ? `; ${inFlight} already running` : ""}`);
+  if (!await push(`[${host}] delete routine ${name}`)) throw new Error("Saved locally, but cloud synchronization failed; retry to confirm synchronization");
+  io.changed?.();
+  return { ok: true, routine: name, ...(inFlight ? { in_flight: inFlight } : {}) };
 }
