@@ -2392,6 +2392,14 @@ describe("run process", () => {
     await app.press(`id:run-open-${norm}`);
     await app.waitFor("id:run-pane");
     await app.waitFor("text:/Read · src\\/cli.ts/");
+    // a step's time is written out, not handed to a locale: the app runtime has no locale data, so a locale
+    // format came out as "2:16:11 PM" and wrapped in that narrow column
+    const hh = (iso: string) => {
+      const d = new Date(iso), p = (n: number) => String(n).padStart(2, "0");
+      return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+    };
+    expect(app.shows(`text:/${hh(trace.steps[0].at)}/`)).toBe(true);
+    expect(app.shows("text:/AM|PM/")).toBe(false);
     expect(app.shows("text:/看完代码，开始改。/")).toBe(true);
     expect(app.shows("text:/3 tests failed/")).toBe(true);
     expect(app.shows("id:run-summary")).toBe(true);
