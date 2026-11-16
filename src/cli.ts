@@ -44,12 +44,13 @@ import { publishStatus } from "./server";
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
 
-/** every: "15m" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
+/** every: "15m" | "2h" | "1d" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
 export function due(every: string, last: string | undefined, t = new Date()): boolean {
   const parts = every.trim().split(/\s+/);
   const lastT = last ? new Date(last) : null;
-  if (parts[0] === "hourly" || /^\d+m$/.test(parts[0])) {
-    const mins = parts[0] === "hourly" ? 60 : parseInt(parts[0]);
+  const interval = parts[0].match(/^(\d+)([mhd])$/);
+  if (parts[0] === "hourly" || interval) {
+    const mins = interval ? Number(interval[1]) * (interval[2] === "h" ? 60 : interval[2] === "d" ? 1440 : 1) : 60;
     return !lastT || +t - +lastT >= mins * 60_000;
   }
   const [h, m] = parts.at(-1)!.split(":").map(Number);
