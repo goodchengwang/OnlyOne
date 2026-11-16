@@ -19,6 +19,7 @@ in the OnlyOne app, and receive live events.
 | `amend_task` | Adds your follow-up to an open task (a waiting task is woken) |
 | `cancel_task` (destructive) / `set_priority` / `reassign_task` | Stop a task; change its priority; give a not-yet-started task to another agent |
 | `upsert_member` / `upsert_routine` | Add or update a member (including a default Codex-generated or owner-attached avatar); add, reschedule or disable recurring work, without a code task or project |
+| `delete_routine` (destructive) | Deletes a recurring task for good, so it leaves the list and never runs again (disabling it is not the same); runs it already created finish and report |
 | `remember` | Writes a rule or preference into memory for the whole fleet or one agent |
 | `edit_memory` (destructive) | Corrects or deletes one memory entry |
 | `answer_decision` | Answers a card, like tapping an option |

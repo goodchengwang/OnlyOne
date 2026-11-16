@@ -15,7 +15,7 @@ import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, pushBranch, type WorkInfo, type Worktree } from "./worktree";
 import { writeRules } from "./rules";
-import { backoffMinutes, CHECKED_FALLBACK_MIN, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
+import { backoffMinutes, CHECKED_FALLBACK_MIN, HUMAN_WAIT_MAX_HOURS, humanWaitExpired, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
 import { homedir } from "node:os";
 import { basename, resolve } from "node:path";
@@ -44,12 +44,13 @@ import { publishStatus } from "./server";
 // ------------------------------------------------------------------ routines (scheduled task generators)
 const STATE = P("logs", "routine-state.json");
 
-/** every: "15m" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
+/** every: "15m" | "2h" | "1d" | "hourly" | "daily HH:MM" | "weekdays HH:MM" | "weekly MON HH:MM" */
 export function due(every: string, last: string | undefined, t = new Date()): boolean {
   const parts = every.trim().split(/\s+/);
   const lastT = last ? new Date(last) : null;
-  if (parts[0] === "hourly" || /^\d+m$/.test(parts[0])) {
-    const mins = parts[0] === "hourly" ? 60 : parseInt(parts[0]);
+  const interval = parts[0].match(/^(\d+)([mhd])$/);
+  if (parts[0] === "hourly" || interval) {
+    const mins = interval ? Number(interval[1]) * (interval[2] === "h" ? 60 : interval[2] === "d" ? 1440 : 1) : 60;
     return !lastT || +t - +lastT >= mins * 60_000;
   }
   const [h, m] = parts.at(-1)!.split(":").map(Number);
@@ -587,7 +588,16 @@ function wakeParents(host: string, ready = new Set<string>()) {
   for (const p of list(P("tasks", "waiting"), /^T-.*\.md$/)) {
     const { meta, body } = readDoc(p);
     if (meta.wait_kind === "human" && !meta.wake_at) { // waits on a person: only an event wakes it, never the clock
-      if (!ready.has(meta.id)) continue;
+      if (!ready.has(meta.id)) {
+        if (!humanWaitExpired(meta)) continue;
+        // The owner never answered: wake it once to wrap up truthfully. A task parked behind an unanswered card used to stay
+        // parked forever, which is exactly what the owner rejected (D-0004 C: record the real state and end, nothing hangs).
+        writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, wake_at: undefined, wait_kind: undefined, status: undefined, claimed_by: undefined, resumed: "yes", human_wait_expired: "yes" },
+          `${body}\nHuman wait expired: ${meta.waiting_on ?? "?"} was not answered within ${HUMAN_WAIT_MAX_HOURS}h. Finish what you can, state in your final summary exactly what is unfinished/unverified and where it stopped, and end — do not return "waiting" for this same item again.\n`);
+        unlinkSync(p);
+        journal(host, L(`⏳ ${meta.id} waited ${HUMAN_WAIT_MAX_HOURS}h on a person, woken to wrap up`, `⏳ ${meta.id} 等人超过 ${HUMAN_WAIT_MAX_HOURS} 小时，唤醒收尾`));
+        continue;
+      }
     }
     if (meta.wake_at || meta.wait_kind) { // parked on something slow: back to the queue once the time is up, or as soon as its check changes
       if (meta.wake_at && Date.parse(meta.wake_at) > Date.now() && !ready.has(meta.id)) continue;
@@ -687,15 +697,25 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   state.idle_since ??= new Date().toISOString();
   const idleMin = (Date.now() - Date.parse(state.idle_since)) / 60_000;
   if (idleMin < (cfg.idle?.after_minutes ?? 20)) return;
-  // Re-offer after the latest unanswered menu's cooldown, regardless of filename order.
-  const pendingMenu = list(P("decisions", "open")).map((p) => readDoc(p).meta)
-    .filter((m) => m.kind === "menu")
-    .sort((a, b) => Date.parse(b.created) - Date.parse(a.created))[0];
-  const cooldown = (cfg.idle?.cooldown_minutes ?? 180) * 60_000;
-  if (pendingMenu && Date.now() - Date.parse(pendingMenu.created) < cooldown) return;
+  // One live menu, not one per cooldown. While a card is unanswered — or a menu task is still on its way to a card
+  // (parked, blocked or queued) — the owner already has the offer; a second one is the same question again, and the
+  // "refresh after N hours" rule is exactly how D-0009/D-0010/D-0011 stacked up within four hours on 2026-11-15.
+  // Silence is not consent, but it is not forever either: the supervisor archives an unanswered menu card after
+  // HUMAN_WAIT_MAX_HOURS and wakes its task to wrap up, and only then can a fresh menu be raised.
+  const openCards = list(P("decisions", "open")).map((p) => readDoc(p).meta);
+  const liveMenu = openCards.some((m) => m.kind === "menu")
+    || (["inbox", "waiting", "blocked"] as const).some((f) => list(P("tasks", f), /^T-.*\.md$/).some((p) => readDoc(p).meta.kind === "menu"));
+  if (liveMenu) return;
+  // A menu is not the only card the owner has sitting in front of them: an unanswered proposals batch is a question
+  // too, and on 2026-11-16 the fleet raised two idle menus (T-0021 10:11, T-0022 10:27) while P-0001 had been waiting
+  // since 10:19. Proposals never expire on their own (autonomy keeps rebuilding the batch), so bound this to the same
+  // day-long limit as a human wait: after HUMAN_WAIT_MAX_HOURS the fleet may offer again rather than stay silent.
+  const liveProposals = openCards.some((m) => m.kind === "proposals"
+    && Date.now() - Date.parse(m.created) < HUMAN_WAIT_MAX_HOURS * 3_600_000);
+  if (liveProposals) return;
   if (state.last_menu && Date.now() - Date.parse(state.last_menu) < 15 * 60_000) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
-Build the owner's next-action menu per your profile and return needs_decision.${pendingMenu ? `\nAn earlier menu ${pendingMenu.id} is still unanswered — refresh it (drop stale items) rather than repeating it verbatim.` : ""}`,
+Build the owner's next-action menu per your profile and return needs_decision.`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
   journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff drafting a next-steps menu`);

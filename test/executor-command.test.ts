@@ -37,4 +37,7 @@ test.skipIf(process.platform !== "win32")("Windows desktop invokes the npm cmd s
     expect({ code: await child.exited, error }).toEqual({ code: 0, error: "" });
     expect(output.replace(/\r\n/g, "\n").trimEnd()).toBe('app\n{"session":"test-secret"}');
   } finally { rmSync(home, { recursive: true, force: true }); }
-});
+  // The launcher is powershell.exe, whose start-up alone costs about 4.9s on windows-latest:
+  // v0.1.6's run passed at 4889ms against the 5s default, and this branch timed out at 5000ms
+  // twice on unchanged launcher code. Only the budget moves; the byte assertions stay exact.
+}, 30_000);

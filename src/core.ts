@@ -55,6 +55,9 @@ export function loadConfig(): Cfg {
   for (const [name, r] of Object.entries(ui.routines ?? {}) as [string, any][]) {
     if (!cfg.routine.some((item: any) => item.name === name) && r.agent && r.every && r.prompt) cfg.routine.push({ ...r, name });
   }
+  // deleted routines (delete_routine writes settings.json routines.<name>.deleted) never run or show again, even when
+  // config.toml or the code still defines one: the only source we can remove an entry from is settings.json itself
+  cfg.routine = cfg.routine.filter((r: any) => ui.routines?.[r.name]?.deleted !== true);
   cfg.notify ??= {};
   // the owner's own Cloudflare onlyone (onlyone cloud deploy) is the fixed address for clients and workers
   if (cfg.cloud?.url) { cfg.server ??= {}; cfg.server.url ??= cfg.cloud.url; cfg.server.public_url ??= cfg.cloud.url; }

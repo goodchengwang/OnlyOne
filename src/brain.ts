@@ -197,6 +197,7 @@ How to decide:
   pass its absolute path from the owner's message as avatar_path. If the owner describes an avatar, pass avatar_prompt.
 - Adding/changing/disabling a recurring task: upsert_routine, never a code task. Translate the requested schedule to the tool's accepted format
   in the coordinator host's local timezone (shown below); do not invent a time when none is provided, ask for it.
+  Deleting one for good (${L(`"delete it", "remove it"`, `"删掉", "去掉"`)} — not disabling) is delete_routine, only when the owner clearly asks.
   When one request adds both a member and a routine, call upsert_member first, then upsert_routine using that id.
   These two tools run BEFORE your reply and return their actual results. Reply "" with these calls, then confirm only what succeeded.
   On an error, explain it; do not claim success or silently replace the operation with a code task.
@@ -340,7 +341,7 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
       const reads = turn.calls.filter((c) => !isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const writes = turn.calls.filter((c) => isWrite(c.tool) && BRAIN_TOOLS.some((t) => t.name === c.tool));
       const unknown = turn.calls.filter((c) => !BRAIN_TOOLS.some((t) => t.name === c.tool));
-      const management = writes.filter((c) => c.tool === "upsert_member" || c.tool === "upsert_routine");
+      const management = writes.filter((c) => ["upsert_member", "upsert_routine", "delete_routine"].includes(c.tool));
       if (management.length) {
         const results: string[] = [];
         for (const c of management) {
@@ -349,11 +350,14 @@ export async function think(m: BrainIn, st: ToolStore, model: Model, post: (repl
           results.push(`${c.tool}(${JSON.stringify(c.args)}) → ${r.ok ? JSON.stringify(r.data) : `ERROR ${r.error}`}`);
         }
         if (last) {
-          const saved = new Map(res.calls.filter((c) => c.ok && (c.tool === "upsert_member" || c.tool === "upsert_routine"))
+          const saved = new Map(res.calls.filter((c) => c.ok && ["upsert_member", "upsert_routine", "delete_routine"].includes(c.tool))
             .map((c) => [`${c.tool}:${c.args.id ?? c.args.name}`, c]));
           res.reply = [...saved.values()].map((c) => c.tool === "upsert_member"
             ? L(`Saved member ${c.result?.member?.name ?? c.args.id}${c.result?.member?.avatar ? " and avatar" : ""}.`, `已保存成员${c.result?.member?.name ?? c.args.id}${c.result?.member?.avatar ? "及头像" : ""}。`)
-            : L(`Saved routine ${c.args.name}.`, `已保存例行任务${c.args.name}。`)).join("\n");
+            : c.tool === "delete_routine"
+              ? L(`Deleted routine ${c.args.name}.${c.result?.in_flight ? ` ${c.result.in_flight} is still running and will report when done.` : ""}`,
+                `已删除例行任务${c.args.name}。${c.result?.in_flight ? `${c.result.in_flight} 还在跑，跑完会照常汇报。` : ""}`)
+              : L(`Saved routine ${c.args.name}.`, `已保存例行任务${c.args.name}。`)).join("\n");
           res.reply += res.calls.filter((c) => !c.ok && management.some((m) => m.tool === c.tool && m.args === c.args))
             .map((c) => L(`\nCould not save: ${c.error}`, `\n保存失败：${c.error}`)).join("");
           post(res.reply);

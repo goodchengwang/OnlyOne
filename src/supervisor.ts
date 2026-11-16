@@ -4,6 +4,8 @@
 // Gates are never touched: a supervisor card never sets gate_override, so merge/release/external messages stay gated.
 import { existsSync, unlinkSync } from "node:fs";
 import { type Cfg, type HostBeat, L, P, journal, list, nextId, now, onlineHosts, readDoc, writeDoc } from "./core";
+import { expireDecision } from "./decisions";
+import { HUMAN_WAIT_MAX_HOURS } from "./waits";
 
 export type Meta = Record<string, string>;
 export type Task = { meta: Meta; folder: "waiting" | "blocked"; body?: string };
@@ -15,8 +17,9 @@ export type Ctx = {
   maxAgeHours: number;
   maxWakes: number;
   decision: (id: string) => "open" | "closed" | undefined;
+  menu: (id: string) => Meta | undefined;   // the card's meta when it is an open next-steps menu
 };
-export type Action = "resume" | "reroute" | "repin" | "requeue" | "escalate" | "none";
+export type Action = "resume" | "reroute" | "repin" | "requeue" | "escalate" | "expire" | "none";
 export type Verdict = { id: string; cause: string; reasons: string[]; action: Action; requires?: string };
 
 const reqs = (m: Meta) => (m.requires ?? "").split(",").map((s) => s.trim()).filter(Boolean);
@@ -51,7 +54,15 @@ export function classify(t: Task, ctx: Ctx): Verdict | null {
   }
   // 2. blocked on a card that is already closed → the answer never reached it
   if (t.folder === "blocked" && m.decision && ctx.decision(m.decision) === "closed") return v(`answered:${m.decision}`, "resume", [L(`${m.decision} was answered but the task did not continue`, `${m.decision} 已回答但任务没有继续`)]);
-  if (t.folder === "blocked" && m.decision && ctx.decision(m.decision) === "open") return null; // the owner has the card
+  if (t.folder === "blocked" && m.decision && ctx.decision(m.decision) === "open") { // the owner has the card
+    const menu = ctx.menu(m.decision);
+    if (!menu) return null;
+    // An unanswered menu is not consent and not forever: after HUMAN_WAIT_MAX_HOURS it is archived and the task wraps
+    // up with the real state, instead of three cards and three blocked tasks sitting there for days (D-0004 C).
+    const cardAge = (ctx.now - Date.parse(menu.created ?? "")) / 3_600_000;
+    if (cardAge < HUMAN_WAIT_MAX_HOURS) return null;
+    return v(`expired:${m.decision}`, "expire", [L(`menu ${m.decision} unanswered for ${Math.floor(cardAge)}h`, `菜单 ${m.decision} 已 ${Math.floor(cardAge)} 小时未回答`)]);
+  }
   const age = (ctx.now - startedAt(m)) / 3_600_000;
   const wakes = Number(m.wakes ?? 0);
   const reasons: string[] = [];
@@ -124,18 +135,20 @@ export function cardFor(cause: string, items: { id: string; title: string; reaso
 // ------------------------------------------------------------------ IO: one supervisor pass over the onlyone
 const decisionState = (id: string) => existsSync(P("decisions", "open", `${id}.md`)) ? "open" as const
   : existsSync(P("decisions", "closed", `${id}.md`)) ? "closed" as const : undefined;
+const openCard = (id: string) => { const p = P("decisions", "open", `${id}.md`); return existsSync(p) ? readDoc(p).meta : undefined; };
+const menuCard = (id: string) => { const m = openCard(id); return m?.kind === "menu" ? m : undefined; };
 
 export function supervise(cfg: Cfg, host: string, t = Date.now()) {
   const s = cfg.supervisor ?? {};
   const retired: string[] = s.retired_hosts ?? cfg.fleet?.retired_hosts ?? [];
   const ctx: Ctx = {
     now: t, online: onlineHosts(cfg), retired, primaryOs: process.platform === "darwin" ? "macos" : process.platform === "win32" ? "windows" : "linux",
-    maxAgeHours: s.max_age_hours ?? 3, maxWakes: s.max_wakes ?? 3, decision: decisionState,
+    maxAgeHours: s.max_age_hours ?? 3, maxWakes: s.max_wakes ?? 3, decision: decisionState, menu: menuCard,
   };
   const tasks: (Task & { path: string })[] = (["waiting", "blocked"] as const).flatMap((folder) =>
     list(P("tasks", folder), /^T-.*\.md$/).map((path) => ({ path, folder, ...readDoc(path) })));
   const verdicts: Verdict[] = [];
-  const counts = { reroute: 0, resume: 0, requeue: 0, cards: 0 };
+  const counts = { reroute: 0, resume: 0, requeue: 0, expire: 0, cards: 0 };
   for (const task of tasks) {
     const v = classify(task, ctx);
     if (!v) continue;
@@ -154,12 +167,24 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
     } else if (v.action === "resume") {
       back({ resumed: "yes", resumes: meta.decision }, `${v.reasons.join("; ")}. Read ${meta.decision}'s answer in decisions/closed and continue accordingly.`);
       journal(host, L(`🧭 supervisor: ${meta.id} resumed (${v.reasons.join("; ")})`, `🧭 supervisor: ${meta.id} 继续（${v.reasons.join("；")}）`)); counts.resume++;
+    } else if (v.action === "expire") {
+      expireDecision(meta.decision!, host);
+      back({ resumed: "yes", resumes: meta.decision, menu_expired: "yes" },
+        `${v.reasons.join("; ")}. The card is archived unanswered — not consent, not a rejection. Do not open another menu card in this run: record what is finished, what is still unfinished/unverified, what you would have proposed, and end.`);
+      journal(host, L(`⌛ supervisor: ${meta.id} menu ${meta.decision} expired unanswered, task woken to wrap up`, `⌛ supervisor: ${meta.id} 的菜单 ${meta.decision} 超时未回答，唤醒收尾`)); counts.expire++;
     } else if (v.action === "requeue") {
       back({ supervisor_requeued: "yes", resumed: "yes" }, `No waiting_on was recorded. Re-decide: finish what you can, or return "waiting" with a concrete waiting_on and wait_check.`);
       journal(host, L(`🧭 supervisor: ${meta.id} has no wait condition, requeued`, `🧭 supervisor: ${meta.id} 没有等待条件，重新排队`)); counts.requeue++;
     } else verdicts.push(v);
   }
   for (const x of sweepPlatform(tasks, verdicts)) verdicts.push(x);
+  // A menu card still open after HUMAN_WAIT_MAX_HOURS expires even when no task points at it any more: an orphaned card
+  // would otherwise block every future menu, because an open menu card counts as the live offer.
+  for (const p of list(P("decisions", "open"))) {
+    const { meta } = readDoc(p);
+    if (meta.kind !== "menu" || t - Date.parse(meta.created ?? "") < HUMAN_WAIT_MAX_HOURS * 3_600_000) continue;
+    if (expireDecision(meta.id, host)) counts.expire++;
+  }
   const cards = (["open", "closed"] as const).flatMap((f) => list(P("decisions", f)).map((p) => readDoc(p).meta));
   const byId = new Map(tasks.map((x) => [x.meta.id, x]));
   for (const [cause, vs] of groupByCause(verdicts)) {
@@ -180,6 +205,6 @@ export function supervise(cfg: Cfg, host: string, t = Date.now()) {
     journal(host, `🧭 supervisor: ${CAUSE_LABEL(cause)} → ${did}（${fresh.join(", ")}）`); counts.cards++;
     cards.push({ supervisor_cause: cause, tasks: fresh.join(",") });
   }
-  journal(host, `🧭 supervisor ran: ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, cards ${counts.cards}`);
+  journal(host, `🧭 supervisor ran: ${tasks.length} waiting/blocked, rerouted ${counts.reroute}, resumed ${counts.resume}, requeued ${counts.requeue}, expired ${counts.expire}, cards ${counts.cards}`);
   return counts;
 }

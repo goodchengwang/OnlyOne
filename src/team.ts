@@ -7,6 +7,7 @@ import { MAX_AVATAR, MEMBER_ID, type MemberView } from "../cloud/src/team";
 import { sniffImage, uploadProblem } from "../cloud/src/uploads";
 import { writeOp } from "../cloud/src/tools";
 import { localStore } from "./brain";
+import { routineQueued } from "./autonomy";
 
 /** Only custom profiles override the client's built-in localized names and pictures. */
 export function members(): MemberView[] {
@@ -130,10 +131,30 @@ export function teamActs(host: string, io: {
       const { tool: _, name, ...patch } = op;
       settings.routines ??= {};
       settings.routines[name] = { ...settings.routines[name], ...patch };
+      delete settings.routines[name].deleted; // saving a deleted routine again brings it back
       writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
       journal(host, `⏰ routine ${name} saved (owner chat)`);
       await persist(`[${host}] routine ${name}`);
       return { ok: true, routine: loadConfig().routine.find((r: any) => r.name === name) };
+    }),
+    // Deleting is not disabling: the routine leaves the list and never runs again. Its source may be config.toml or the
+    // code, where we cannot remove it, so the settings.json entry becomes a tombstone (loadConfig and list_routines drop it).
+    delete_routine: (op) => locked(async () => {
+      await pull();
+      const checked = writeOp(op.tool, op, store());
+      if (typeof checked === "string") throw new Error(checked);
+      const path = P("settings.json");
+      const settings = existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) : {};
+      settings.routines ??= {};
+      // runs it already created are tasks of their own: they finish and report; nothing new is scheduled
+      const inFlight = routineQueued(op.name);
+      if (settings.routines[op.name]?.deleted === true) return { ok: true, routine: op.name, already: true, ...(inFlight ? { in_flight: inFlight } : {}) };
+      // keep the old values next to the tombstone: an upsert of the same name then restores them
+      settings.routines[op.name] = { ...settings.routines[op.name], deleted: true };
+      writeFileSync(path, JSON.stringify(settings, null, 2) + "\n");
+      journal(host, `🗑️ routine ${op.name} deleted (owner chat)${inFlight ? `; ${inFlight} already running` : ""}`);
+      await persist(`[${host}] delete routine ${op.name}`);
+      return { ok: true, routine: op.name, ...(inFlight ? { in_flight: inFlight } : {}) };
     }),
   };
 }
