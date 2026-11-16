@@ -22,8 +22,23 @@ test("lines around a table still break", () => {
   expect(onlyoneMarkdown(`one\ntwo\n\n${TABLE}\n\nthree\nfour`)).toBe(`one\\\ntwo\n\n${TABLE}\n\nthree\\\nfour`);
 });
 
-test("a rule under a line is not a table", () => {
-  expect(onlyoneMarkdown("title | x\n---\ntext")).toBe("title | x\\\n---\\\ntext");
+test("a rule under a line is not a table: it is a setext heading, which keeps the plain newline", () => {
+  // a "\" would end both the heading and the rule ("title | x\" over a "-" line is no heading at all)
+  expect(onlyoneMarkdown("title | x\n---\ntext")).toBe("title | x\n---\ntext");
+});
+
+test("a heading keeps plain newlines: a hard break cannot continue one", () => {
+  // a card's "## Context" line followed by its text showed the "\" of a hard break as part of the heading
+  for (const h of ["# one", "## two", "### three", "###### six", "  ## indented"]) {
+    expect(onlyoneMarkdown(`${h}\nbody`)).toBe(`${h}\nbody`);
+  }
+  // not a heading: "#tag" has no space after the hashes, so its line still breaks
+  expect(onlyoneMarkdown("#tag\nbody")).toBe("#tag\\\nbody");
+});
+
+test("a setext heading keeps plain newlines too", () => {
+  expect(onlyoneMarkdown("title\n===\nbody")).toBe("title\n===\nbody");
+  expect(onlyoneMarkdown("title\n---\nbody")).toBe("title\n---\nbody");
 });
 
 test("a table in a code fence is left alone", () => {
