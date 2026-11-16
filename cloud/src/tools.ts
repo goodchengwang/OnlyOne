@@ -22,6 +22,7 @@ export type WriteOp =
   | { tool: "reassign_task"; id: string; agent: string }
   | { tool: "upsert_member"; id: string; name?: string; role?: string; avatar_path?: string; avatar_prompt?: string; generate_avatar?: boolean }
   | { tool: "upsert_routine"; name: string; agent?: string; every?: string; prompt?: string; enabled?: boolean; readonly?: boolean }
+  | { tool: "delete_routine"; name: string }
   | { tool: "remember"; text: string; file: string }
   | { tool: "edit_memory"; file: string; match: string; text: string }
   | { tool: "answer_decision"; id: string; answer: string };
@@ -159,11 +160,16 @@ export function listAgents(st: ToolStore) {
     return { name, about: prof.split("\n").find((l) => l.trim())?.replace(/^#\s*/, "").slice(0, 200) ?? "", memory_lines: mem.split("\n").filter((l) => l.trim()).length };
   });
 }
-/** Routines from config.toml ([[routine]] blocks): name, schedule, agent, enabled, and the first line of the prompt. */
-export function listRoutines(st: ToolStore) {
+export type RoutineRow = { name: string; every?: string; at?: string; agent?: string; enabled: boolean; about: string; deleted?: true };
+
+/** Routines the fleet runs: config.toml [[routine]] blocks, the built-in ones (src/builtin-routines.ts) and routines added
+ *  from the chat or the settings page (settings.json), each with its schedule, agent, enabled and the first line of the prompt.
+ *  Later sources win over earlier ones, as in loadConfig. `deleted` marks one the owner deleted with delete_routine;
+ *  `includeDeleted` also returns those (delete is idempotent and upsert must see the old values). */
+export function listRoutines(st: ToolStore, opts: { includeDeleted?: boolean } = {}): RoutineRow[] {
   const toml = st.read("config.toml")?.text ?? "";
-  // changes made from the UI live in settings.json and win over config.toml, as they do for the scheduler (loadConfig)
-  let ui: Record<string, { enabled?: boolean; every?: string; agent?: string; prompt?: string; desc?: string; readonly?: boolean }> = {};
+  // changes made from the UI or the chat live in settings.json and win over config.toml, as they do for the scheduler (loadConfig)
+  let ui: Record<string, { enabled?: boolean; every?: string; agent?: string; prompt?: string; desc?: string; readonly?: boolean; deleted?: boolean }> = {};
   try { ui = JSON.parse(st.read("settings.json")?.text ?? "{}").routines ?? {}; } catch {}
   const configured = toml.split(/^\[\[routine\]\]\s*$/m).slice(1).map((b) => {
     const block = b.split(/^\[/m)[0];
@@ -172,8 +178,16 @@ export function listRoutines(st: ToolStore) {
     const change = ui[g("name") ?? ""] ?? {};
     return { name: g("name"), every: change.every ?? g("every"), at: g("at"), agent: change.agent ?? g("agent"), enabled: change.enabled ?? g("enabled") !== "false", about: (change.desc ?? change.prompt ?? g("desc") ?? g("prompt") ?? "").split("\n")[0].slice(0, 200) };
   }).filter((r) => r.name);
-  return [...configured, ...Object.entries(ui).filter(([name, r]) => !configured.some((c) => c.name === name) && r.agent && r.prompt)
-    .map(([name, r]) => ({ name, every: r.every, at: undefined, agent: r.agent, enabled: r.enabled !== false, about: (r.desc ?? r.prompt ?? "").split("\n")[0].slice(0, 200) }))];
+  const builtins = BUILTIN_ROUTINES.filter((b: any) => !configured.some((c) => c.name === b.name)).map((b: any) => {
+    const change = ui[b.name] ?? {};
+    return { name: b.name, every: change.every ?? b.every, at: b.at, agent: change.agent ?? b.agent, enabled: change.enabled ?? b.enabled !== false,
+      about: String(change.desc ?? change.prompt ?? b.desc ?? b.prompt ?? "").split("\n")[0].slice(0, 200) };
+  });
+  const known = new Set([...configured, ...builtins].map((r) => r.name));
+  const added = Object.entries(ui).filter(([name, r]) => !known.has(name) && r.agent && r.prompt)
+    .map(([name, r]) => ({ name, every: r.every, at: undefined, agent: r.agent, enabled: r.enabled !== false, about: (r.desc ?? r.prompt ?? "").split("\n")[0].slice(0, 200) }));
+  const rows = [...configured, ...builtins, ...added].map((r) => (ui[r.name]?.deleted === true ? { ...r, deleted: true as const } : r)) as RoutineRow[];
+  return opts.includeDeleted ? rows : rows.filter((r) => !r.deleted);
 }
 /** Lines of the journal (journal/YYYY-MM-DD.md) that contain every word of the query, newest day first. */
 export function searchJournal(st: ToolStore, query: string, days = 14, limit = 40) {
@@ -306,6 +320,9 @@ export const TOOLS: Tool[] = [
       enabled: { type: "boolean", description: "New routines are enabled by default. Set false only when the owner asks to disable; omitted on updates keeps the current state." },
       readonly: { type: "boolean", description: "True only for observation/reporting that changes no external state" } }, ["name"]),
     description: "Add, change or disable a recurring task directly, without a project or code task. Specify the member, schedule and complete instructions for a new routine. When adding a member too, call upsert_member before this tool. Omitted fields keep their values." },
+  { name: "delete_routine", title: "Delete a routine", annotations: DESTRUCTIVE, write: true,
+    inputSchema: obj({ name: str("The routine to delete, as listed by list_routines") }, ["name"]),
+    description: "Delete a recurring task for good, so it never runs again. Only when the owner clearly asks to delete it: disabling it (upsert_routine enabled=false) is not the same thing and keeps it in the list. Runs it already created (queued or in progress) are left alone and report as usual." },
   { name: "remember", title: "Remember", annotations: RW, write: true,
     inputSchema: obj({ global: { type: "boolean", description: "True only when the owner explicitly asks for a fleet-wide rule" }, text: str("The rule or fact, one or two sentences, phrased so it is useful later (who/what it applies to, and why)"),
       file: str("memory/owner.md (who the owner is), memory/principles.md (how to work), memory/taste.md (UI/code taste), projects/<project_id>/memory.md for project-specific knowledge, or agents/<name>/memory.md for one agent's know-how") }, ["text", "file"]),
@@ -384,7 +401,8 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
     case "upsert_routine": {
       const routine = s(a.name);
       if (!ROUTINE_NAME.test(routine) || ["__proto__", "constructor", "prototype"].includes(routine)) return "invalid routine name";
-      const existing = listRoutines(st).find((r) => r.name === routine) ?? BUILTIN_ROUTINES.find((r) => r.name === routine);
+      // a deleted routine still counts as existing: re-saving it restores it instead of asking for every field again
+      const existing = listRoutines(st, { includeDeleted: true }).find((r) => r.name === routine);
       const agent = s(a.agent), every = s(a.every), prompt = s(a.prompt);
       if (!existing && (!agent || !every || !prompt)) return "agent, every and prompt required for a new routine";
       if (a.agent !== undefined && (!MEMBER_ID.test(agent) || !st.read(`agents/${agent}/profile.md`))) return "unknown agent (see list_agents)";
@@ -393,6 +411,13 @@ export function writeOp(name: string, a: any, st: ToolStore): WriteOp | string {
       for (const field of ["enabled", "readonly"]) if (a[field] !== undefined && typeof a[field] !== "boolean") return `${field} must be boolean`;
       return { tool: name, name: routine, ...(agent ? { agent } : {}), ...(every ? { every } : {}), ...(prompt ? { prompt } : {}),
         ...(typeof a.enabled === "boolean" ? { enabled: a.enabled } : !existing ? { enabled: true } : {}), ...(typeof a.readonly === "boolean" ? { readonly: a.readonly } : {}) };
+    }
+    case "delete_routine": {
+      const routine = s(a.name);
+      if (!ROUTINE_NAME.test(routine) || ["__proto__", "constructor", "prototype"].includes(routine)) return "invalid routine name";
+      // already deleted counts as done: delete is idempotent, so a retried tool call is not an error
+      if (!listRoutines(st, { includeDeleted: true }).some((r) => r.name === routine)) return `no routine named ${routine} (see list_routines)`;
+      return { tool: name, name: routine };
     }
     case "remember": {
       const text = s(a.text), file = s(a.file);

@@ -50,8 +50,10 @@ test("read tools over the local data repo", async () => {
   expect((await r("get_task", { id: "T-0184" })).events.map((e: any) => e.text)).toEqual(["T-0184 tests pass"]);
   expect((await r("list_agents")).agents).toEqual([{ name: "lead", about: "Kai (lead) — plans and delegates", memory_lines: 0 },
     { name: "reviewer", about: "Rex (reviewer) — reviews PRs", memory_lines: 1 }]);
-  expect((await r("list_routines")).routines).toEqual([{ name: "pr-review", every: "30m", at: undefined, agent: "reviewer", enabled: true, about: "Review open PRs." },
+  const routines = (await r("list_routines")).routines;
+  expect(routines.slice(0, 2)).toEqual([{ name: "pr-review", every: "30m", at: undefined, agent: "reviewer", enabled: true, about: "Review open PRs." },
     { name: "off", every: "1d", at: undefined, agent: "lead", enabled: false, about: "x" }]);
+  expect(routines.slice(2).map((x: any) => [x.name, x.every, x.agent])).toEqual([["security-check", "weekly MON 09:00", "ops-watcher"], ["usage-report", "weekly MON 09:00", undefined]]); // the code-defined ones run here too
   expect((await r("read_memory")).files.map((f: any) => f.file)).toEqual(expect.arrayContaining(["agents/reviewer/memory.md", "memory/taste.md"]));
   expect((await r("read_memory", { query: "dark" })).files).toEqual([expect.objectContaining({ file: "memory/taste.md", matches: ["- Dark mode must be balanced."] })]);
   expect((await r("read_memory", { file: "memory/taste.md" })).text).toContain("Restrained radii");
@@ -209,7 +211,19 @@ test("list_routines: a change made in settings wins over config.toml, as it does
     "settings.json": JSON.stringify({ routines: { "macos-check": { enabled: false }, nightly: { enabled: true, every: "2h" } } }),
   };
   const rows = listRoutines({ read: (p: string) => (files[p] === undefined ? undefined : { text: files[p] }) } as any);
-  expect(rows.map((r) => [r.name, r.enabled, r.every])).toEqual([["macos-check", false, "1d"], ["nightly", true, "2h"]]);
+  expect(rows.map((r) => [r.name, r.enabled, r.every])).toEqual([["macos-check", false, "1d"], ["nightly", true, "2h"],
+    ["security-check", true, "weekly MON 09:00"], ["usage-report", true, "weekly MON 09:00"]]);
+});
+
+test("list_routines: a deleted routine is gone from the list, whichever source defines it", () => {
+  const files: Record<string, string> = {
+    "config.toml": `[[routine]]\nname = "nightly"\nevery = "1d"\nagent = "lead"\nprompt = "y"\n`,
+    "settings.json": JSON.stringify({ routines: { nightly: { deleted: true }, "security-check": { deleted: true }, mine: { agent: "lead", every: "1h", prompt: "z", deleted: true } } }),
+  };
+  const st = { read: (p: string) => (files[p] === undefined ? undefined : { text: files[p] }) } as any;
+  expect(listRoutines(st).map((r) => r.name)).toEqual(["usage-report"]);
+  // validation still sees them, so deleting twice is a no-op instead of an error
+  expect(listRoutines(st, { includeDeleted: true }).filter((r) => r.deleted).map((r) => r.name)).toEqual(["nightly", "security-check", "mine"]);
 });
 
 import { followUpTarget } from "../src/brain";
