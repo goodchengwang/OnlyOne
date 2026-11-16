@@ -35,6 +35,6 @@ export async function packageNpm(version: string, out: string, platform?: string
 }
 if (import.meta.main) {
   const [version, out = "dist/npm", platform] = process.argv.slice(2);
-  if (!version) throw new Error("Pass the version to package, e.g. `bun run package:npm 0.1.5`; the script never infers one, so a stale default cannot ship old code under a new version.");
+  if (!version) throw new Error("Pass the version to package, e.g. `bun run package:npm 0.1.6`; the script never infers one, so a stale default cannot ship old code under a new version.");
   await packageNpm(version, resolve(out), platform);
 }

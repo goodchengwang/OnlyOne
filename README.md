@@ -79,15 +79,15 @@ when it exists. If the user service manager is unavailable, run `sudo loginctl e
 reconnect over SSH and retry. Systems without user systemd can run `onlyone daemon` in the foreground;
 it must remain supervised to keep running after logout. Logs: `journalctl --user -u onlyone -f` on Linux, `~/.onlyone/cli/daemon.log` on macOS/Windows.
 
-To build publishable packages locally: `bun run package:npm 0.1.5` (or invoke
-`bun scripts/package-npm.ts 0.1.5 dist/npm linux-x64` for one platform). Only whitelisted generated files
+To build publishable packages locally: `bun run package:npm 0.1.6` (or invoke
+`bun scripts/package-npm.ts 0.1.6 dist/npm linux-x64` for one platform). Only whitelisted generated files
 are packed. The npm workflow tests actual tarball installs on all five platforms, publishes platform packages
-first and the main package last for a `vX.Y.Z` tag: `v0.1.5` publishes npm version `0.1.5`.
+first and the main package last for a `vX.Y.Z` tag: `v0.1.6` publishes npm version `0.1.6`.
 Each of the six packages must trust GitHub Actions repository `goodchengwang/OnlyOne`, workflow `npm.yml`,
 with **Allow npm publish** enabled and no environment name. Publishing uses OIDC, without `NPM_TOKEN`.
 Pushes without a tag, pull requests and manual runs on branches only build and test.
 Platform packages are named `onlyone-linux-x64`, `onlyone-linux-arm64`, `onlyone-darwin-x64`, `onlyone-darwin-arm64` and `onlyone-windows-x64`; the main package remains `onlyonecli`. The publish job checks that all six packages exist before publishing any of them; every package has had a first publication and trusted publisher setup since `v0.1.5`, so tagging only needs the code to be ready.
-Published npm versions cannot be overwritten, including after unpublishing; the main package and the old platform packages already occupy `0.1.0` through `0.1.5`.
+Published npm versions cannot be overwritten, including after unpublishing; the main package and the old platform packages already occupy `0.1.0` through `0.1.6`.
 The native App workflow and its pinned NSH version are separate.
 
 ## Install from local source
