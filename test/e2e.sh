@@ -76,6 +76,11 @@ grep -q "owner likes options" agents/release-manager/memory.md
 test "$(bun -e "import {Database} from 'bun:sqlite'; console.log(new Database('$W/worker.sqlite').query('SELECT COUNT(DISTINCT ts) AS n FROM history').get().n)")" -gt 5
 # onboarding: self-generated (routine) work waits for approval; owner-derived follow-ups do not
 ls tasks/done/T-0004.md >/dev/null   # follow-up of an owner task ran without approval
+# Start from a clean proposals slate: a batch that was already sent is not rebuilt for autonomy.renotify_hours, so a
+# proposal made while one is open stays out of it and answering that card leaves it pending. Approving the open batch
+# first (the tasks here are only proposed) keeps the fresh task below in the card this block answers.
+P0=$(ls decisions/open | grep '^P-' | head -1 | sed 's/.md//' || true)
+[ -n "$P0" ] && onlyone decide "$P0" all
 RT=$(bun -e "import {newTask,setApprovalGate} from '$SRC/src/core.ts'; import {needsApproval} from '$SRC/src/autonomy.ts'; import {loadConfig} from '$SRC/src/core.ts'; setApprovalGate(s=>needsApproval(loadConfig(),s)); console.log(newTask('routine job','x',{source:'routine:pr-review'}))")
 test -f tasks/proposed/$RT.md
 onlyone tick >/dev/null
