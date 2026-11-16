@@ -10,7 +10,7 @@ const mac = { host: "huacnlee-macbook", caps: ["os:macos", "host:huacnlee-macboo
 const lin = { host: "lb", caps: ["os:linux", "host:lb"], seen: "", busy: 0, version: "1" };
 const old = { host: "omarchy-jason", caps: ["os:linux", "host:omarchy-jason"], seen: "", busy: 0, version: "1" };
 const ctx = (o: Partial<Ctx> = {}): Ctx => ({ now: NOW, online: [mac, lin, old], retired: ["omarchy-jason"], primaryOs: "linux",
-  maxAgeHours: 3, maxWakes: 3, decision: () => undefined, ...o });
+  maxAgeHours: 3, maxWakes: 3, decision: () => undefined, menu: () => undefined, ...o });
 const task = (m: Record<string, string>, folder: "waiting" | "blocked" = "waiting"): Task =>
   ({ folder, meta: { title: m.id, created: new Date(NOW - H).toISOString(), waiting_on: "x", wait_check: "true", ...m } });
 
@@ -18,7 +18,7 @@ const task = (m: Record<string, string>, folder: "waiting" | "blocked" = "waitin
 // tasks/inbox with their host requirement stripped. A leftover there is a pickable task, so a later
 // file's pickTask() test would pick it up instead of its own fixture. Remove what this file created.
 afterAll(() => {
-  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202"]) rmSync(P("tasks", "inbox", `${id}.md`), { force: true });
+  for (const id of ["T-0101", "T-0102", "T-0103", "T-0201", "T-0202", "T-0301"]) rmSync(P("tasks", "inbox", `${id}.md`), { force: true });
 });
 
 test("young, normally cycling waits are left alone", () => {
@@ -93,6 +93,42 @@ test("supervise(): one card per cause, never twice; answering resumes every task
   }
   expect(supervise(cfg, "lb").cards).toBe(0);
   expect(readFileSync(P("journal", `${new Date().toLocaleDateString("sv-SE")}.md`), "utf8")).toContain("supervisor ran");
+});
+
+test("an unanswered menu expires after 24h instead of holding its task blocked forever", () => {
+  const menu = (hours: number) => ({ id: "D-1", kind: "menu", created: new Date(NOW - hours * H).toISOString() });
+  // the owner still has a fresh card: nothing to do
+  expect(classify(task({ id: "T-1", decision: "D-1" }, "blocked"), ctx({ decision: () => "open", menu: () => menu(1) }))).toBeNull();
+  // a worktree/merge card is never expired: it stays the owner's call
+  expect(classify(task({ id: "T-1", decision: "D-2" }, "blocked"), ctx({ decision: () => "open", menu: () => undefined }))).toBeNull();
+  const v = classify(task({ id: "T-1", decision: "D-1" }, "blocked"), ctx({ decision: () => "open", menu: () => menu(25) }))!;
+  expect([v.action, v.cause]).toEqual(["expire", "expired:D-1"]);
+});
+
+test("supervise(): an expired menu is archived unanswered and its task wakes to wrap up, not to re-ask", () => {
+  mkdirSync(P("journal"), { recursive: true });
+  for (const f of ["blocked", "inbox"]) mkdirSync(P("tasks", f), { recursive: true });
+  mkdirSync(P("decisions", "open"), { recursive: true }); mkdirSync(P("decisions", "closed"), { recursive: true });
+  const old = new Date(Date.now() - 25 * H).toISOString();
+  writeDoc(P("decisions", "open", "D-9101.md"), { id: "D-9101", task: "T-0301", kind: "menu", created: old, question: "下一步？", recommendation: "1,2" }, "c");
+  writeDoc(P("tasks", "blocked", "T-0301.md"), { id: "T-0301", title: "menu", kind: "menu", decision: "D-9101", created: old }, "b");
+  expect(supervise({ supervisor: {}, fleet: {} }, "lb").expire).toBe(1);
+  expect(existsSync(P("decisions", "open", "D-9101.md"))).toBe(false);
+  const closed = readDoc(P("decisions", "closed", "D-9101.md")).meta;
+  expect(closed.answered_by).toBe("expired");
+  expect(closed.overrode_recommendation).toBeUndefined(); // silence is not an override
+  const t = readDoc(P("tasks", "inbox", "T-0301.md"));
+  expect(t.meta.menu_expired).toBe("yes");
+  expect(t.body).toContain("Do not open another menu card");
+});
+
+test("supervise(): an old menu card with no task left still expires, so it cannot block future menus forever", () => {
+  mkdirSync(P("journal"), { recursive: true });
+  mkdirSync(P("decisions", "open"), { recursive: true }); mkdirSync(P("decisions", "closed"), { recursive: true });
+  writeDoc(P("decisions", "open", "D-9102.md"), { id: "D-9102", task: "T-0399", kind: "menu", created: new Date(Date.now() - 30 * H).toISOString() }, "c");
+  expect(supervise({ supervisor: {}, fleet: {} }, "lb").expire).toBe(1);
+  expect(existsSync(P("decisions", "open", "D-9102.md"))).toBe(false);
+  expect(readDoc(P("decisions", "closed", "D-9102.md")).meta.answered_by).toBe("expired");
 });
 
 test("closeDecision on a supervisor card never sets gate_override", () => {
