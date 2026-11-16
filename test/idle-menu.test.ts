@@ -52,6 +52,21 @@ test("a menu task still on its way to a card also blocks a second menu", () => {
   expect(list(P("tasks/inbox"))).toEqual([]);
 });
 
+test("an unanswered proposals batch blocks an idle menu too, but not forever", () => {
+  // P-0001 (2026-11-16 10:19) was waiting for the owner while the fleet raised idle menus T-0021 (10:11) and
+  // T-0022 (10:27): the guard only counted kind=menu, so a proposals card was invisible to it.
+  const clock = spyOn(Date, "now").mockReturnValue(now);
+  try {
+    menu("P-F0001", 8, "proposals");
+    maybeProposeNext(cfg, "test", state());
+    expect(tasks()).toEqual([]);
+    // Proposals are rebuilt rather than expired, so after a day of silence the fleet offers again instead of going mute.
+    menu("P-F0001", 25 * 60, "proposals");
+    maybeProposeNext(cfg, "test", state());
+    expect(tasks()).toHaveLength(1);
+  } finally { clock.mockRestore(); }
+});
+
 test("without pending menus the existing 15-minute generation guard still applies", () => {
   maybeProposeNext(cfg, "test", { idle_since: ago(60), last_menu: ago(14) });
   expect(tasks()).toEqual([]);

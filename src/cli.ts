@@ -701,9 +701,17 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
   // "refresh after N hours" rule is exactly how D-0009/D-0010/D-0011 stacked up within four hours on 2026-11-15.
   // Silence is not consent, but it is not forever either: the supervisor archives an unanswered menu card after
   // HUMAN_WAIT_MAX_HOURS and wakes its task to wrap up, and only then can a fresh menu be raised.
-  const liveMenu = list(P("decisions", "open")).some((p) => readDoc(p).meta.kind === "menu")
+  const openCards = list(P("decisions", "open")).map((p) => readDoc(p).meta);
+  const liveMenu = openCards.some((m) => m.kind === "menu")
     || (["inbox", "waiting", "blocked"] as const).some((f) => list(P("tasks", f), /^T-.*\.md$/).some((p) => readDoc(p).meta.kind === "menu"));
   if (liveMenu) return;
+  // A menu is not the only card the owner has sitting in front of them: an unanswered proposals batch is a question
+  // too, and on 2026-11-16 the fleet raised two idle menus (T-0021 10:11, T-0022 10:27) while P-0001 had been waiting
+  // since 10:19. Proposals never expire on their own (autonomy keeps rebuilding the batch), so bound this to the same
+  // day-long limit as a human wait: after HUMAN_WAIT_MAX_HOURS the fleet may offer again rather than stay silent.
+  const liveProposals = openCards.some((m) => m.kind === "proposals"
+    && Date.now() - Date.parse(m.created) < HUMAN_WAIT_MAX_HOURS * 3_600_000);
+  if (liveProposals) return;
   if (state.last_menu && Date.now() - Date.parse(state.last_menu) < 15 * 60_000) return;
   const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
 Build the owner's next-action menu per your profile and return needs_decision.`,
