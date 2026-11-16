@@ -5,7 +5,7 @@
 // Client API (same shape as the local onlyone server):
 //   GET /api/feed?since=  · WS /api/stream?token=  · POST /api/messages {text, reply_to?, attachments?: ["/media/<id>"]}
 //   GET /api/status  · GET|PUT /api/settings  · POST /api/media (multipart) · GET /media/<id>
-//   POST /api/uploads (multipart `file`; the owner's images for a message: image/*, ≤ 10 MB) → {url: "/media/<id>"}
+//   POST /api/uploads (multipart `file` ×1-10; the owner's files for a message: any, ≤ 10 MB) → {url} / {urls}
 // Fleet API (primary host):
 //   POST /api/events (event)  · PUT /api/host/state {status, settings}  · GET /api/host/inbox?after=<seq>
 //   POST /api/host/revoke-sessions (ONLYONE_TOKEN only)
@@ -21,10 +21,11 @@ import { DurableObject } from "cloudflare:workers";
 import { b64dec, b64enc, handleFiles, handleReadFiles, initFilesSchema } from "./files";
 import { FREE, LEAN, SHED, TARGET, latestOnly } from "./budget";
 import { CHANNEL_SLUG, channelDigest, channelsView, taskHistory, taskInfo } from "./tools";
+import { SIDE_CONV, SIDE_TEXT_MAX, addSideMessage, answerSide, emptySide, parseSide, stalePending, stepSide, type SideChat } from "./side";
 import { CODE_RE, newCode, normCode } from "./authcode";
 import { claimPrimary } from "./bootstrap";
 import { sendResend } from "./resend";
-import { mediaHeaders, ownerAttachments, sniffImage, uploadId, uploadProblem } from "./uploads";
+import { MAX_ATTACHMENTS, mediaHeaders, ownerAttachments, uploadFiles, uploadId, uploadProblem, uploadType } from "./uploads";
 import { GUEST_TOKEN, guestApi, guestJoin, guestWho, guestsAdmin, initGuestSchema } from "./guests";
 
 import { sendPush, type PushSub, type Vapid } from "./push";
@@ -180,7 +181,8 @@ export class OnlyOne extends DurableObject<Env> {
       CREATE INDEX IF NOT EXISTS auth_sends_email_ts ON auth_sends (email, ts);
       CREATE INDEX IF NOT EXISTS auth_sends_sent ON auth_sends (sent);
       CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, email TEXT, created INTEGER, last_seen INTEGER, ua TEXT);
-      CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);`);
+      CREATE TABLE IF NOT EXISTS push_subs (endpoint TEXT PRIMARY KEY, session TEXT, p256dh TEXT, auth TEXT, label TEXT, created INTEGER);
+      CREATE TABLE IF NOT EXISTS side (conv TEXT PRIMARY KEY, json TEXT, updated INTEGER);`);
     initFilesSchema(this.sql);
     initGuestSchema(this.sql);
     // scope: "owner" (app / browser) or "mcp" (an OAuth access token for a Claude / ChatGPT connector: /mcp only)
@@ -476,6 +478,27 @@ export class OnlyOne extends DurableObject<Env> {
     for (const ws of this.ctx.getWebSockets("v2")) try { ws.send(s); } catch {}
   }
 
+  // ---- side chat (docs/side-chat.md): one row per conversation, never a feed event, never history
+  sideGet(conv: string): SideChat {
+    const r = this.sql.exec("SELECT json FROM side WHERE conv = ?", conv).toArray()[0];
+    return r ? parseSide(String(r.json), conv) : emptySide(conv);
+  }
+  /** Write the conversation and push it to the owner clients; the panel filters by conv. */
+  sidePut(chat: SideChat) {
+    this.sql.exec("INSERT INTO side (conv, json, updated) VALUES (?, ?, ?) ON CONFLICT(conv) DO UPDATE SET json = excluded.json, updated = excluded.updated",
+      chat.conv, JSON.stringify(chat), Date.now());
+    // a month of untouched side chats is scratch nobody came back to; piggyback a rare sweep, never a timer
+    if (Math.random() < 0.02) this.sql.exec("DELETE FROM side WHERE updated < ?", Date.now() - 30 * 24 * 3600_000);
+    const s = JSON.stringify({ $side: chat });
+    for (const ws of this.ctx.getWebSockets("owner")) try { ws.send(s); } catch {}
+  }
+  /** A channel's side chat is gone with the channel, and a task's with the task's conversation. */
+  sideClear(conv: string) {
+    this.sql.exec("DELETE FROM side WHERE conv = ?", conv);
+    const s = JSON.stringify({ $side: emptySide(conv) });
+    for (const ws of this.ctx.getWebSockets("owner")) try { ws.send(s); } catch {}
+  }
+
   // ---- auth
   credential(req: Request, url: URL) {
     const h = req.headers.get("authorization") ?? "";
@@ -699,18 +722,69 @@ export class OnlyOne extends DurableObject<Env> {
       return json(this.ownerMessage(text, reply_to, files, thread === true && /^T-/.test(reply_to ?? ""), client_id as string | undefined, room));
     }
 
-    // The owner's images for a message (paste / drop / pick in the app): images only, ≤ 10 MB, kept with the media.
+    // Side chat (docs/side-chat.md): a private scratch conversation beside main / ch:<slug> / task:<T-id>.
+    // It is stored beside the feed, never in it: no event row, no unread count, no notification.
+    if (p === "/api/side") {
+      if (who === "machine") return json({ error: "owner session required" }, 403);
+      const conv = url.searchParams.get("conv") ?? "";
+      if (!SIDE_CONV.test(conv)) return json({ error: "bad conv" }, 400);
+      if (m === "GET") { const chat = this.sideGet(conv); return json(stalePending(chat.pending) ? { ...chat, pending: undefined } : chat); }
+      if (m === "DELETE") { this.sideClear(conv); return json(emptySide(conv)); }
+      if (m !== "POST") return json({ error: "not found" }, 404);
+      const b = (await req.json().catch(() => null)) as { text?: unknown; client_id?: unknown } | null;
+      const text = typeof b?.text === "string" ? b.text.trim() : "";
+      const clientId = typeof b?.client_id === "string" ? b.client_id : "";
+      if (!text) return json({ error: "text required" }, 400);
+      if (text.length > SIDE_TEXT_MAX) return json({ error: "text too long" }, 400);
+      if (clientId && !/^[\w:-]{1,100}$/.test(clientId)) return json({ error: "bad client_id" }, 400);
+      const chat = this.sideGet(conv);
+      if (clientId && chat.messages.some((x) => x.role === "owner" && x.id === clientId)) return json(chat); // a retry reuses the receipt
+      const id = `s-${crypto.randomUUID()}`;
+      const next: SideChat = { ...addSideMessage(chat, { id: clientId || `m-${crypto.randomUUID()}`, role: "owner", text }), pending: { id, at: new Date().toISOString() } };
+      this.sidePut(next);
+      // the same owner→fleet inbox that carries chat messages: nothing new polls, nothing new is timed
+      this.toInbox({ type: "side", conv, id, text, at: next.pending!.at });
+      return json(next);
+    }
+    if (p === "/api/host/side" && m === "POST") { // the primary's interim and final frames
+      if (who !== "machine") return json({ error: "forbidden" }, 403);
+      const b = (await req.json().catch(() => null)) as { conv?: unknown; id?: unknown; text?: unknown; step?: unknown; done?: unknown; error?: unknown } | null;
+      const conv = typeof b?.conv === "string" ? b.conv : "", id = typeof b?.id === "string" ? b.id : "";
+      if (!SIDE_CONV.test(conv) || !id) return json({ error: "bad side frame" }, 400);
+      const chat = this.sideGet(conv);
+      // the turn was cleared or replaced (a newer message): its answer belongs nowhere
+      if (chat.pending?.id !== id) return json({ ok: true, dropped: true });
+      if (b?.done === true) {
+        const answer = String(b.text ?? "");
+        this.sidePut(answerSide(chat, { id, text: answer.slice(0, SIDE_TEXT_MAX), error: b.error === true }));
+        return json({ ok: true });
+      }
+      const step = stepSide(chat, { id, step: String(b.step ?? "") });
+      if (step !== chat) this.sidePut(step);
+      return json({ ok: true });
+    }
+
+    // The owner's files for a message (paste / drop / pick in the app): any file, ≤ 10 MB, up to ten in one request,
+    // kept with the media and served as downloads unless they are something a browser may render (see mediaHeaders).
     if (p === "/api/uploads" && m === "POST") {
-      const f = (await req.formData().catch(() => null))?.get("file") as File | null;
-      if (!f || typeof f === "string") return json({ error: "file required" }, 400);
-      const bytes = new Uint8Array(await f.arrayBuffer());
-      const type = sniffImage(bytes.subarray(0, 16), f.type);
-      const bad = uploadProblem(type, f.size);
-      if (bad) return json({ error: bad.error }, bad.status);
-      const id = uploadId(f.name);
-      for (let i = 0, n = 0; i < bytes.length; i += CHUNK, n++)
-        this.sql.exec("INSERT INTO media (id, n, type, data) VALUES (?, ?, ?, ?)", id, n, type, bytes.slice(i, i + CHUNK));
-      return json({ url: `/media/${id}` });
+      const files = uploadFiles(await req.formData().catch(() => null));
+      if (!files.length) return json({ error: "file required" }, 400);
+      if (files.length > MAX_ATTACHMENTS) return json({ error: `up to ${MAX_ATTACHMENTS} files at a time` }, 400);
+      // every file is checked before any is stored, so a refused one leaves nothing behind
+      for (const f of files) {
+        const bad = uploadProblem(f.size);
+        if (bad) return json({ error: bad.error }, bad.status);
+      }
+      const urls: string[] = [];
+      for (const f of files) {
+        const bytes = new Uint8Array(await f.arrayBuffer());
+        const type = uploadType(bytes.subarray(0, 16), f.type, f.name);
+        const id = uploadId(f.name);
+        for (let i = 0, n = 0; i < bytes.length; i += CHUNK, n++)
+          this.sql.exec("INSERT INTO media (id, n, type, data) VALUES (?, ?, ?, ?)", id, n, type, bytes.slice(i, i + CHUNK));
+        urls.push(`/media/${id}`);
+      }
+      return json(files.length === 1 ? { url: urls[0], urls } : { urls });
     }
 
     if (p === "/api/status") return json(this.statusView());
