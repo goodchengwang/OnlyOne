@@ -57,7 +57,7 @@ const memberProfiles = signal<MemberView[]>([]);
 const avatarOf = (from: string) => memberAvatar(from, memberProfiles());
 import { CheckMark } from "./ui/icons";
 import { ATTACH_MAX_COUNT, attachmentName, fileExt, fileSize, fileType, isDoc, isImageFile, isTextFile, showsAsImage } from "./files";
-import { onlyoneMarkdown } from "./markdown";
+import { inlineItems, onlyoneMarkdown } from "./markdown";
 import { canPickProjectFolder, pickProjectFolder } from "./project-folder";
 import { type Channel, channelDigest, sortChannels } from "./channels";
 import { isRead, markRead, unreadEvents, toggleMessageRead, type MessageReadState as ReadState } from "./read";
@@ -462,11 +462,11 @@ let taskLink: (id: string) => void = () => {};
 /** A task's state from the onlyone's status (set by the channel), for the chips' dots. */
 let taskState: (id: string) => string | undefined = () => undefined;
 
-/** The app's syntax in messages (`extensions`, `pattern`): task ids and decision / proposal ids, shown by `renderCustom`. */
+/** The app's syntax in messages (`extensions`, `pattern`): task ids, shown by `renderCustom` as chips that open them.
+ * Decision and proposal ids are no view of their own: `inlineItems` makes them the text's own run. */
 const EXTENSIONS: MarkdownExtension[] = [
-  // ids minted on a non-primary host carry its letter (T-M0001, D-H0002)
+  // ids minted on a non-primary host carry its letter (T-M0001)
   { name: "task", pattern: "\\bT-[A-Z]?\\d{4}\\b" },
-  { name: "item", pattern: "\\b[DP]-[A-Z]?\\d{4}\\b" },
 ];
 /**
  * An id inside a file path ("tasks/done/T-0930.md", "T-0930/notes") names the file, not the task: it stays plain
@@ -481,7 +481,7 @@ function pathInlines(inlines: TextViewInline[]): TextViewInline[] {
     else out.push({ type: "text", text: t });
   };
   inlines.forEach((i, k) => {
-    if (i.type === "custom" && (i.name === "task" || i.name === "item")) {
+    if (i.type === "custom" && i.name === "task") {
       const prev = out[out.length - 1];
       const next = inlines[k + 1];
       const before = prev?.type === "text" ? prev.text : "";
@@ -615,24 +615,20 @@ const chipFrame = (): ViewStyle => ({
 });
 const chipHover = (): ViewStyle => ({ backgroundColor: alpha(colors.text, 0.12) });
 
+/** A task id in a message: a chip that opens the task. A decision or proposal id is not one of these — it is the
+ * text's own run (`inlineItems`), because a view placed in the text takes its width even when the runtime never
+ * paints it (D-0015 read as a blank that wide in a task page). */
 function Custom(props: { node: TextViewCustomNode; small: boolean }) {
   const n = props.node;
   const fs = props.small ? 12 : 13;
-  if (n.name === "task") {
-    const st = () => STATE_OF()[taskState(n.text!) ?? ""];
-    return (
-      <View role="link" testID={`task-chip-${n.text}`} accessibilityLabel={L(`Task ${n.text}`, `任务 ${n.text}`)} onPress={() => taskLink(n.text!)}
-        hoverStyle={chipHover()} style={{ ...chipFrame(), paddingHorizontal: 6 }}>
-        <If when={st()}>
-          <View style={{ cursor: "pointer", width: 6, height: 6, borderRadius: 3, backgroundColor: st()?.[1] ?? colors.muted }} />
-        </If>
-        <Text style={{ ...chipText, fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.text }}>{n.text}</Text>
-      </View>
-    );
-  }
+  const st = () => STATE_OF()[taskState(n.text!) ?? ""];
   return (
-    <View style={{ verticalAlign: "middle", height: 20, justifyContent: "center", marginHorizontal: 2, paddingHorizontal: 6, borderRadius: corner.badge, backgroundColor: alpha(colors.text, 0.07) }}>
-      <Text style={{ fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.muted }}>{n.text}</Text>
+    <View role="link" testID={`task-chip-${n.text}`} accessibilityLabel={L(`Task ${n.text}`, `任务 ${n.text}`)} onPress={() => taskLink(n.text!)}
+      hoverStyle={chipHover()} style={{ ...chipFrame(), paddingHorizontal: 6 }}>
+      <If when={st()}>
+        <View style={{ cursor: "pointer", width: 6, height: 6, borderRadius: 3, backgroundColor: st()?.[1] ?? colors.muted }} />
+      </If>
+      <Text style={{ ...chipText, fontFamily: MONO, fontSize: fs, lineHeight: 16, color: colors.text }}>{n.text}</Text>
     </View>
   );
 }
@@ -644,7 +640,7 @@ function Rich(props: { text: string; muted?: boolean; quiet?: boolean; context?:
   const fontSize = () => (props.quiet ? 13 : props.muted ? size.small : size.text) * k();
   const lineHeight = () => (props.quiet ? 19 : small ? 21 : size.line) * k();
   const doc = () => {
-    const d = TextView.parse(onlyoneMarkdown(linkRepoRefs(props.text, props.context)), { math: false, html: false }, EXTENSIONS);
+    const d = TextView.parse(inlineItems(onlyoneMarkdown(linkRepoRefs(props.text, props.context))), { math: false, html: false }, EXTENSIONS);
     return { ...d, blocks: ghBlocks(d.blocks) };
   };
   return (
