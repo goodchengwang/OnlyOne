@@ -776,6 +776,8 @@ function cleanupWorktreesHourly(cfg: Cfg, host: string) {
     const r = cleanupMergedWorktrees();
     if (r.removed.length)
       journal(host, `🧹 cleaned ${r.removed.length} merged worktree(s)/branch(es): ${r.removed.map((x) => x.id).join(", ")}`);
+    if (r.scratchRemoved.length)
+      journal(host, `🧹 cleaned ${r.scratchRemoved.length} old scratch dir(s) of finished tasks: ${r.scratchRemoved.map((x) => x.id).join(", ")}`);
   } catch (e) { console.error(`worktree cleanup: ${e}`); }
 }
 

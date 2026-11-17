@@ -48,6 +48,11 @@ branch (squash merges included), the daemon removes that task's checkout and loc
 Anything else is kept and reported: a branch still held by a live task, a checkout with uncommitted changes, an
 unmerged branch, or a path outside `~/.onlyone/work`. `[worktree] cleanup = false` turns this off.
 
+The same sweep also takes the plain directories those tasks leave behind — release downloads, extracted archives — when
+the directory name starts with the task id (`T-0024-release-v0.1.6`, `T-0037`), the task is finished, the directory is
+not a git checkout, and it is older than 7 days. Directories no task owns, live tasks' folders and anything with a
+`.git` inside are left alone.
+
 ## Install the CLI with npm
 
 Requires Node.js 22+ and npm. The public package is `onlyonecli`; the installed command is `onlyone`.
