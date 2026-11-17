@@ -146,7 +146,7 @@ export function prForWorktree(
   // a refused push is the owner's to unblock; no push at all (no remote, or push disabled) is simply local work
   if (!o.pushed) return o.pushError ? { ask: L(`分支推送失败：${o.pushError}`, `the branch was not pushed: ${o.pushError}`) } : { local: true };
   const existing = gh.find(tree.repo, tree.branch);
-  if (existing) return { pr: existing.url, created: false };
+  if (existing && existing.state !== "CLOSED") return { pr: existing.url, created: false }; // a closed PR was refused, not delivered
   const made = gh.create({ repo: tree.repo, branch: tree.branch, base: tree.base, title: o.title, body: o.body, agent: o.agent });
   return made.url ? { pr: made.url, created: true } : { ask: made.error ?? "gh pr create failed" };
 }

@@ -28,6 +28,14 @@ test("an existing PR for the branch is reused, never opened twice", () => {
   expect(created).toBe(0);
 });
 
+test("a PR the owner closed is refused work, so a new one is opened", () => {
+  const r = prForWorktree(tree, { ...work, pushed: "origin/agent/T-0001-fix" }, {
+    find: () => ({ url: "https://github.com/o/r/pull/7", state: "CLOSED" }),
+    create: () => ({ url: "https://github.com/o/r/pull/11" }),
+  });
+  expect(r).toEqual({ pr: "https://github.com/o/r/pull/11", created: true });
+});
+
 test("a refused push and a refused gh still reach the owner", () => {
   const noPush = prForWorktree(tree, { ...work, pushError: "remote rejected" }, { find: () => null, create: () => ({ url: "x" }) });
   expect("ask" in noPush && noPush.ask).toContain("remote rejected");
