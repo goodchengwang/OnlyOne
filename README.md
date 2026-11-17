@@ -37,11 +37,16 @@ on one repository then progress in parallel without blocking each other. The tas
 path, the reason it was chosen, the commit and the diff.
 
 When the agent finishes, the executor commits whatever the run left uncommitted on that branch and pushes it to
-`origin`, so the work never sits on one machine; a commit the run made on the plain branch is pushed the same way. It
-then asks the owner whether to keep iterating in the worktree or open a PR to the base branch. The owner always makes
-that choice (the judge does not answer it), and the agent never merges. The task page also shows where the commit was
+`origin`, so the work never sits on one machine; a commit the run made on the plain branch is pushed the same way. A
+run that left a commit on its branch gets a PR to the base branch opened for it automatically; the owner decides
+whether to merge, and the agent never merges. The task page also shows where the commit was
 pushed, or why a push was refused. Saying “use a worktree” in the request, or `onlyone add --worktree`, forces one;
 `[worktree] enabled = false` in `config.toml` turns the behaviour off, `push = false` keeps auto-commits local.
+
+Finished work does not pile up: once a task is in `tasks/done` or `tasks/failed` and its branch is fully in the base
+branch (squash merges included), the daemon removes that task's checkout and local branch, checked at most once an hour.
+Anything else is kept and reported: a branch still held by a live task, a checkout with uncommitted changes, an
+unmerged branch, or a path outside `~/.onlyone/work`. `[worktree] cleanup = false` turns this off.
 
 ## Install the CLI with npm
 

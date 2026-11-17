@@ -14,7 +14,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { traceFromLog, writeTrace } from "./runlog";
-import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, prForWorktree, pushBranch, type WorkInfo, type Worktree } from "./worktree";
+import { cleanupMergedWorktrees, commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, prForWorktree, pushBranch, type WorkInfo, type Worktree } from "./worktree";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, HUMAN_WAIT_MAX_HOURS, humanWaitExpired, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
@@ -764,6 +764,21 @@ function pruneMediaHourly(cfg: Cfg) {
   } catch (e) { console.error(`media prune: ${e}`); }
 }
 
+/** Finished tasks' branches and checkouts go once their work is fully in the base branch, checked hourly (D-0041 A).
+ *  The guards live in cleanupMergedWorktrees: live tasks, uncommitted edits, unmerged branches and any path outside
+ *  ~/.onlyone/work are never touched. */
+let worktreesSwept = 0;
+function cleanupWorktreesHourly(cfg: Cfg, host: string) {
+  if (cfg.worktree?.cleanup === false) return;
+  if (Date.now() - worktreesSwept < 3_600_000) return;
+  worktreesSwept = Date.now();
+  try {
+    const r = cleanupMergedWorktrees();
+    if (r.removed.length)
+      journal(host, `🧹 cleaned ${r.removed.length} merged worktree(s)/branch(es): ${r.removed.map((x) => x.id).join(", ")}`);
+  } catch (e) { console.error(`worktree cleanup: ${e}`); }
+}
+
 /** Stall supervisor (T-0728): every [supervisor] every_minutes (30) chase waiting/blocked tasks like a team lead. */
 let lastSupervise = 0;
 function maybeSupervise(cfg: Cfg, host: string) {
@@ -793,6 +808,7 @@ export async function tick(cfg: Cfg, background = false) {
     await _commitPush(`[${host}] tick`);
   });
   pruneMediaHourly(cfg);
+  cleanupWorktreesHourly(cfg, host);
   await retryLogins(cfg);
   if (primary || pendingLoginIds().size) await handleReplies(cfg, host);
   if (primary) await planInbox(cfg, host);
