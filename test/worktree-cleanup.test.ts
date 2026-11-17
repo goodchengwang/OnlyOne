@@ -2,7 +2,7 @@
 // the base branch should not need a pr-triage run to notice it. These tests pin every hard condition — a live task, an
 // uncommitted edit, an unmerged branch, or a path outside ~/.onlyone/work must never be deleted.
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeDoc } from "../src/core";
@@ -147,3 +147,34 @@ test("a second sweep is a no-op", () => {
   const r = cleanupMergedWorktrees({ tasksDir: tasks, workRoot: work });
   expect(r.removed).toEqual([]);
 });
+
+/** Scratch dirs the fleet leaves in ~/.onlyone/work: downloads and archives, not git worktrees. */
+const scratch = (name: string, ageMs = 0) => {
+  const p = join(work, name);
+  mkdirSync(p, { recursive: true });
+  writeFileSync(join(p, "payload.bin"), "x\n");
+  if (ageMs) utimesSync(p, new Date(Date.now() - ageMs), new Date(Date.now() - ageMs));
+  return p;
+};
+const OLD_MS = 30 * 86_400_000;
+
+test("old scratch dirs of finished tasks are removed, everything unattributable stays", () => {
+  const old = scratch("T-1001-release-v1", OLD_MS); // finished task, old
+  const fresh = scratch("T-1001-shots"); // finished task, but just now
+  const liveTask = scratch("T-1009-shots", OLD_MS); // T-1009 is live: its id wins over any finished T-1009
+  const loose = scratch("v015-verify", OLD_MS); // no task owns this name
+  const checkout = scratch("T-1002-clone", OLD_MS); // has .git: a checkout, not scratch
+  mkdirSync(join(checkout, ".git"), { recursive: true });
+  const link = join(work, "T-1001-link");
+  symlinkSync(fresh, link); // utimes would follow the link and age its target
+
+  const dry = cleanupMergedWorktrees({ tasksDir: tasks, workRoot: work, dry: true });
+  expect(dry.scratchRemoved.map((x) => x.path)).toEqual([old]);
+  expect(existsSync(old)).toBe(true);
+
+  const r = cleanupMergedWorktrees({ tasksDir: tasks, workRoot: work });
+  expect(r.scratchRemoved.map((x) => x.id)).toEqual(["T-1001"]);
+  expect(existsSync(old)).toBe(false);
+  for (const keep of [fresh, liveTask, loose, checkout, link]) expect(existsSync(keep)).toBe(true);
+});
+

@@ -2,7 +2,7 @@
 // task gets its own branch and checkout under ~/.onlyone/work. Several requirements on one repo then progress side
 // by side, and the owner decides afterwards whether to keep working there or open a PR to the base branch.
 // Everything here is local git; it adds no Worker requests or rows (see AGENTS.md, Cloudflare budget).
-import { existsSync, mkdirSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { HOME_DIR, L, P, list, readDoc, type Cfg } from "./core";
@@ -210,7 +210,12 @@ export function fullyInBase(repo: string, branch: string, base: string): boolean
 }
 
 export type CleanedWorktree = { id: string; branch?: string; worktree?: string; branchRemoved: boolean; worktreeRemoved: boolean };
-export type CleanupResult = { removed: CleanedWorktree[]; kept: { id: string; why: string }[] };
+export type CleanupResult = {
+  removed: CleanedWorktree[];
+  kept: { id: string; why: string }[];
+  /** Plain scratch directories of finished tasks (release downloads, extracted archives) that were removed. */
+  scratchRemoved: { id: string; path: string }[];
+};
 
 /**
  * Remove the branch and checkout of tasks that are finished (done/failed) AND whose work is fully in their base branch.
@@ -220,15 +225,20 @@ export type CleanupResult = { removed: CleanedWorktree[]; kept: { id: string; wh
  *   - the checkout is inside ~/.onlyone/work (never delete anything elsewhere),
  *   - the checkout has no uncommitted changes,
  *   - the branch is fully in the base branch (squash merges included).
+ *
+ * It also removes plain scratch directories left by finished tasks (see the second half of the function).
  */
-export function cleanupMergedWorktrees(o: { tasksDir?: string; workRoot?: string; only?: string[]; dry?: boolean } = {}): CleanupResult {
+export function cleanupMergedWorktrees(
+  o: { tasksDir?: string; workRoot?: string; only?: string[]; dry?: boolean; scratchDays?: number } = {},
+): CleanupResult {
   const tasksDir = o.tasksDir ?? P("tasks");
   const workRoot = resolve((o.workRoot ?? join(HOME_DIR, "work")).replace(/^~/, homedir()));
   const inside = (p: string) => p === workRoot || p.startsWith(workRoot + sep);
   const live = liveWorktrees(tasksDir);
   const liveBranches = new Set(live.map((t) => t.branch).filter(Boolean));
   const liveTrees = new Set(live.map((t) => (t.worktree ? resolve(t.worktree.replace(/^~/, homedir())) : "")).filter(Boolean));
-  const res: CleanupResult = { removed: [], kept: [] };
+  const liveIds = live.map((t) => t.id);
+  const res: CleanupResult = { removed: [], kept: [], scratchRemoved: [] };
   for (const folder of ["done", "failed"] as const)
     for (const file of list(join(tasksDir, folder), /^T-.*\.md$/)) {
       const { meta } = readDoc(file);
@@ -263,6 +273,42 @@ export function cleanupMergedWorktrees(o: { tasksDir?: string; workRoot?: string
         rec.branchRemoved = true;
       }
       res.removed.push(rec);
+    }
+  // Plain scratch directories (release downloads, extracted archives, screenshots) pile up in the same folder but are
+  // not git worktrees, so the loop above never sees them: 1.3GB of them had to be swept by hand on 2026-11-17. They are
+  // attributed to a task by name (`<task id>`, `<task id>-...`), which is how the fleet names them. Only removed when:
+  //   - the name belongs to a task in tasks/done or tasks/failed (a live task's id is skipped even if it also finished one),
+  //   - the entry is a plain directory, a symlink or a checkout (has .git) is left alone,
+  //   - it is older than scratchDays (default 7) so a just-finished task's files stay readable for a while.
+  const finished = new Map<string, string>();
+  for (const folder of ["done", "failed"] as const)
+    for (const file of list(join(tasksDir, folder), /^T-.*\.md$/)) {
+      const { meta } = readDoc(file);
+      finished.set(meta.id || basename(file, ".md"), folder);
+    }
+  const ownerOf = (name: string) => {
+    if (liveIds.some((id) => name === id || name.startsWith(id + "-"))) return "";
+    let best = "";
+    for (const id of finished.keys()) if ((name === id || name.startsWith(id + "-")) && id.length > best.length) best = id;
+    return best;
+  };
+  const maxAge = (o.scratchDays ?? 7) * 86_400_000;
+  if (existsSync(workRoot))
+    for (const name of readdirSync(workRoot)) {
+      if (name.startsWith(".")) continue;
+      const path = join(workRoot, name);
+      if (liveTrees.has(path)) continue;
+      const id = ownerOf(name);
+      if (!id) continue;
+      if (o.only && !o.only.includes(id)) continue;
+      let st;
+      try { st = lstatSync(path); } catch { continue; }
+      if (!st.isDirectory()) continue; // symlinks and files are never touched
+      if (existsSync(join(path, ".git"))) continue; // a checkout: only git worktree removal may take it
+      if (Date.now() - st.mtimeMs < maxAge) continue;
+      if (o.dry) { res.scratchRemoved.push({ id, path }); continue; }
+      try { rmSync(path, { recursive: true, force: true }); res.scratchRemoved.push({ id, path }); }
+      catch (e) { res.kept.push({ id, why: `scratch ${name} not removed: ${e}` }); }
     }
   return res;
 }
