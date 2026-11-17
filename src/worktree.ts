@@ -6,6 +6,7 @@ import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { HOME_DIR, L, P, list, readDoc, type Cfg } from "./core";
+import { openPr, prForBranch } from "./github";
 
 export type GitRepo = { root: string; branch: string; base: string };
 export type Worktree = { path: string; branch: string; base: string; repo: string };
@@ -129,6 +130,25 @@ export function commitWorktree(path: string, o: { taskId: string; title: string;
   // the owner wants the work on the remote, not only on this machine: every auto-commit is pushed
   const sent = o.push === false || s.commits === 0 ? {} : pushBranch(path, on.ok ? on.out : "");
   return { sha: head.ok ? head.out : undefined, ...s, committed, ...sent };
+}
+
+export type BranchPr = { pr: string; created: boolean } | { ask: string } | { local: true };
+
+/** A finished worktree task left a fresh commit on its branch. Turning that into a PR is already "do without
+ *  asking", and on 2026-11-16 the owner answered "open a PR" to every one of the 15 such cards (D-0013…D-0038),
+ *  each of which held the task for minutes to hours — so the branch becomes a PR here and a card is only raised
+ *  for what the machine could not do itself (no push, no PR). The gh calls are injected so this stays testable. */
+export function prForWorktree(
+  tree: { repo: string; branch: string; base: string },
+  o: { title: string; body: string; agent: string; pushed?: string; pushError?: string },
+  gh: { find: typeof prForBranch; create: typeof openPr } = { find: prForBranch, create: openPr },
+): BranchPr {
+  // a refused push is the owner's to unblock; no push at all (no remote, or push disabled) is simply local work
+  if (!o.pushed) return o.pushError ? { ask: L(`分支推送失败：${o.pushError}`, `the branch was not pushed: ${o.pushError}`) } : { local: true };
+  const existing = gh.find(tree.repo, tree.branch);
+  if (existing && existing.state !== "CLOSED") return { pr: existing.url, created: false }; // a closed PR was refused, not delivered
+  const made = gh.create({ repo: tree.repo, branch: tree.branch, base: tree.base, title: o.title, body: o.body, agent: o.agent });
+  return made.url ? { pr: made.url, created: true } : { ask: made.error ?? "gh pr create failed" };
 }
 
 /** Should this task work on its own branch? Planner decisions win; otherwise a busy repo or a previous worktree does. */

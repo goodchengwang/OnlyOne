@@ -49,11 +49,11 @@ test("ordinary decision cards are never superseded by a menu", () => {
   expect(existsSync(core.P("decisions", "open", `${work}.md`))).toBe(true);
 });
 
-test("owner_overrides_of_judge counts the recorded override field, not the answered_by text", () => {
+test("owner_overrode_recommendation counts the recorded override field, not the answered_by text", () => {
   core.writeDoc(core.P("decisions", "closed", "D-9001.md"),
     { id: "D-9001", agent: "chief-of-staff", kind: "menu", answered_by: "owner(chat)", answered: core.now(), recommendation: "1,2,3", answer: "都不要", overrode_recommendation: "yes" }, "x");
   core.writeDoc(core.P("decisions", "closed", "D-9002.md"),
     { id: "D-9002", agent: "lead", answered_by: "owner(chat)", answered: core.now(), recommendation: "A", answer: "A" }, "x");
   const m = met.computeMetrics(7);
-  expect(m.decisions.owner_overrides_of_judge).toBe(1);
+  expect(m.decisions.owner_overrode_recommendation).toBe(1);
 });
