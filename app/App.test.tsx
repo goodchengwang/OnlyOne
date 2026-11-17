@@ -957,7 +957,7 @@ describe("attachments", () => {
     await app.waitFor("text:1 / 2");
   });
 
-  test("the header button and the card open the newest Markdown report in the reader pane, which zooms and closes", async () => {
+  test("the header button and the card open the newest Markdown report in the reader pane, which resizes and closes", async () => {
     const report = { id: "r1", ts: ts(8), from: "lead@mac", kind: "notice", text: "推送通知梳理完成", attachments: ["/media/1762650000000-push-notifications.md"] };
     const app = await open("./App.tsx", {
       ...desk,
@@ -973,13 +973,14 @@ describe("attachments", () => {
     await app.waitFor("id:doc-side");
     await app.waitUntil(() => app.shows("text:Push notifications"));
     expect(app.shows("text:MD · Reading")).toBe(true);
-    expect(app.shows("text:100%")).toBe(true);
-    await app.press("id:doc-zoom-in");
-    await app.waitUntil(() => app.shows("text:113%"));
-    await app.press("id:doc-zoom-out");
-    await app.press("id:doc-zoom-out");
-    await app.waitUntil(() => app.shows("text:88%"));
-    await app.press("id:doc-expand");
+    // the header's zoom and widen buttons are gone: the pane's width is the edge the reader is dragged by
+    expect(app.shows("id:doc-zoom-in")).toBe(false);
+    expect(app.shows("id:doc-zoom-out")).toBe(false);
+    expect(app.shows("id:doc-scale")).toBe(false);
+    expect(app.shows("id:doc-expand")).toBe(false);
+    // dragging the edge left widens it, and the width it is left at is kept on the device
+    await app.drag("label:Resize the panel", { x: -120, y: 0 });
+    await app.waitUntil(() => Number(app.storage()["onlyone.reader.width"]) > 460);
     await app.press("id:doc-close");
     await app.waitUntil(() => !app.shows("id:doc-reader"));
     // closing doesn't bring it back; the header button and the card reopen it
@@ -1039,7 +1040,7 @@ describe("attachments", () => {
     expect(app.shows("id:doc-sheet")).toBe(false);
     await app.press("id:doc-attachment");
     await app.waitFor("id:doc-sheet");
-    expect(app.shows("id:doc-expand")).toBe(false);
+    expect(app.shows("id:doc-zoom-in")).toBe(false);
     await app.press("id:doc-close");
     await app.waitUntil(() => !app.shows("id:doc-sheet"));
   });
@@ -2343,6 +2344,10 @@ describe("side chat", () => {
     await app.waitFor("id:side-pending");
     // nothing here becomes a chat message
     expect(pushed.length).toBe(0);
+    // its edge is dragged like the reader's, and the width is kept on its own key
+    await app.drag("label:拖动改变面板宽度", { x: 120, y: 0 });
+    await app.waitUntil(() => app.storage()["onlyone.side.width"] !== undefined);
+    expect(Number(app.storage()["onlyone.side.width"])).toBe(320);
     await app.press("id:side-close");
     await app.waitUntil(() => !app.shows("id:side-chat"));
   });

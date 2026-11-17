@@ -39,7 +39,7 @@ import {
   windowSize, token, openUrl, keyboardFrame, Keyboard, Picker, Speech, Clipboard, Notifications } from "nsh";
 import fs from "fs/promises";
 import type { InputRef, JSX, ScrollRef, SpeechSession, ViewStyle } from "nsh";
-import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
+import { AlertDialog, Carousel, CarouselContent, CarouselItem, CarouselNext, CarouselPrevious, Toast, ToastStack, Button as BaseButton, ContextMenu, Dialog, Menu, MenuItem, Submenu, Input, NavPage, NavStack, NumberInput, Radio, RadioGroup, ResizablePanel, ResizablePanelGroup, Scrollbar, TextView, createNavStack, type MarkdownExtension, type TextViewBlock, type TextViewCustomNode, type TextViewInline } from "nsh/base";
 import { isAvailable as hasWindow, titleBar, currentWindow } from "nsh/desktop";
 import { checkForPackage, checkForUpdate, downloadPackage, downloadUpdate, installAndRestart, restartToPackage, runningPackage } from "nsh/updater";
 // shellInfo through the namespace: runtimes older than it lack the export, and a missing named import would fail to link
@@ -114,6 +114,7 @@ import {
   pageContent,
   font,
   leading,
+  handleThumb,
 } from "./ui";
 import {
   answeredIds,
@@ -910,20 +911,15 @@ function FileChip(props: { name: string; size: number }) {
   );
 }
 
-const DOC_SCALES = [0.875, 1, 1.125, 1.25, 1.4];
-/** The reader beside the chat (a full sheet on a phone): the open report rendered with TextView, with text zoom and a wider pane. */
 /**
  * The report reader. Beside the chat (`wide`) it runs to the window's top edge: its header is part of the window's
- * title bar (drags the window, and leaves room for the window buttons Linux and Windows draw at the right).
+ * title bar (drags the window, and leaves room for the window buttons Linux and Windows draw at the right). Its width
+ * is the pane's, dragged by its edge (see `ResizablePanelGroup` below), not a zoom of the text.
  */
-function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpand: () => void; onClose: () => void }) {
-  const step = signal(1);
+function DocPane(props: { doc: DocRef; wide: boolean; onClose: () => void }) {
   // looked up once per report, so a re-render never fetches again by itself
   const cell = computed(() => { const src = props.doc.src; return untracked(() => docBody(src)); });
   const body = () => cell()();
-  const btn = (p: { id: string; icon: IconName; label: string; on?: boolean; disabled?: boolean; onPress: () => void }) => (
-    <IconButton testID={p.id} icon={p.icon} label={p.label} size="sm" selected={p.on} disabled={p.disabled} onPress={p.onPress} />
-  );
   return (
     <View testID="doc-reader" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>
       <View
@@ -932,13 +928,7 @@ function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpan
       >
         <Icon name="document" size={16} tint={colors.muted} />
         <Text testID="doc-title" style={{ flex: 1, minWidth: 0, marginLeft: 8, marginRight: 6, fontSize: 13.5, fontWeight: "600", color: colors.text, numberOfLines: 1 }}>{props.doc.name}</Text>
-        {btn({ id: "doc-zoom-out", icon: "zoom-out", label: L("Smaller text", "缩小文字"), disabled: step() === 0, onPress: () => step.set(Math.max(0, step() - 1)) })}
-        <Text testID="doc-scale" style={{ width: 36, textAlign: "center", fontSize: 11.5, fontVariant: ["tabular-nums"], color: colors.faint }}>{`${Math.round(DOC_SCALES[step()] * 100)}%`}</Text>
-        {btn({ id: "doc-zoom-in", icon: "zoom-in", label: L("Larger text", "放大文字"), disabled: step() === DOC_SCALES.length - 1, onPress: () => step.set(Math.min(DOC_SCALES.length - 1, step() + 1)) })}
-        <If when={props.wide}>
-          {btn({ id: "doc-expand", icon: props.expanded ? "minimize" : "maximize", label: props.expanded ? L("Narrow reader", "收窄阅读栏") : L("Widen reader", "加宽阅读栏"), on: props.expanded, onPress: props.onExpand })}
-        </If>
-        {btn({ id: "doc-close", icon: "close", label: L("Close reader", "关闭阅读栏"), onPress: props.onClose })}
+        <IconButton testID="doc-close" icon="close" label={L("Close reader", "关闭阅读栏")} size="sm" onPress={props.onClose} />
       </View>
       <Scroll style={{ flex: 1 }}>
         <View selectable style={{ width: "100%", maxWidth: 760, alignSelf: "center", gap: 12, paddingHorizontal: props.wide ? 28 : 20, paddingTop: 28, paddingBottom: 48 }}>
@@ -950,7 +940,7 @@ function DocPane(props: { doc: DocRef; wide: boolean; expanded: boolean; onExpan
               </If>
             </View>
           }>
-            <Rich text={body().text ?? ""} scale={DOC_SCALES[step()]} />
+            <Rich text={body().text ?? ""} />
           </If>
         </View>
       </Scroll>
@@ -4477,11 +4467,22 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   });
   // a different onlyone or a sign-out starts with no reports kept from the last one
   cleanup(clearDocCache);
-  const readerWide = signal(false);
-  /** Room for the chat beside the reader; below it the reader covers the chat like a sheet. */
+  /** Room for the chat beside a right-hand pane; below it the pane covers the chat like a sheet. */
   const chatRoom = () => windowSize().width - (wide() && sidebarOpen() ? size.sidebar : 0);
   const readerSide = () => wide() && chatRoom() >= 860;
-  const readerWidth = () => (readerWide() ? Math.round(chatRoom() * 0.62) : Math.min(460, Math.round(chatRoom() * 0.42)));
+  // The right-hand panes (the report reader, the side chat) are resized by dragging the handle at their edge
+  // (`ResizablePanelGroup`). The width the owner left one at is kept on the device and is that pane's only width:
+  // the panel renders it, the drag writes it, and there is no second copy in settings.
+  const PANE_MIN = 320;
+  const PANE_KEYS = { reader: "onlyone.reader.width", side: "onlyone.side.width" };
+  const keptWidth = (key: string) => {
+    const kept = signal<number | null>(null);
+    void Storage.getItem(key).then((raw) => { const n = Number(raw); if (raw !== null && Number.isFinite(n) && n >= PANE_MIN) kept.set(n); });
+    return kept;
+  };
+  const readerWidthKept = keptWidth(PANE_KEYS.reader);
+  const sideWidthKept = keptWidth(PANE_KEYS.side);
+  const readerWidth = () => readerWidthKept() ?? Math.min(460, Math.round(chatRoom() * 0.42));
   const shownDoc = () => { const d = reading(); return d && d.at === readerAt() ? d : null; };
   /** The reader beside a page that has one (the channel, a task), from the window's top edge. */
   const docSide = () => !!shownDoc() && readerSide() && !paneOpen() && (top().name === "channel" || top().name === "task");
@@ -4494,10 +4495,18 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
     return scope() ? `# ${scoped()?.name ?? scope()}` : L("Main chat", "主会话");
   });
   const sideBeside = () => wide() && chatRoom() >= 860;
-  const sideWidth = () => Math.min(420, Math.max(320, Math.round(chatRoom() * 0.34)));
+  const sideWidth = () => sideWidthKept() ?? Math.min(420, Math.max(320, Math.round(chatRoom() * 0.34)));
   // The pane holds one thing: a run's process (opened from a run record) or the side chat.
   const sideShown = () => paneOpen() && (!!openRun() || !!sideKey());
   const sideSide = () => sideShown() && sideBeside();
+  /** The one pane beside the chat, and its width: the widest it may be leaves the chat 38% of the room. */
+  const paneSide = () => docSide() || sideSide();
+  const paneWidth = () => (docSide() ? readerWidth() : sideWidth());
+  const paneMax = () => Math.max(PANE_MIN, Math.round(chatRoom() * 0.62));
+  const keepPaneWidth = (size: number) => {
+    if (docSide()) { readerWidthKept.set(size); void Storage.setItem(PANE_KEYS.reader, String(Math.round(size))); }
+    else if (sideSide()) { sideWidthKept.set(size); void Storage.setItem(PANE_KEYS.side, String(Math.round(size))); }
+  };
   const sidePane = () => {
     const run = openRun();
     if (run) return <RunPane onlyone={onlyone} id={run.id} at={run.at} wide={sideBeside()} onClose={() => openRun.set(null)} />;
@@ -4519,7 +4528,7 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   const readerPane = () => {
     const d = shownDoc();
     if (!d) return null;
-    return <DocPane doc={d} wide={readerSide()} expanded={readerWide()} onExpand={() => { if (!reduceMotion()) LayoutAnimation.configureNext(LayoutAnimation.create(180, "easeInEaseOut")); readerWide.set(!readerWide()); }} onClose={() => reading.set(null)} />;
+    return <DocPane doc={d} wide={readerSide()} onClose={() => reading.set(null)} />;
   };
   const visibleMessages = signal<OnlyOneEvent[]>([]);
   effect(() => {
@@ -5543,13 +5552,6 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
   const withReader = (page: JSX.Element) => (
     <View style={{ flex: 1, flexDirection: "row", minWidth: 0 }}>
       {page}
-      {/* room for the reader, which `docSide` draws over the page's bar up to the window's top edge */}
-      <If when={shownDoc() && readerSide() && !paneOpen()}>
-        <View style={{ width: readerWidth() }} />
-      </If>
-      <If when={sideSide()}>
-        <View style={{ width: sideWidth() }} />
-      </If>
       <If when={shownDoc() && !readerSide() && !paneOpen()}>
         <View testID="doc-sheet" style={{ position: "absolute", top: 0, left: 0, right: 0, bottom: 0, paddingBottom: safeArea().bottom, backgroundColor: colors.background }}>{readerPane()}</View>
       </If>
@@ -5605,8 +5607,8 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
         alignItems: "center",
         gap: 6,
         paddingLeft: (wide() && sidebarOpen() ? 0 : hasWindow ? titleBar().left : 0) + (wide() ? 24 : 8),
-        // the reader or the side chat beside the chat takes the bar's right end and the window buttons with it
-        paddingRight: (docSide() ? readerWidth() : sideSide() ? sideWidth() : hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
+        // a pane beside the page is a column of its own now, so the bar keeps its own end and the window buttons
+        paddingRight: (hasWindow ? titleBar().right : 0) + (wide() ? 16 : 8),
         borderBottomWidth: 0.5,
         borderBottomColor: surfaceEdge(),
         backgroundColor: colors.background,
@@ -5703,41 +5705,56 @@ function Chat(props: { service: ExecutorControl; onlyone: OnlyOne; openRef?: str
       <If when={!wide()}>
         <View testID="drawer" pan={drawer() ? { x: drawerX } : undefined} onPanStart={() => { Keyboard.dismiss(); drawerDragging.set(true); }} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, width: drawerWidth(), paddingTop: touch ? safeArea().top : 0, visibility: drawerVisible() || drawerDragging() ? "visible" : "hidden", pointerEvents: drawer() ? "auto" : "none" }}>{sidebar(true)}</View>
       </If>
-      <View style={{ flex: 1, minWidth: 0, backgroundColor: colors.background, borderTopLeftRadius: wide() && sidebarOpen() ? 20 : 0, borderBottomLeftRadius: wide() && sidebarOpen() ? 20 : 0, borderCurve: "continuous", borderLeftWidth: !wide() && (drawer() || drawerDragging()) ? 1 : 0, borderLeftColor: colors.line, overflow: "hidden", translate: [wide() ? 0 : drawerTranslate(), 0], boxShadow: wide() && sidebarOpen() ? "-3px 0 18px rgba(0,0,0,0.08)" : undefined }}>
-      <NavStack state={nav} testID="pages" style={{ flex: 1, minWidth: 0 }}>
-        {(route, index) => (
-          <NavPage
-            testID={`page-${route.name}`}
-            // with the sidebar beside it, a page picked there replaces the view at once; only a page opened from a page slides in
-            animation={wide() && index() <= 1 ? "none" : "default"}
-            title={titleOf(route)}
-            header={systemHeader ? undefined : <Bar route={route} />}
-            headerBackTitle={backTitle(route)}
-            headerLeft={systemHeader && route === CHANNEL && !wide() ? <IconButton icon="menu" label={L("Menu", "菜单")} onPress={() => drawer.set(true)} /> : undefined}
-            ios={{ headerLeftSymbol: "sidebar.left", headerRightSymbol: "gearshape" }}
-            headerTitle={
-              // phones: a folded page's compact title replaces the system title until its head is back in sight
-              systemHeader && folded(route) ? <FoldedTitle folded={folded(route)!} stacked /> : undefined
-            }
-            // phones put both page actions in the system header: the side chat on any conversation, settings in the main chat
-            headerRight={systemHeader && (route.name === "channel" || route.name === "task") ? (
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
-                <If when={!sideShown()}><IconButton icon="chat" label={L("Side chat", "侧边聊天")} onPress={toggleSide} testID="side-toggle" /></If>
-                <If when={route === CHANNEL}><IconButton icon="sliders" label={L("Settings", "设置")} onPress={openTeam} testID="settings-top" /></If>
-              </View>
-            ) : undefined}
-            style={{ backgroundColor: colors.background }}
-          >
-            {content(route)}
-          </NavPage>
-        )}
-      </NavStack>
-      <If when={docSide()}>
-        <View testID="doc-side" style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: readerWidth(), borderLeftWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}>{readerPane()}</View>
-      </If>
-      <If when={sideSide()}>
-        <View testID="side-side" style={{ position: "absolute", top: 0, right: 0, bottom: 0, width: sideWidth(), borderLeftWidth: 0.5, borderColor: surfaceEdge(), backgroundColor: colors.background }}>{sidePane()}</View>
-      </If>
+      <View style={{ flex: 1, minWidth: 0, flexDirection: "row", backgroundColor: colors.background, borderTopLeftRadius: wide() && sidebarOpen() ? 20 : 0, borderBottomLeftRadius: wide() && sidebarOpen() ? 20 : 0, borderCurve: "continuous", borderLeftWidth: !wide() && (drawer() || drawerDragging()) ? 1 : 0, borderLeftColor: colors.line, overflow: "hidden", translate: [wide() ? 0 : drawerTranslate(), 0], boxShadow: wide() && sidebarOpen() ? "-3px 0 18px rgba(0,0,0,0.08)" : undefined }}>
+      {/* The page, and beside it the one right-hand pane (the report reader or the side chat) at the width its edge is
+          dragged to; that drag is the pane's only width control. */}
+      <ResizablePanelGroup
+        axis="horizontal"
+        style={{ flex: 1, minWidth: 0 }}
+        handleStyle={{ backgroundColor: surfaceEdge() }}
+        handleThumbClass={handleThumb}
+        handleAccessibilityLabel={L("Resize the panel", "拖动改变面板宽度")}
+        onResize={({ sizes }) => keepPaneWidth(sizes[sizes.length - 1] ?? paneWidth())}
+      >
+        <ResizablePanel style={{ minWidth: 0 }}>
+          <NavStack state={nav} testID="pages" style={{ flex: 1, minWidth: 0 }}>
+            {(route, index) => (
+              <NavPage
+                testID={`page-${route.name}`}
+                // with the sidebar beside it, a page picked there replaces the view at once; only a page opened from a page slides in
+                animation={wide() && index() <= 1 ? "none" : "default"}
+                title={titleOf(route)}
+                header={systemHeader ? undefined : <Bar route={route} />}
+                headerBackTitle={backTitle(route)}
+                headerLeft={systemHeader && route === CHANNEL && !wide() ? <IconButton icon="menu" label={L("Menu", "菜单")} onPress={() => drawer.set(true)} /> : undefined}
+                ios={{ headerLeftSymbol: "sidebar.left", headerRightSymbol: "gearshape" }}
+                headerTitle={
+                  // phones: a folded page's compact title replaces the system title until its head is back in sight
+                  systemHeader && folded(route) ? <FoldedTitle folded={folded(route)!} stacked /> : undefined
+                }
+                // phones put both page actions in the system header: the side chat on any conversation, settings in the main chat
+                headerRight={systemHeader && (route.name === "channel" || route.name === "task") ? (
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: 2 }}>
+                    <If when={!sideShown()}><IconButton icon="chat" label={L("Side chat", "侧边聊天")} onPress={toggleSide} testID="side-toggle" /></If>
+                    <If when={route === CHANNEL}><IconButton icon="sliders" label={L("Settings", "设置")} onPress={openTeam} testID="settings-top" /></If>
+                  </View>
+                ) : undefined}
+                style={{ backgroundColor: colors.background }}
+              >
+                {content(route)}
+              </NavPage>
+            )}
+          </NavStack>
+        </ResizablePanel>
+        <ResizablePanel visible={paneSide()} fixed size={paneWidth()} minSize={PANE_MIN} maxSize={paneMax()} style={{ minWidth: 0 }}>
+          <If when={docSide()}>
+            <View testID="doc-side" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>{readerPane()}</View>
+          </If>
+          <If when={sideSide()}>
+            <View testID="side-side" style={{ flex: 1, minWidth: 0, backgroundColor: colors.background }}>{sidePane()}</View>
+          </If>
+        </ResizablePanel>
+      </ResizablePanelGroup>
       <If when={!wide() && drawer()}>
         <View testID="drawer-dismiss" role="button" accessibilityLabel={L("Close sidebar", "关闭侧栏")} onPress={() => drawer.set(false)} pan={{ x: drawerX }} onPanStart={() => { Keyboard.dismiss(); drawerDragging.set(true); }} onPanEnd={finishDrawerPan} style={{ position: "absolute", top: 0, bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.08)" }} />
       </If>
