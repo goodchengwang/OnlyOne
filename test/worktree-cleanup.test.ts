@@ -18,8 +18,7 @@ const git = (cwd: string, ...args: string[]) => {
   if (p.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${p.stderr.toString()}`);
   return p.stdout.toString().trim();
 };
-const commit = (cwd: string, msg: string) =>
-  git(cwd, "-c", "user.name=OnlyOne", "-c", "user.email=onlyone@localhost", "commit", "-q", "-m", msg);
+const commit = (cwd: string, msg: string) => git(cwd, "commit", "-q", "-m", msg);
 const branchExists = (b: string) => Bun.spawnSync(["git", "-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${b}`]).exitCode === 0;
 
 /** A branch with one new file, checked out in its own worktree under the fleet's scratch space. */
@@ -41,6 +40,9 @@ beforeAll(() => {
   mkdirSync(repo, { recursive: true });
   mkdirSync(work, { recursive: true });
   git(repo, "init", "-q", "-b", "main");
+  // a CI runner has no git identity; set it in the repo so every commit and merge works there too
+  git(repo, "config", "user.name", "OnlyOne");
+  git(repo, "config", "user.email", "onlyone@localhost");
   writeFileSync(join(repo, "a.txt"), "one\n");
   git(repo, "add", "-A");
   commit(repo, "init");
