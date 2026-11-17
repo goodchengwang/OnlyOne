@@ -4,7 +4,7 @@
 // Everything here is local git; it adds no Worker requests or rows (see AGENTS.md, Cloudflare budget).
 import { existsSync, mkdirSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { HOME_DIR, L, P, list, readDoc, type Cfg } from "./core";
 import { openPr, prForBranch } from "./github";
 
@@ -188,4 +188,81 @@ export function liveWorktrees(tasksDir = P("tasks"), excludeId?: string): LiveWo
         ...((meta.claimed_by || meta.host) && meta.host !== "any" ? { host: meta.claimed_by || meta.host } : {}) });
     }
   return out.sort((a, b) => a.id.localeCompare(b.id));
+}
+
+// ---------------------------------------------------------------- merged-work cleanup (D-0041 A)
+// The owner asked for this on 2026-11-17: a finished task's branch and checkout should not need a pr-triage run to
+// notice them. The rules are deliberately narrower than "looks merged" — see the comment on cleanupMergedWorktrees.
+
+/** Is everything the branch changed already in `base`? A squash merge leaves a different commit, so an ancestor test
+ *  alone would keep those branches forever; compare instead the files the branch touched against the base's version. */
+export function fullyInBase(repo: string, branch: string, base: string): boolean {
+  if (!branch || !base || branch === base) return false;
+  if (git(repo, ["merge-base", "--is-ancestor", branch, base]).ok) return true; // plain merge, or built straight on base
+  const mb = git(repo, ["merge-base", base, branch]);
+  if (!mb.ok || !mb.out) return false;
+  const changed = git(repo, ["diff", "--name-only", "-z", mb.out, branch]);
+  if (!changed.ok) return false;
+  const files = changed.out.split("\0").filter(Boolean);
+  if (!files.length) return true; // the branch never changed anything
+  // every file the branch touched must now hold the same content in the base branch (covers squashed merges)
+  return git(repo, ["diff", "--quiet", branch, base, "--", ...files]).ok;
+}
+
+export type CleanedWorktree = { id: string; branch?: string; worktree?: string; branchRemoved: boolean; worktreeRemoved: boolean };
+export type CleanupResult = { removed: CleanedWorktree[]; kept: { id: string; why: string }[] };
+
+/**
+ * Remove the branch and checkout of tasks that are finished (done/failed) AND whose work is fully in their base branch.
+ * Hard conditions, all of which must hold — anything else is reported in `kept`, never deleted:
+ *   - the task is in tasks/done or tasks/failed (a live task's checkout is never touched: T-0036 lost work to a sweep),
+ *   - no queued/running/waiting/blocked task still holds that branch or checkout,
+ *   - the checkout is inside ~/.onlyone/work (never delete anything elsewhere),
+ *   - the checkout has no uncommitted changes,
+ *   - the branch is fully in the base branch (squash merges included).
+ */
+export function cleanupMergedWorktrees(o: { tasksDir?: string; workRoot?: string; only?: string[]; dry?: boolean } = {}): CleanupResult {
+  const tasksDir = o.tasksDir ?? P("tasks");
+  const workRoot = resolve((o.workRoot ?? join(HOME_DIR, "work")).replace(/^~/, homedir()));
+  const inside = (p: string) => p === workRoot || p.startsWith(workRoot + sep);
+  const live = liveWorktrees(tasksDir);
+  const liveBranches = new Set(live.map((t) => t.branch).filter(Boolean));
+  const liveTrees = new Set(live.map((t) => (t.worktree ? resolve(t.worktree.replace(/^~/, homedir())) : "")).filter(Boolean));
+  const res: CleanupResult = { removed: [], kept: [] };
+  for (const folder of ["done", "failed"] as const)
+    for (const file of list(join(tasksDir, folder), /^T-.*\.md$/)) {
+      const { meta } = readDoc(file);
+      const id = meta.id || basename(file, ".md");
+      if (o.only && !o.only.includes(id)) continue;
+      if (!meta.branch && !meta.worktree) continue;
+      const treePath = meta.worktree ? resolve(meta.worktree.replace(/^~/, homedir())) : "";
+      if (liveBranches.has(meta.branch) || (treePath && liveTrees.has(treePath))) { res.kept.push({ id, why: "a live task still holds it" }); continue; }
+      if (treePath && !inside(treePath)) { res.kept.push({ id, why: `checkout ${meta.worktree} is outside ${workRoot}` }); continue; }
+      const repo = gitRepo(meta.repo);
+      if (!repo) { res.kept.push({ id, why: "repo not found" }); continue; }
+      const base = meta.base_branch || repo.base;
+      const branch = meta.branch && meta.branch !== repo.base ? meta.branch : "";
+      const hasBranch = !!branch && git(repo.root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]).ok;
+      const treeExists = !!treePath && existsSync(treePath);
+      if (!hasBranch && !treeExists) continue; // nothing left to delete
+      if (hasBranch && !fullyInBase(repo.root, branch, base)) { res.kept.push({ id, why: `branch ${branch} is not fully in ${base}` }); continue; }
+      if (treeExists) {
+        const dirty = git(treePath, ["status", "--porcelain"]);
+        if (!dirty.ok || dirty.out) { res.kept.push({ id, why: "checkout has uncommitted changes" }); continue; }
+      }
+      const rec: CleanedWorktree = { id, ...(branch ? { branch } : {}), ...(treePath ? { worktree: treePath } : {}), branchRemoved: false, worktreeRemoved: false };
+      if (o.dry) { res.removed.push(rec); continue; }
+      if (treeExists) {
+        const rm = git(repo.root, ["worktree", "remove", treePath]);
+        if (!rm.ok) { res.kept.push({ id, why: `worktree remove failed: ${(rm.err || rm.out).split("\n")[0]}` }); continue; }
+        rec.worktreeRemoved = true;
+      }
+      if (hasBranch) {
+        const del = git(repo.root, ["branch", "-D", branch]);
+        if (!del.ok) { res.kept.push({ id, why: `branch -D failed: ${(del.err || del.out).split("\n")[0]}` }); continue; }
+        rec.branchRemoved = true;
+      }
+      res.removed.push(rec);
+    }
+  return res;
 }
