@@ -475,15 +475,14 @@ describe("channel", () => {
     expect(app.shows("id:task-chip-T-0005 >> nth=2")).toBe(false);
   });
 
-  test("a decision or proposal id in a message is a chip with a name, not a bare group", async () => {
+  test("a decision or proposal id in a message is the text's own run, not a view placed in it", async () => {
     const extra = [{ id: "e31", ts: ts(41), from: "dev@linux-box", kind: "notice", text: "按 D-0015 选 A 开好 PR，P-0002 也一样" }];
     const app = await open("./App.tsx", { storage: STORAGE, network: onlyone([], extra), width: 1200, height: 800, platform: "macos" });
     await app.waitFor("text:/开好 PR/");
-    // The ids are inline custom views: without a name VoiceOver reads an unnamed group where the sentence names a
-    // decision. The chip's own text stays there too, since that is what the eye reads (D-0015 was a blank there).
-    expect(app.shows("label:Decision D-0015")).toBe(true);
-    expect(app.shows("label:Proposal P-0002")).toBe(true);
-    expect(app.shows("text:D-0015")).toBe(true);
+    // The ids are runs of the sentence itself (inline code): the text draws them with the rest of the line, so they
+    // cannot be a blank the width of the id the way a view placed in the text could (D-0015 in a task page).
+    expect(app.shows("text:/按 D-0015 选 A 开好 PR，P-0002 也一样/")).toBe(true);
+    expect(app.shows("label:Decision D-0015")).toBe(false);
   });
 
   test("a task page is its conversation: what was said about it, and a box that adds to it", async () => {

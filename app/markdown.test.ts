@@ -1,5 +1,5 @@
 import { expect, test } from "nsh/test";
-import { onlyoneMarkdown } from "./markdown";
+import { inlineItems, onlyoneMarkdown } from "./markdown";
 
 const TABLE = "| a | b |\n|---|---|\n| 1 | 2 |";
 
@@ -43,4 +43,22 @@ test("a setext heading keeps plain newlines too", () => {
 
 test("a table in a code fence is left alone", () => {
   expect(onlyoneMarkdown(`\`\`\`\n${TABLE}\n\`\`\``)).toBe(`\`\`\`\n${TABLE}\n\`\`\``);
+});
+
+test("a decision or proposal id is the text's own run, so it cannot be a blank", () => {
+  expect(inlineItems("按 D-0015 选 A 开好 PR，P-0002 也一样")).toBe("按 `D-0015` 选 A 开好 PR，`P-0002` 也一样");
+  // ids minted on a non-primary host carry its letter
+  expect(inlineItems("看 D-H0002")).toBe("看 `D-H0002`");
+  // at the edges of the text, and without a space before it
+  expect(inlineItems("D-0015 起")).toBe("`D-0015` 起");
+  expect(inlineItems("按下D-0015")).toBe("按下`D-0015`");
+});
+
+test("an id inside code, a link or a path stays as written", () => {
+  expect(inlineItems("`D-0015`")).toBe("`D-0015`");
+  expect(inlineItems("```\nD-0015\n```")).toBe("```\nD-0015\n```");
+  expect(inlineItems("[卡片](https://x.test/D-0015)")).toBe("[卡片](https://x.test/D-0015)");
+  expect(inlineItems("tasks/done/D-0015.md 和 D-0015/notes")).toBe("tasks/done/D-0015.md 和 D-0015/notes");
+  // a word that ends in one is no id
+  expect(inlineItems("SAD-0015")).toBe("SAD-0015");
 });

@@ -28,6 +28,19 @@ function tableNewlines(text: string): Set<number> {
   return keep;
 }
 
+/**
+ * A decision or proposal id ("D-0015", "P-0002") is inline code: a run of the text itself, which the text draws with
+ * the rest of the line. As a view placed in the text (what it was) the runtime gives it its width but paints nothing
+ * when the placement does not land, and the id reads as a blank that wide (D-0015 in a task page). Inside code, a
+ * link's target or a path ("tasks/done/D-0015.md") an id stays as written.
+ */
+export function inlineItems(text: string): string {
+  return text
+    .split(/(```[\s\S]*?```|`[^`\n]*`|\]\([^)\n]*\))/)
+    .map((part, i) => (i % 2 ? part : part.replace(/(?<![\w/])([DP]-[A-Z]?\d{4})(?![.\w/])/g, "`$1`")))
+    .join("");
+}
+
 /** OnlyOne text keeps its line breaks: single newlines become hard breaks, outside code fences, tables and headings. */
 export function onlyoneMarkdown(text: string): string {
   return text
