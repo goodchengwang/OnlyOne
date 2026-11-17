@@ -43,3 +43,31 @@ export async function githubStarved(cfg: Cfg): Promise<{ starved: boolean; note:
       + `(gh pr list/view/diff/checks, gh issue list/view, gh search, gh run list/view); \`gh api\` only for graphql or one notifications call.`,
   };
 }
+
+/** The owner's login from the repo's origin URL (github.com/<login>/<repo>), so signed text names the real account. */
+export function repoOwner(repo: string): string {
+  if (!Bun.which("git")) return "";
+  const p = Bun.spawnSync(["git", "-C", repo, "remote", "get-url", "origin"], { stdout: "pipe", stderr: "ignore" });
+  return /github\.com[:/]([^/]+)\//.exec(p.stdout.toString().trim())?.[1] ?? "";
+}
+
+/** The PR that already carries this branch, in any state: a finished task must not open a second one. */
+export function prForBranch(repo: string, branch: string): { url: string; state: string } | null {
+  if (!Bun.which("gh") || !branch) return null;
+  const p = Bun.spawnSync(["gh", "pr", "list", "--head", branch, "--state", "all", "--limit", "1", "--json", "url,state"],
+    { cwd: repo, stdout: "pipe", stderr: "ignore" });
+  if (p.exitCode !== 0) return null;
+  try { return (JSON.parse(p.stdout.toString()) as { url: string; state: string }[])[0] ?? null; } catch { return null; }
+}
+
+/** Open a PR for a pushed branch. Merging stays behind a card; opening one does not (policies/autonomy.md). */
+export function openPr(o: { repo: string; branch: string; base: string; title: string; body: string; agent: string }): { url?: string; error?: string } {
+  if (!Bun.which("gh")) return { error: "gh is not installed" };
+  const owner = repoOwner(o.repo);
+  const body = `${o.body}\n\n---\nTask · ${o.title} · branch \`${o.branch}\`\n\n🤖 OnlyOne (${o.agent}) · AI agent acting for @${owner || "the owner"}\n`;
+  const p = Bun.spawnSync(["gh", "pr", "create", "--head", o.branch, "--base", o.base, "--title", o.title, "--body", body],
+    { cwd: o.repo, stdout: "pipe", stderr: "pipe" });
+  const out = p.stdout.toString().trim();
+  if (p.exitCode === 0) return { url: out.split("\n").filter(Boolean).pop() ?? "" };
+  return { error: (p.stderr.toString().trim() || out).split("\n").filter(Boolean).slice(-2).join(" ").slice(0, 300) };
+}

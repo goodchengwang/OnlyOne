@@ -14,7 +14,7 @@ import { amendDecision, closeDecision, IGNORE, ignoreDecision, openDecision, ove
 import { notify, openDecisionIds, pollReplies } from "./notify";
 import { STALLED, agentProcs, ask, buildPrompt, parseResult, quickAsk, runAgent } from "./runner";
 import { traceFromLog, writeTrace } from "./runlog";
-import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, pushBranch, type WorkInfo, type Worktree } from "./worktree";
+import { commitWorktree, decideWorktree, ensureWorktree, gitRepo, headSha, prForWorktree, pushBranch, type WorkInfo, type Worktree } from "./worktree";
 import { writeRules } from "./rules";
 import { backoffMinutes, CHECKED_FALLBACK_MIN, HUMAN_WAIT_MAX_HOURS, humanWaitExpired, isNoChangeRoutine, tooManyWakes, waitMeta } from "./waits";
 import { allowedParallel, budget, canRunHeavy, ensureDisk, sample } from "./resources";
@@ -317,10 +317,24 @@ async function processTask(path: string, cfg: Cfg, host: string) {
       ? L(`⬆️ ${meta.id} pushed ${meta.pushed} (${meta.branch ?? ""})`, `⬆️ ${meta.id} 已推送 ${meta.pushed}（${meta.branch ?? ""}）`)
       : L(`⚠️ ${meta.id} push failed (${meta.branch ?? ""}): ${meta.push_error}`, `⚠️ ${meta.id} 推送失败（${meta.branch ?? ""}）：${meta.push_error}`));
   }
+  // A finished worktree task's fresh commit goes straight to a PR: the owner answered "open a PR" to all 15 of these
+  // cards on 2026-11-16 (D-0013…D-0038, several of them held for 20-48 minutes), and opening a PR is already inside
+  // "do without asking". A card is only raised for what the machine could not do itself: push it, or open the PR.
+  const delegated = res.status === "delegated" && (res.followups?.length ?? 0) > 0;
+  const latest = existsSync(path) ? readDoc(path).body : body;
+  const added = latest.length > body.length && latest.startsWith(body) ? latest.slice(body.length) : "";
+  const ownerAdded = added.includes(FOLLOW_UP) && !delegated;
+  const freshCommit = res.status === "done" && !!tree && !!work?.commits && work.sha !== meta.worktree_asked_commit;
+  let wtPr = "";
+  let wtAsk = "";
+  if (freshCommit && !ownerAdded) { // a run that is about to be redone with the owner's additions is not ready for a PR
+    const r = prForWorktree(tree!, { title: meta.title, agent, body: res.summary, pushed: work!.pushed, pushError: work!.push_error });
+    if ("pr" in r) { wtPr = r.pr; journal(host, `${r.created ? "🔀" : "🔗"} ${meta.id} PR ${r.pr} · ${tree!.branch}`); }
+    else if ("ask" in r) wtAsk = r.ask;
+  }
   const depth = Number(meta.depth ?? 0) + 1;
   const maxDepth = cfg.fleet?.max_followup_depth ?? 4;
   const ownerWork = meta.origin === "owner" || /^owner/.test(meta.source ?? "") || ownerPickedMenu(meta);
-  const delegated = res.status === "delegated" && (res.followups?.length ?? 0) > 0;
   const children: string[] = [];
   const chans = [...new Set([...(meta.channels ?? "").split(",").filter(Boolean), ...resolveChannels(res.channels)])].join(",") || undefined;
   for (const f of (res.followups ?? []).slice(0, depth > maxDepth ? 0 : 8)) {
@@ -331,18 +345,17 @@ async function processTask(path: string, cfg: Cfg, host: string) {
   }
   const prUrl = (res.summary.match(/https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/\d+/) ?? [])[0];
   const done = { ...meta, channels: chans, cli_used: cli, finished: now(), status: res.status, gate_override: undefined, requeue_note: undefined, stalls: undefined,
-    ...(prUrl ? { pr: prUrl } : {}) };
+    ...(wtPr || prUrl ? { pr: wtPr || prUrl } : {}) };
   const pushLine = work ? (work.pushed ? `\n**Pushed:** ${work.pushed}` : work.push_error ? `\n**Push failed:** ${work.push_error}` : "")
     : meta.pushed ? `\n**Pushed:** ${meta.pushed}` : meta.push_error ? `\n**Push failed:** ${meta.push_error}` : "";
+  const prLine = wtPr ? `\n**PR:** ${wtPr}` : "";
   const workLine = (tree && work
     ? `\n**Worktree:** \`${tree.branch}\` (base \`${tree.base}\`) at \`${tree.path}\`${work.sha ? ` · commit ${work.sha}` : ""}${work.diff ? ` · ${work.diff}` : ""}${work.error ? `\n**Commit failed:** ${work.error}` : ""}\n`
-    : "") + pushLine + (pushLine ? "\n" : "");
+    : "") + pushLine + prLine + (pushLine || prLine ? "\n" : "");
   const runNote = `\n\n## Run ${runAt} · ${host} · ${cli}\n**${res.status}** — ${res.summary}\n${workLine}`;
   // the owner added to the request while it ran: run again with the additions instead of reporting a stale result
-  const latest = existsSync(path) ? readDoc(path).body : body;
-  const added = latest.length > body.length && latest.startsWith(body) ? latest.slice(body.length) : "";
   if (existsSync(path)) unlinkSync(path);
-  if (added.includes(FOLLOW_UP) && !delegated) {
+  if (ownerAdded) {
     writeDoc(P("tasks", "inbox", `${meta.id}.md`), { ...meta, claimed_by: undefined }, body + runNote + added +
       "\nThe owner added the follow-up above while you were working: handle the whole request including it.\n");
     journal(host, `↻ ${meta.id} rerun with the owner's follow-up`);
@@ -366,23 +379,22 @@ async function processTask(path: string, cfg: Cfg, host: string) {
     writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...done, decision: did }, body + runNote);
     journal(host, `⏸ ${meta.id} → ${did}: ${res.question}`);
     pendingRoute.push(did);
-  } else if (res.status === "done" && tree && work?.commits && work.sha !== meta.worktree_asked_commit) {
-    // The work sits committed on its own branch: keep iterating there or turn it into a PR? The owner decides.
-    // Asked once per commit, so answering does not raise the same card again.
-    const commit = work.sha ?? "";
-    const sent = work.pushed ? L(` · pushed ${work.pushed}`, ` · 已推送 ${work.pushed}`) : work.push_error ? L(` · push failed: ${work.push_error}`, ` · 推送失败：${work.push_error}`) : "";
+  } else if (freshCommit && wtAsk) {
+    // Committed, but the machine could not deliver it (no push, or gh could not open the PR): this one is the owner's.
+    const commit = work!.sha ?? "";
+    const sent = work!.pushed ? L(` · pushed ${work!.pushed}`, ` · 已推送 ${work!.pushed}`) : work!.push_error ? L(` · push failed: ${work!.push_error}`, ` · 推送失败：${work!.push_error}`) : "";
     const did = openDecision({ ...meta, kind: "worktree" }, {
       status: "needs_decision",
-      summary: `${res.summary}${work.error ? `\n\nCommit failed: ${work.error}` : ""}\n\n🌿 ${tree.branch} · ${commit}${work.diff ? ` · ${work.diff}` : ""}${sent}`,
-      question: L(`改动已提交到 ${tree.branch}，接下来怎么做？`, `Committed on ${tree.branch}. What next?`),
+      summary: `${res.summary}${work!.error ? `\n\nCommit failed: ${work!.error}` : ""}\n\n🌿 ${tree!.branch} · ${commit}${work!.diff ? ` · ${work!.diff}` : ""}${sent}\n\n${wtAsk}`,
+      question: L(`改动在 ${tree!.branch} 上，但没能自动开 PR（${wtAsk}）。怎么办？`, `The work is on ${tree!.branch}, but the PR could not be opened (${wtAsk}). What now?`),
       options: [
-        L(`A: 提 PR 到 ${tree.base} — 分支已推送，直接开 PR，不合并`, `A: Open a PR to ${tree.base} — the branch is already pushed, open a PR, do not merge`),
+        L(`A: 你来开 PR 到 ${tree!.base} — 分支已经在了，之后交给 pr-triage`, `A: Open the PR to ${tree!.base} yourself — the branch is there; pr-triage takes it from there`),
         L(`B: 继续在这个 worktree 上修改 — 分支和目录都保留，之后在任务里继续说就行`, `B: Keep working in this worktree — the branch and checkout stay; continue by messaging this task`),
       ],
       recommendation: "A",
     }, host);
     writeDoc(P("tasks", "blocked", `${meta.id}.md`), { ...done, status: "needs_decision", decision: did, worktree_asked_commit: commit }, body + runNote);
-    journal(host, `⏸ ${meta.id} worktree ${tree.branch} → ${did}: keep iterating or open a PR`);
+    journal(host, `⏸ ${meta.id} worktree ${tree!.branch} → ${did}: the branch could not be turned into a PR`);
     pendingRoute.push(did);
   } else {
     const folder = res.status === "done" ? "done" : "failed";
@@ -730,11 +742,15 @@ export function maybeProposeNext(cfg: Cfg, host: string, state: Record<string, s
     && Date.now() - Date.parse(m.created) < HUMAN_WAIT_MAX_HOURS * 3_600_000);
   if (liveProposals) return;
   if (state.last_menu && Date.now() - Date.parse(state.last_menu) < 15 * 60_000) return;
-  const id = newTask("Propose next actions (fleet idle)", `The fleet has been idle for ${Math.round(idleMin)} minutes.
-Build the owner's next-action menu per your profile and return needs_decision.`,
+  // The menu form is dead: the owner answered "都不要" to seven menus and "忽略" to one (D-0001…D-0012), and every idle
+  // run since (T-0021…T-0028, T-0040 on 2026-11-16) ignored "build the menu" and did machine-side work instead. Ask for
+  // that directly — one finished thing, one line — and keep a card for what actually needs him.
+  const id = newTask("Fleet idle: do one useful thing", `The fleet has been idle for ${Math.round(idleMin)} minutes.
+Do ONE machine-side thing you can finish in this run — verify or fix something you have evidence for, or refresh the fleet's own memory — then report one line.
+Do not build a next-steps menu: the owner has rejected every one (D-0001…D-0012). Ask only if the step needs his permission or a real design choice: one question, recommendation first, one consequence per option.`,
     { agent: "chief-of-staff", priority: "high", source: "idle", extra: { kind: "menu" } });
   state.last_menu = new Date().toISOString();
-  journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff drafting a next-steps menu`);
+  journal(host, `💤 fleet idle ${Math.round(idleMin)}m → ${id} chief-of-staff: one machine-side thing`);
 }
 
 /** This machine's copies of images (served media, downloaded attachments) go after `media_days`, checked hourly. */
