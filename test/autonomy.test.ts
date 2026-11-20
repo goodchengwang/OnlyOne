@@ -33,29 +33,45 @@ test("open batch with stale tasks is closed and rebuilt (no deadlock)", async ()
   await A.proposeBatch(cfg, "pc");
   expect(sent.length).toBe(1);
 
-  // T-0001 moved away, T-0003 is new; but the batch was just sent → throttled
+  // T-0001 moved away, T-0003 is new; the batch was just sent → the same card shows the current items, no new ping
   rmSync(P("tasks", "proposed", "T-0001.md"));
   task("proposed", "T-0003", "followup:T-0002");
   await A.proposeBatch(cfg, "pc");
   expect(files("decisions", "open")).toEqual(["P-0001.md"]);
+  expect(readDoc(P("decisions", "open", "P-0001.md")).meta.items).toBe("T-0002,T-0003");
+  expect(sent.length).toBe(1);
 
-  // hours later → closed and replaced by a fresh batch
+  // hours later a new proposal arrives → closed and replaced by a fresh, notifying batch
   const f = P("decisions", "open", "P-0001.md");
   const { meta, body } = readDoc(f);
   writeDoc(f, { ...meta, created: ago(300), notified: ago(300) }, body);
+  task("proposed", "T-0004", "followup:T-0002");
   await A.proposeBatch(cfg, "pc");
   expect(files("decisions", "closed")).toEqual(["P-0001.md"]);
   expect(files("decisions", "open")).toEqual(["P-0002.md"]);
-  expect(readDoc(P("decisions", "open", "P-0002.md")).meta.items).toBe("T-0002,T-0003");
+  expect(readDoc(P("decisions", "open", "P-0002.md")).meta.items).toBe("T-0002,T-0003,T-0004");
   expect(sent.length).toBe(2);
 });
 
-test("open batch whose tasks are all gone is closed right away", async () => {
+test("open batch whose tasks are all gone and nothing replaces them is closed", async () => {
   writeDoc(P("decisions", "open", "P-0001.md"), { id: "P-0001", kind: "proposals", created: ago(1), items: "T-0009" }, "x");
-  task("proposed", "T-0010", "routine:pr-review", ago(1));
   await A.proposeBatch(cfg, "pc");
   expect(files("decisions", "closed")).toEqual(["P-0001.md"]);
-  expect(files("decisions", "open")).toEqual(["P-0002.md"]);
+  expect(files("decisions", "open")).toEqual([]);
+});
+
+test("an unanswered card keeps its id when a routine's next run replaces the listed copy (one live card)", async () => {
+  task("proposed", "T-0001", "routine:pr-review");
+  await A.proposeBatch(cfg, "pc");
+  expect(files("decisions", "open")).toEqual(["P-0001.md"]);
+  // the next run of the same routine supersedes its unapproved copy — the card must not come back as P-0002
+  task("proposed", "T-0002", "routine:pr-review");
+  expect(A.supersedeProposed("pr-review", "T-0002")).toEqual(["T-0001"]);
+  await A.proposeBatch(cfg, "pc");
+  expect(files("decisions", "closed")).toEqual([]);
+  expect(files("decisions", "open")).toEqual(["P-0001.md"]);
+  expect(readDoc(P("decisions", "open", "P-0001.md")).meta.items).toBe("T-0002");
+  expect(sent.length).toBe(1);
 });
 
 test("routine dedupe: newer run supersedes proposed copy, queued copy blocks", () => {
@@ -111,12 +127,16 @@ test("a routine stuck behind a copy no host can run for 30+ minutes notifies the
   expect(sent.length).toBe(2);
 });
 
-test("read-only routines skip approval at onboarding; others and followups stay gated", () => {
-  expect(A.needsApproval(cfg, "routine:uptime-watch")).toBe(false);
-  expect(A.needsApproval(cfg, "routine:pr-review")).toBe(true);
+test("a routine that is switched on runs without approval at onboarding; gated work stays gated", () => {
+  // D-0049: turning a routine on IS the approval; every run asks again was the bug (P-0005…P-0009, T-0056/T-0059)
+  expect(A.needsApproval(cfg, "routine:pr-review")).toBe(false);
+  expect(A.needsApproval(cfg, "routine:uptime-watch")).toBe(false); // read-only, and on
+  expect(A.needsApproval({ ...cfg, routine: [{ name: "pr-review", enabled: false }] }, "routine:pr-review")).toBe(true);
+  expect(A.needsApproval(cfg, "routine:unknown-thing")).toBe(true); // no such routine: must not slip through
   expect(A.needsApproval(cfg, "followup:T-0001")).toBe(true);
-  expect(A.needsApproval({ ...cfg, autonomy: { level: "onboarding", auto_routines: ["pr-review"] } }, "routine:pr-review")).toBe(false);
+  expect(A.needsApproval({ ...cfg, autonomy: { level: "onboarding", auto_routines: ["legacy-watch"] } }, "routine:legacy-watch")).toBe(false);
   expect(A.needsApproval(cfg, "routine:daily-report")).toBe(false); // housekeeping unchanged
+  expect(A.needsApproval(cfg, "idle")).toBe(false);
 });
 
 test("ids: non-primary hosts are tagged, primary skips ids taken in any state", () => {
