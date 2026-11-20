@@ -127,12 +127,16 @@ test("a routine stuck behind a copy no host can run for 30+ minutes notifies the
   expect(sent.length).toBe(2);
 });
 
-test("read-only routines skip approval at onboarding; others and followups stay gated", () => {
-  expect(A.needsApproval(cfg, "routine:uptime-watch")).toBe(false);
-  expect(A.needsApproval(cfg, "routine:pr-review")).toBe(true);
+test("a routine that is switched on runs without approval at onboarding; gated work stays gated", () => {
+  // D-0049: turning a routine on IS the approval; every run asks again was the bug (P-0005…P-0009, T-0056/T-0059)
+  expect(A.needsApproval(cfg, "routine:pr-review")).toBe(false);
+  expect(A.needsApproval(cfg, "routine:uptime-watch")).toBe(false); // read-only, and on
+  expect(A.needsApproval({ ...cfg, routine: [{ name: "pr-review", enabled: false }] }, "routine:pr-review")).toBe(true);
+  expect(A.needsApproval(cfg, "routine:unknown-thing")).toBe(true); // no such routine: must not slip through
   expect(A.needsApproval(cfg, "followup:T-0001")).toBe(true);
-  expect(A.needsApproval({ ...cfg, autonomy: { level: "onboarding", auto_routines: ["pr-review"] } }, "routine:pr-review")).toBe(false);
+  expect(A.needsApproval({ ...cfg, autonomy: { level: "onboarding", auto_routines: ["legacy-watch"] } }, "routine:legacy-watch")).toBe(false);
   expect(A.needsApproval(cfg, "routine:daily-report")).toBe(false); // housekeeping unchanged
+  expect(A.needsApproval(cfg, "idle")).toBe(false);
 });
 
 test("ids: non-primary hosts are tagged, primary skips ids taken in any state", () => {

@@ -15,10 +15,16 @@ export function needsApproval(cfg: Cfg, source: string): boolean {
   const l = level(cfg);
   if (l === "autonomous") return false;
   if (l === "assisted") return /^followup/.test(source) && cfg.autonomy?.assisted_approve_followups === true;
-  // read-only routines ([[routine]] readonly = true, or [autonomy] auto_routines) only observe; whatever they
-  // want changed comes back as followups, which are still gated
+  // A routine that is switched on is the owner's standing authorization: he created it (or accepted the built-in),
+  // chose the interval and can turn it off. Asking before every run is a per-round approval of a decision he already
+  // made (P-0005…P-0009 were five such cards in one day; T-0056/T-0059 waited on two more). What still asks are the
+  // actions inside a run — merge, release, config, delete — which raise their own cards.
+  // [autonomy] auto_routines covers names no config declares; read-only ones never change anything either.
   const rn = source.match(/^routine:(.+)$/)?.[1];
-  if (rn && ((cfg.autonomy?.auto_routines ?? []).includes(rn) || (cfg.routine ?? []).some((r: any) => r.name === rn && r.readonly === true))) return false;
+  if (rn) {
+    const r = (cfg.routine ?? []).find((x: any) => x.name === rn);
+    if (r ? r.enabled !== false : (cfg.autonomy?.auto_routines ?? []).includes(rn)) return false;
+  }
   // onboarding: everything self-generated, except the onlyone's own housekeeping
   return !/^idle|^routine:(evolve|triage-inbound|daily-report|learn)/.test(source);
 }
