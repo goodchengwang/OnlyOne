@@ -25,11 +25,14 @@ export function computeMetrics(days = 7) {
     const med = v.minutes.sort((a, b) => a - b)[Math.floor(v.minutes.length / 2)] ?? 0;
     return [k, { runs: n, success: +(v.done / (n || 1)).toFixed(2), failed: v.failed, blocked: v.blocked, median_minutes: Math.round(med) }];
   }));
+  // both counts are all-time, not windowed: `proposal_batches` is how many approval batches were ever closed, and
+  // `rejected_tasks` is every task file in tasks/rejected — a rejected proposal is one task the owner declined, not a
+  // rejected batch (the old name `proposals_rejected_total` read as the latter and misled a metrics review).
   const approvals = list(P("decisions", "closed")).map((p) => readDoc(p).meta).filter((m) => m.kind === "proposals");
-  const rejected = list(P("tasks", "rejected"), /^T-.*\.md$/).length;
+  const rejectedTasks = list(P("tasks", "rejected"), /^T-.*\.md$/).length;
   const out = {
     shadow_judge: judgeAccuracy(),
-    shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])), proposal_batches: approvals.length, proposals_rejected_total: rejected,
+    shadow_judge_by_agent: Object.fromEntries(Object.keys(per).map((a) => [a, judgeAccuracy(a)])), proposal_batches: approvals.length, rejected_tasks: rejectedTasks,
     window_days: days, generated: new Date().toISOString(), agents,
     decisions: { total: decisions.length, by_judge: byWho(/^judge/), by_owner: byWho(/^owner\(/),
       // what this counts is the owner answering against the fleet's recommendation — not against the judge, which
